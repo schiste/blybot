@@ -12,12 +12,13 @@ from typing import Any, Final
 
 import httpx
 
-from blybot.domain.models import RepoSummary
+from blybot.domain.models import EventKind, RepoEvent, RepoSummary
 from blybot.domain.ports import IssueTrackerError
 
 _API: Final = "https://api.github.com"
 _OK: Final = 200
 _CREATED: Final = 201
+_NOT_MODIFIED: Final = 304
 _RECENT: Final = 3
 
 
@@ -86,6 +87,43 @@ class GitHubRepoGateway:
             recent_titles=tuple(str(item["title"]) for item in issues_response.json()[:_RECENT]),
         )
 
+    async def events_since(
+        self, repo: str, token: str, cursor: str | None
+    ) -> tuple[list[RepoEvent], str]:
+        """Return events newer than ``cursor`` plus the advanced cursor.
+
+        The cursor is ``"<etag>|<last event id>"``: the ETag makes
+        steady-state polls free (304), the id watermark prevents
+        re-announcing events already delivered. A ``None`` cursor
+        baselines at the current head without replaying history.
+        """
+        etag, last_id = _split_cursor(cursor)
+        headers = _auth(token)
+        if etag:
+            headers["If-None-Match"] = etag
+        try:
+            response = await self._client.get(
+                f"{_API}/repos/{repo}/events",
+                headers=headers,
+                params={"per_page": 30},
+            )
+        except httpx.HTTPError as error:
+            msg = "could not reach GitHub"
+            raise IssueTrackerError(msg) from error
+        if response.status_code == _NOT_MODIFIED:
+            return [], cursor or ""
+        if response.status_code != _OK:
+            msg = f"event poll failed: HTTP {response.status_code}"
+            raise IssueTrackerError(msg)
+        raw_events = response.json()
+        new_etag = response.headers.get("ETag", "")
+        newest_id = max((int(item["id"]) for item in raw_events), default=last_id)
+        if cursor is None:  # baseline: never replay history
+            return [], _join_cursor(new_etag, newest_id)
+        fresh = [item for item in raw_events if int(item["id"]) > last_id]
+        events = [event for item in reversed(fresh) if (event := _reduce(item)) is not None]
+        return events, _join_cursor(new_etag, newest_id)
+
     async def aclose(self) -> None:
         """Release the underlying HTTP client."""
         await self._client.aclose()
@@ -93,3 +131,44 @@ class GitHubRepoGateway:
 
 def _auth(token: str) -> dict[str, Any]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def _split_cursor(cursor: str | None) -> tuple[str, int]:
+    if not cursor or "|" not in cursor:
+        return "", 0
+    etag, _, last_id = cursor.rpartition("|")
+    return etag, int(last_id or 0)
+
+
+def _join_cursor(etag: str, last_id: int) -> str:
+    return f"{etag}|{last_id}"
+
+
+def _reduce(item: dict[str, Any]) -> RepoEvent | None:
+    """Map a raw GitHub event to a publishable RepoEvent, or None."""
+    kind = item.get("type")
+    payload = item.get("payload", {})
+    if kind == "ReleaseEvent" and payload.get("action") == "published":
+        release = payload.get("release", {})
+        return RepoEvent(
+            kind=EventKind.RELEASES,
+            title=f"Release {release.get('name') or release.get('tag_name', '?')}",
+            url=str(release.get("html_url", "")),
+        )
+    if kind == "PullRequestEvent" and payload.get("action") == "closed":
+        pull = payload.get("pull_request", {})
+        if not pull.get("merged"):
+            return None
+        return RepoEvent(
+            kind=EventKind.PRS,
+            title=f"Merged: {pull.get('title', '?')}",
+            url=str(pull.get("html_url", "")),
+        )
+    if kind == "IssuesEvent" and payload.get("action") == "opened":
+        issue = payload.get("issue", {})
+        return RepoEvent(
+            kind=EventKind.ISSUES,
+            title=f"New issue: {issue.get('title', '?')}",
+            url=str(issue.get("html_url", "")),
+        )
+    return None

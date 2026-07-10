@@ -64,6 +64,15 @@ class GroupProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class RepoEvent:
+    """One repository happening, already reduced to publishable facts."""
+
+    kind: EventKind
+    title: str
+    url: str
+
+
+@dataclass(frozen=True, slots=True)
 class RepoSummary:
     """A glance at a bound repository for the group's /repo command."""
 

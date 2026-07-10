@@ -122,6 +122,10 @@ class ChannelDirectory:
         """Bind the chat to a GitHub repository (``owner/name``)."""
         await self._update(chat_id, repo=repo)
 
+    async def set_events(self, chat_id: int, *, enabled: bool, kinds: frozenset[EventKind]) -> None:
+        """Configure the chat's repository-event notifications."""
+        await self._update(chat_id, events_enabled=enabled, event_kinds=kinds)
+
     async def reset(self, chat_id: int) -> None:
         """Forget the chat's profile entirely (token and cursor included)."""
         store = self._require_store()

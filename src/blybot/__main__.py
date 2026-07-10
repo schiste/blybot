@@ -25,6 +25,7 @@ from blybot.observability import Counters, configure_logging
 from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
 from blybot.services.feedback import FeedbackService
+from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
 from blybot.services.repo import GroupRepoService
@@ -171,6 +172,12 @@ def main() -> int:
             transcription=transcription,
             release=release_clients,
             bootstrap=store.bootstrap if store else None,
+            notifier=(
+                RepoNotifier(store=store, vault=store, gateway=gateway, counters=counters)
+                if store
+                else None
+            ),
+            poll_interval_seconds=config.events_poll_minutes * 60,
         ),
     )
     return 0

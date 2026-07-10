@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Final
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 
-from blybot.domain.models import ConsentMode
+from blybot.domain.models import ConsentMode, EventKind
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
 from blybot.services.directory import PageNotAllowedError, SelfServiceUnavailableError
@@ -50,11 +50,15 @@ REPLY_REPO_BOUND: Final = (
     "Use a fine-grained PAT restricted to {repo} with Issues read/write only."
 )
 REPLY_PAT_REVOKED: Final = "Token discarded. /issue and /repo are disabled for this group."
+REPLY_EVENTS_USAGE: Final = "Usage: /events on | off | <kinds> — kinds from: releases, prs, issues"
+REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
+DEFAULT_EVENT_KINDS: Final = frozenset({EventKind.RELEASES, EventKind.PRS})
 SETUP_TEXT: Final = (
     "I'm configurable by this group's admins, right here:\n\n"
     "/setpage {prefix}YourGroup — where /log publishes\n"
     "/setconsent immediate|author_only — who may /log whose messages\n"
     "/setrepo owner/repo — bind a GitHub repo (then /issue, /repo)\n"
+    "/events on|off|releases,prs,issues — repo digests in this chat\n"
     "/revoke — discard this group's stored GitHub token\n"
     "/settings — current configuration\n"
     "/reset — forget everything and return to defaults\n\n"
@@ -183,6 +187,26 @@ class AdminHandlers:
         log_event("token_revoked", "ok")
         await context.bot.send_message(chat_id=chat.id, text=REPLY_PAT_REVOKED)
 
+    async def on_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Switch this group's repo-notification digests on, off, or by kind."""
+        chat = await self._admin_chat(update, context)
+        if chat is None:
+            return
+        arguments = [word for arg in (context.args or ()) for word in arg.split(",") if word]
+        parsed = _parse_events(arguments)
+        if parsed is None:
+            await context.bot.send_message(chat_id=chat.id, text=REPLY_EVENTS_USAGE)
+            return
+        enabled, kinds = parsed
+        try:
+            await self.directory.set_events(chat.id, enabled=enabled, kinds=kinds)
+        except StorageError:
+            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            return
+        log_event("profile_update", "ok")
+        state = ", ".join(sorted(kind.value for kind in kinds)) if enabled else "off"
+        await context.bot.send_message(chat_id=chat.id, text=REPLY_EVENTS_SET.format(state=state))
+
     async def on_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show this group's effective configuration."""
         chat = await self._admin_chat(update, context)
@@ -195,7 +219,11 @@ class AdminHandlers:
             consent=settings.consent_mode.value,
             repo=settings.repo or "none",
             token="yes" if settings.has_token else "no",
-            events="on" if settings.events_enabled else "off",
+            events=(
+                ", ".join(sorted(kind.value for kind in settings.event_kinds)) or "on"
+                if settings.events_enabled
+                else "off"
+            ),
         )
         await context.bot.send_message(chat_id=chat.id, text=text)
 
@@ -226,3 +254,18 @@ class AdminHandlers:
             await context.bot.send_message(chat_id=chat.id, text=REPLY_SELF_SERVICE_OFF)
             return None
         return chat
+
+
+def _parse_events(arguments: list[str]) -> tuple[bool, frozenset[EventKind]] | None:
+    """Parse /events arguments; None means unusable input."""
+    if not arguments:
+        return None
+    if arguments == ["off"]:
+        return False, frozenset()
+    if arguments == ["on"]:
+        return True, DEFAULT_EVENT_KINDS
+    try:
+        kinds = frozenset(EventKind(word) for word in arguments)
+    except ValueError:
+        return None
+    return True, kinds

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters
 
 from blybot.domain.ports import StorageError
@@ -25,9 +26,12 @@ from blybot.observability import log_event
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from telegram import Bot
+
     from blybot.adapters.telegram.admin import AdminHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.observability import Counters
+    from blybot.services.notify import RepoNotifier
     from blybot.services.sessions import SessionRegistry
     from blybot.services.transcribe import DmTranscriptionService
 
@@ -73,13 +77,16 @@ class Lifecycle:
     # Storage schema bootstrap (self-service deployments only). A failure
     # is contained: self-service degrades to defaults, the bot still runs.
     bootstrap: Callable[[], Awaitable[None]] | None = None
+    # Repo-event digests (self-service deployments with events on).
+    notifier: RepoNotifier | None = None
+    poll_interval_seconds: float = 300
+    _notify_task: asyncio.Task[None] | None = field(default=None, init=False)
     # Scheduled directly on the loop (PTB's create_task pre-start warns and
     # would not track it anyway); held here so shutdown can cancel it.
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     async def post_init(self, app: _App) -> None:
-        """Bootstrap storage, then start the maintenance task."""
-        del app
+        """Bootstrap storage, then start the maintenance and poll tasks."""
         if self.bootstrap is not None:
             try:
                 await self.bootstrap()
@@ -87,6 +94,10 @@ class Lifecycle:
                 log_event("storage_bootstrap", "error")
         loop = asyncio.get_running_loop()
         self._maintenance_task = loop.create_task(self.maintenance.run_forever())
+        if self.notifier is not None:
+            self._notify_task = loop.create_task(
+                repo_notify_loop(app.bot, self.notifier, self.poll_interval_seconds)
+            )
         log_event("startup", "ok")
 
     async def post_shutdown(self, app: _App) -> None:
@@ -94,9 +105,24 @@ class Lifecycle:
         del app
         if self._maintenance_task is not None:
             self._maintenance_task.cancel()
+        if self._notify_task is not None:
+            self._notify_task.cancel()
         await self.transcription.flush_all()
         await self.release()
         log_event("shutdown", "ok")
+
+
+async def repo_notify_loop(bot: Bot, notifier: RepoNotifier, interval_seconds: float) -> None:
+    """Poll bound repositories and deliver digests until cancelled."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        for chat_id, digest in await notifier.collect():
+            try:
+                await bot.send_message(chat_id=chat_id, text=digest)
+            except TelegramError:
+                # Kicked from the group, muted, etc. — that group's
+                # digest is lost, everyone else's still goes out.
+                log_event("repo_digest", "ignored")
 
 
 def build_application(
@@ -136,6 +162,7 @@ def build_application(
         ("setpage", admin_handlers.on_setpage),
         ("setconsent", admin_handlers.on_setconsent),
         ("setrepo", admin_handlers.on_setrepo),
+        ("events", admin_handlers.on_events),
         ("revoke", admin_handlers.on_revoke),
         ("settings", admin_handlers.on_settings),
         ("reset", admin_handlers.on_reset),

@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from blybot.domain.models import GroupProfile, Pseudonym, RepoSummary
+from blybot.domain.models import GroupProfile, Pseudonym, RepoEvent, RepoSummary
 
 
 class WikiWriteError(Exception):
@@ -95,6 +95,17 @@ class RepoGateway(Protocol):
 
     async def open_summary(self, repo: str, token: str) -> RepoSummary:
         """Return a small open-items summary of the bound repo."""
+        ...
+
+    async def events_since(
+        self, repo: str, token: str, cursor: str | None
+    ) -> tuple[list[RepoEvent], str]:
+        """Return events newer than ``cursor`` plus the advanced cursor.
+
+        A ``None`` cursor is a baseline poll: it returns no events and
+        a cursor at the current head, so binding a repo never replays
+        its history into the chat.
+        """
         ...
 
 

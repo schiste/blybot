@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import GroupProfile, Pseudonym, RepoSummary
+from blybot.domain.models import GroupProfile, Pseudonym, RepoEvent, RepoSummary
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 
 
@@ -184,6 +184,8 @@ class FakeRepoGateway:
     valid_tokens: set[str] = field(default_factory=set)
     issues: list[tuple[str, str, str, str]] = field(default_factory=list)
     summaries: dict[str, RepoSummary] = field(default_factory=dict)
+    events: list[RepoEvent] = field(default_factory=list)
+    next_cursor: str = "etag|9"
     fail: bool = False
 
     async def validate_token(self, repo: str, token: str) -> bool:
@@ -202,3 +204,13 @@ class FakeRepoGateway:
         return self.summaries.get(
             repo, RepoSummary(repo=repo, open_count=2, recent_titles=("A", "B"))
         )
+
+    async def events_since(
+        self, repo: str, token: str, cursor: str | None
+    ) -> tuple[list[RepoEvent], str]:
+        del repo
+        if self.fail or token not in self.valid_tokens:
+            raise IssueTrackerError
+        if cursor is None:
+            return [], "etag|1"
+        return list(self.events), self.next_cursor

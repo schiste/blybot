@@ -79,6 +79,7 @@ class Config:
     toolsdb_host: str
     toolsdb_name: str
     toolsdb_cnf: str
+    events_poll_minutes: int
     user_agent: str
 
     @property
@@ -148,6 +149,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         toolsdb_host=source.get("TOOLSDB_HOST", "tools.db.svc.wikimedia.cloud"),
         toolsdb_name=source.get("TOOLSDB_NAME", ""),
         toolsdb_cnf=source.get("TOOLSDB_CNF", str(Path.home() / "replica.my.cnf")),
+        events_poll_minutes=_parse_positive_int(source, "EVENTS_POLL_MINUTES", 5),
         user_agent=source["USER_AGENT"],
     )
 

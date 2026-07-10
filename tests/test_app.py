@@ -11,15 +11,30 @@ from unittest.mock import AsyncMock
 
 import pytest
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler
 
 from blybot.adapters.telegram.admin import AdminHandlers
-from blybot.adapters.telegram.app import Lifecycle, Maintenance, build_application, run_polling
+from blybot.adapters.telegram.app import (
+    Lifecycle,
+    Maintenance,
+    build_application,
+    repo_notify_loop,
+    run_polling,
+)
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
+from blybot.observability import Counters as _Counters  # noqa: F401
 from blybot.services.binding import TokenBinding
+from blybot.services.notify import RepoNotifier
 from blybot.services.sessions import SessionRegistry
-from tests.fakes import FakeClock, FakePublisher, SequentialPseudonyms
+from tests.fakes import (
+    FakeClock,
+    FakePublisher,
+    FakeRepoGateway,
+    InMemoryProfiles,
+    SequentialPseudonyms,
+)
 from tests.test_group_handlers import make_handlers as make_group_handlers
 from tests.test_private_handlers import make_handlers as make_private_handlers
 from tests.test_transcribe import make_service
@@ -70,8 +85,8 @@ def test_build_registers_every_handler() -> None:
     handlers = application.handlers[0]
     kinds = [type(handler) for handler in handlers]
     # log, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
-    # setup, setpage, setconsent, setrepo, revoke, settings, reset
-    assert kinds.count(CommandHandler) == 18
+    # setup, setpage, setconsent, setrepo, events, revoke, settings, reset
+    assert kinds.count(CommandHandler) == 19
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 2  # migration and DM text
 
@@ -180,3 +195,46 @@ async def test_run_forever_ticks_until_cancelled() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_repo_notify_loop_delivers_digests_and_survives_send_failures() -> None:
+    store = InMemoryProfiles()
+    notifier = RepoNotifier(
+        store=store, vault=store, gateway=FakeRepoGateway(), counters=Counters()
+    )
+
+    sent: list[tuple[int, str]] = []
+
+    class Recorder:
+        async def send_message(self, chat_id: int, text: str) -> None:
+            if chat_id == -13:
+                raise TelegramError("kicked")
+            sent.append((chat_id, text))
+
+    async def fake_collect() -> list[tuple[int, str]]:
+        return [(-13, "lost"), (-1, "x/y:\n- Release")]
+
+    notifier.collect = fake_collect  # type: ignore[method-assign]
+    task = asyncio.ensure_future(repo_notify_loop(cast("Any", Recorder()), notifier, 0))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (-1, "x/y:\n- Release") in sent
+
+
+async def test_post_init_starts_the_notify_task_when_configured() -> None:
+    store = InMemoryProfiles()
+    lifecycle, _, _ = make_lifecycle()
+    lifecycle.maintenance.interval_seconds = 3600
+    lifecycle.poll_interval_seconds = 3600
+    lifecycle.notifier = RepoNotifier(
+        store=store, vault=store, gateway=FakeRepoGateway(), counters=Counters()
+    )
+    app = cast("_App", SimpleNamespace(bot=SimpleNamespace()))
+    await lifecycle.post_init(app)
+    assert lifecycle._notify_task is not None
+    await lifecycle.post_shutdown(app)
+    await asyncio.sleep(0)
+    assert lifecycle._notify_task.cancelled()

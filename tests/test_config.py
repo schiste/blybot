@@ -158,6 +158,7 @@ def test_self_service_defaults_are_off_and_toolsdb_conventional() -> None:
     assert config.toolsdb_host == "tools.db.svc.wikimedia.cloud"
     assert config.toolsdb_name == ""
     assert config.toolsdb_cnf.endswith("replica.my.cnf")
+    assert config.events_poll_minutes == 5
 
 
 def test_github_settings_default_to_public_repo_and_no_token() -> None:

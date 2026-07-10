@@ -38,6 +38,16 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
    whoami - Show which pseudonym you currently appear as
    privacy - What the bot collects, publishes, and stores
    bug - File an anonymous bug report with the maintainer
+   issue - File an anonymous issue in this group's bound repo
+   repo - Show the bound repository's open items
+   setup - (admins) how to configure the bot for this group
+   setpage - (admins) where /log publishes
+   setconsent - (admins) who may /log whose messages
+   setrepo - (admins) bind a GitHub repository
+   events - (admins) repo digests on/off/kinds
+   settings - (admins) current group configuration
+   revoke - (admins) discard this group's stored token
+   reset - (admins) forget this group's configuration
    ```
 
 2. **Wiki** — target page(s) for `LOG_TARGET_PAGE` / `DM_TARGET_BASE`
@@ -57,8 +67,9 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
 ## Enabling self-service (v2)
 
 With self-service on, any group's admins configure the bot from
-Telegram: `/setup`, `/setpage`, `/setconsent`, `/settings`, `/reset`.
-Two env keys enable it:
+Telegram: `/setup`, `/setpage`, `/setconsent`, `/setrepo` (+ the DM
+token step), `/events`, `/settings`, `/revoke`, `/reset`; members get
+`/issue` and `/repo` once a repo is bound. Two env keys enable it:
 
 ```sh
 become <tool>

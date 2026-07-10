@@ -213,6 +213,7 @@ Loaded from the tool home directory (env or a `0600`-permission file), not the r
 | `WIKI_PAGE_PREFIX` | Subpage prefix `/setpage` may target; empty disables self-service pages | empty |
 | `PROFILE_ENCRYPTION_KEY` | Fernet key enabling ToolsDB profiles + encrypted group tokens | empty (self-service off) |
 | `TOOLSDB_HOST` / `TOOLSDB_NAME` / `TOOLSDB_CNF` | ToolsDB connection (name defaults to `<cnf user>__blybot`) | Toolforge conventions |
+| `EVENTS_POLL_MINUTES` | Minutes between repository-event polls for `/events` digests | 5 |
 
 ---
 

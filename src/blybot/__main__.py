@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from datetime import timedelta
+from pathlib import Path
 
 from blybot.adapters.github.issues import GitHubIssueTracker
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
@@ -15,6 +16,7 @@ from blybot.adapters.system import SystemClock
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
+from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
 from blybot.config import ConfigurationError, load_config
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
@@ -62,12 +64,29 @@ def main() -> int:
         debounce_seconds=config.burst_debounce.total_seconds(),
         timestamp_granularity=config.timestamp_granularity,
     )
+    store: ToolsDbStore | None = None
+    if config.profile_encryption_key:
+        try:
+            store = ToolsDbStore(
+                runner=PymysqlRunner(
+                    host=config.toolsdb_host,
+                    database=config.toolsdb_name,
+                    cnf_path=Path(config.toolsdb_cnf),
+                ),
+                fernet_key=config.profile_encryption_key,
+            )
+        except ValueError:
+            print(
+                "configuration error: PROFILE_ENCRYPTION_KEY is not a valid Fernet key",
+                file=sys.stderr,
+            )
+            return 2
     directory = ChannelDirectory(
-        store=None,  # self-service store lands with the ToolsDB wiring
+        store=store,
         default_log_page=config.log_target_page,
         default_consent=config.consent_mode,
         default_repo=config.github_repo,
-        page_prefix="",
+        page_prefix=config.wiki_page_prefix,
     )
     group_handlers = GroupHandlers(
         log_service=LogPublicationService(
@@ -132,6 +151,7 @@ def main() -> int:
             maintenance=Maintenance(sessions=sessions, counters=counters),
             transcription=transcription,
             release=publisher.aclose,
+            bootstrap=store.bootstrap if store else None,
         ),
     )
     return 0

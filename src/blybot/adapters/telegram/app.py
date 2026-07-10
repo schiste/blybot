@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final
 from telegram import Update
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters
 
+from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
@@ -69,13 +70,21 @@ class Lifecycle:
     maintenance: Maintenance
     transcription: DmTranscriptionService
     release: Callable[[], Awaitable[None]]
+    # Storage schema bootstrap (self-service deployments only). A failure
+    # is contained: self-service degrades to defaults, the bot still runs.
+    bootstrap: Callable[[], Awaitable[None]] | None = None
     # Scheduled directly on the loop (PTB's create_task pre-start warns and
     # would not track it anyway); held here so shutdown can cancel it.
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     async def post_init(self, app: _App) -> None:
-        """Start the maintenance task once the event loop is running."""
+        """Bootstrap storage, then start the maintenance task."""
         del app
+        if self.bootstrap is not None:
+            try:
+                await self.bootstrap()
+            except StorageError:
+                log_event("storage_bootstrap", "error")
         loop = asyncio.get_running_loop()
         self._maintenance_task = loop.create_task(self.maintenance.run_forever())
         log_event("startup", "ok")

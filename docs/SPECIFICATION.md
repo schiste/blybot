@@ -175,12 +175,11 @@ Design so these remain possible without rework: quote store and `/quote` retriev
 
 ## 11. Data model and state
 
-v1 has **no persistent datastore.** State is:
+v1 had **no persistent datastore**; v2's self-service adds exactly one, per this section's original rule: **ToolsDB (MariaDB)**, never SQLite on NFS. State is:
 
 1. **In-memory session map** (volatile, see 10).
 2. **Configuration** in the tool home directory (see 12).
-
-No message log, no user table, no quotes table. If persistence is ever introduced (future phases), it must use ToolsDB (MariaDB), not SQLite on NFS, because a continuously writing SQLite file over the shared NFS home invites locking failures.
+3. **v2: one `profiles` table on ToolsDB** — per-group chat id, chosen page/repo, consent policy, event settings, poll cursor, and an admin-supplied API token encrypted with Fernet (`PROFILE_ENCRYPTION_KEY`). **No user identifier, name, or message content is ever persisted**; group admin-ship is verified live per command and never stored.
 
 ---
 
@@ -211,6 +210,9 @@ Loaded from the tool home directory (env or a `0600`-permission file), not the r
 | `LOG_CLEANUP_SECONDS` | Delay before deleting the `/log` command (0 = keep) | 5 |
 | `REPLY_CLEANUP_SECONDS` | Delay before the bot deletes its own `/log` replies (0 = keep) | 15 |
 | `GITHUB_REPO` / `GITHUB_TOKEN` | `/bug` issue filing (token optional; absent = degrade to link) | `schiste/blybot` / empty |
+| `WIKI_PAGE_PREFIX` | Subpage prefix `/setpage` may target; empty disables self-service pages | empty |
+| `PROFILE_ENCRYPTION_KEY` | Fernet key enabling ToolsDB profiles + encrypted group tokens | empty (self-service off) |
+| `TOOLSDB_HOST` / `TOOLSDB_NAME` / `TOOLSDB_CNF` | ToolsDB connection (name defaults to `<cnf user>__blybot`) | Toolforge conventions |
 
 ---
 

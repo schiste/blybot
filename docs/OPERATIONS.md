@@ -54,6 +54,34 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
    once). Promote it to admin with **Delete messages** if you want the
    `/log` command auto-deleted; everything else works without admin.
 
+## Enabling self-service (v2)
+
+With self-service on, any group's admins configure the bot from
+Telegram: `/setup`, `/setpage`, `/setconsent`, `/settings`, `/reset`.
+Two env keys enable it:
+
+```sh
+become <tool>
+# 1. Create the ToolsDB database (name = <cnf user>__blybot):
+TOOL_DB="$(grep -oP "user\s*=\s*'?\K[^'\n]+" ~/replica.my.cnf)__blybot"
+mariadb --defaults-file=$HOME/replica.my.cnf -h tools.db.svc.wikimedia.cloud \
+    -e "CREATE DATABASE IF NOT EXISTS \`$TOOL_DB\`"
+# 2. Generate the encryption key for group tokens, straight into the env file:
+echo "PROFILE_ENCRYPTION_KEY=\"$($HOME/venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')\"" >> <name>.env
+# 3. Choose the page prefix group admins may target:
+echo 'WIKI_PAGE_PREFIX="Telegram logs/"' >> <name>.env
+chmod 600 <name>.env
+~/blybot/deploy-instance.sh start <name>
+```
+
+The schema bootstraps itself at startup. **What gets stored per group**:
+its chat id, chosen page/repo, consent policy, event settings, and any
+admin-supplied API token (Fernet-encrypted; the key never leaves the
+env file). Never stored: user ids, usernames, messages. Losing
+`PROFILE_ENCRYPTION_KEY` invalidates stored tokens (groups re-bind);
+back up the env file accordingly. Verify tokens are ciphertext with:
+`SELECT chat_id, LEFT(token_ciphertext, 20) FROM profiles;`
+
 ## Updating (all instances at once)
 
 ```sh

@@ -15,6 +15,7 @@ from telegram.ext import Application, ChatMemberHandler, CommandHandler, Message
 
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, build_application, run_polling
+from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.sessions import SessionRegistry
 from tests.fakes import FakeClock, FakePublisher, SequentialPseudonyms
@@ -88,6 +89,34 @@ def test_run_polling_opts_into_exactly_the_updates_privacy_mode_needs(
     run_polling(TOKEN, group_handlers, private_handlers, make_admin_handlers(), lifecycle)
 
     assert seen["allowed_updates"] == [Update.MESSAGE, Update.MY_CHAT_MEMBER, Update.CHAT_MEMBER]
+
+
+async def test_post_init_bootstraps_storage_then_starts_maintenance() -> None:
+    lifecycle, _, _ = make_lifecycle()
+    lifecycle.maintenance.interval_seconds = 3600
+    calls: list[str] = []
+
+    async def bootstrap() -> None:
+        calls.append("bootstrap")
+
+    lifecycle.bootstrap = bootstrap
+    await lifecycle.post_init(cast("_App", SimpleNamespace()))
+    assert calls == ["bootstrap"]
+    await lifecycle.post_shutdown(cast("_App", SimpleNamespace()))
+
+
+async def test_post_init_contains_bootstrap_failures() -> None:
+    """A dead database degrades self-service; it must not stop the bot."""
+    lifecycle, _, _ = make_lifecycle()
+    lifecycle.maintenance.interval_seconds = 3600
+
+    async def bootstrap() -> None:
+        raise StorageError
+
+    lifecycle.bootstrap = bootstrap
+    await lifecycle.post_init(cast("_App", SimpleNamespace()))
+    assert lifecycle._maintenance_task is not None  # maintenance still started
+    await lifecycle.post_shutdown(cast("_App", SimpleNamespace()))
 
 
 async def test_post_init_starts_maintenance_and_shutdown_cancels_it() -> None:

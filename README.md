@@ -56,12 +56,14 @@ src/blybot/
 │   └── pseudonym.py    CSPRNG pseudonym minting
 ├── services/     use-cases, depend on domain ports only
 │   ├── publish.py      /log → one talk-page section per entry
+│   ├── directory.py    per-group settings: stored profile over env defaults
 │   ├── transcribe.py   DM sessions: one section each, indented discussion
 │   ├── sessions.py     volatile DM session registry (TTL, peek, reset, sweep)
 │   └── policy.py       group allowlist + supergroup migration, /log throttle
 ├── adapters/     the only layer allowed to touch I/O libraries
 │   ├── telegram/       handlers (the anonymity boundary) + polling bootstrap
 │   ├── mediawiki/      async discussion publisher: sections, maxlag, assert=user
+│   ├── toolsdb/        per-group profiles + encrypted tokens (self-service)
 │   └── system.py       wall clock
 ├── observability.py    identifier-free event logging and counters
 ├── config.py     env-based configuration, validates without echoing secrets

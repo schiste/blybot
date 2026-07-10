@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Final
 
 from blybot.domain.models import ConsentMode, TimestampGranularity
@@ -73,6 +74,11 @@ class Config:
     maintainer: str
     github_repo: str
     github_token: str
+    wiki_page_prefix: str
+    profile_encryption_key: str
+    toolsdb_host: str
+    toolsdb_name: str
+    toolsdb_cnf: str
     user_agent: str
 
     @property
@@ -137,6 +143,11 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         maintainer=source.get("MAINTAINER", ""),
         github_repo=source.get("GITHUB_REPO", "schiste/blybot"),
         github_token=source.get("GITHUB_TOKEN", ""),
+        wiki_page_prefix=source.get("WIKI_PAGE_PREFIX", ""),
+        profile_encryption_key=source.get("PROFILE_ENCRYPTION_KEY", ""),
+        toolsdb_host=source.get("TOOLSDB_HOST", "tools.db.svc.wikimedia.cloud"),
+        toolsdb_name=source.get("TOOLSDB_NAME", ""),
+        toolsdb_cnf=source.get("TOOLSDB_CNF", str(Path.home() / "replica.my.cnf")),
         user_agent=source["USER_AGENT"],
     )
 

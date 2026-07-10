@@ -5,12 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from cryptography.fernet import Fernet
 
 import blybot.__main__ as entry
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
+from blybot.adapters.toolsdb.store import ToolsDbStore
 from tests.test_config import REQUIRED
 
 
@@ -54,3 +56,29 @@ def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> No
     assert seen["admin_handlers"].directory is directory  # one directory, shared
     assert directory.default_log_page == REQUIRED["LOG_TARGET_PAGE"]
     assert lifecycle.transcription.target_page == REQUIRED["DM_TARGET_BASE"]
+
+
+def test_valid_encryption_key_enables_self_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("WIKI_PAGE_PREFIX", "Telegram logs/")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+
+    assert entry.main() == 0
+    directory = seen["group_handlers"].directory
+    assert isinstance(directory.store, ToolsDbStore)
+    assert directory.page_prefix == "Telegram logs/"
+    assert seen["lifecycle"].bootstrap is not None
+
+
+def test_invalid_encryption_key_fails_fast(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", "not-a-fernet-key")
+
+    assert entry.main() == 2
+    assert "Fernet" in capsys.readouterr().err

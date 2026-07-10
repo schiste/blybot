@@ -151,6 +151,15 @@ def test_cleanup_rejects_negatives_and_junk() -> None:
         load_config(dict(REQUIRED) | {"LOG_CLEANUP_SECONDS": "soon"})
 
 
+def test_self_service_defaults_are_off_and_toolsdb_conventional() -> None:
+    config = load_config(dict(REQUIRED))
+    assert config.wiki_page_prefix == ""
+    assert config.profile_encryption_key == ""
+    assert config.toolsdb_host == "tools.db.svc.wikimedia.cloud"
+    assert config.toolsdb_name == ""
+    assert config.toolsdb_cnf.endswith("replica.my.cnf")
+
+
 def test_github_settings_default_to_public_repo_and_no_token() -> None:
     config = load_config(dict(REQUIRED))
     assert config.github_repo == "schiste/blybot"

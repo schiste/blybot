@@ -48,6 +48,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=6.0",
     "ruff>=0.8",
+    "types-pymysql>=1.1.0.20260518",
 ]
 
 # ---------------------------------------------------------------------------
@@ -91,6 +92,7 @@ ignore = [
     "S101",    # asserts are the point of tests
     "PLR2004", # magic values are fine in assertions
     "PLR0913", # test factories take many optional knobs
+    "PLR0911", # SQL/API fakes are dispatchers with one return per query
 ]
 
 [tool.ruff.lint.pydocstyle]

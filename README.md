@@ -102,6 +102,10 @@ Configuration is read from the environment (template in
 `0600`, never in this repository. `run.sh` refuses to start if the config
 file is not `chmod 600`.
 
+Full runbook — including **running several instances** (different bot,
+group, and wiki pages) off one checkout with `deploy-instance.sh` — in
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 Pre-flight checklist (spec Phase 0) before the first launch:
 
 1. Confirm outbound HTTPS from the tool account to `api.telegram.org`

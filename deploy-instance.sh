@@ -42,8 +42,10 @@ ensure_venv() {
 reinstall() {
     echo "reinstalling the package into the shared venv..."
     toolforge jobs delete venv-update >/dev/null 2>&1 || true
+    # First pass installs any newly-added dependencies; second refreshes
+    # the package itself (same version number, so pip must be forced).
     toolforge jobs run venv-update \
-        --command "${VENV}/bin/pip install --quiet --force-reinstall --no-deps ${REPO_DIR}" \
+        --command "${VENV}/bin/pip install --quiet ${REPO_DIR} && ${VENV}/bin/pip install --quiet --force-reinstall --no-deps ${REPO_DIR}" \
         --image "${IMAGE}" --wait
     toolforge jobs delete venv-update >/dev/null 2>&1 || true
     rm -f "${TOOL_HOME}/venv-update.out" "${TOOL_HOME}/venv-update.err"

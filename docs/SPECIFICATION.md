@@ -91,13 +91,13 @@ The bot operates with Telegram privacy mode ON (the BotFather default). It must 
 - Given the bot is added to a group, when it joins, then it posts one short greeting message. This both explains `/log` and establishes the bot as the last bot to have spoken, so bare `/log` replies are delivered reliably even before any command addressing.
 
 **R4. DM transcription with per-session pseudonym.**
-- Given a user sends the bot a private message, when no active session exists for that chat, then the bot mints a fresh random pseudonym held only in memory and starts a session.
+- Given a user sends the bot a private message, when no active session exists for that chat, then the bot mints a fresh random pseudonym held only in memory and starts a session (sessions are created lazily by the first transcribed message, never by `/start`).
 - Given an active session, when the user sends further messages, then each is sanitized (R7) and appended to the session's Meta discussion under the same pseudonym.
 - Writes are incremental (per message or per debounced burst), never buffered until session end (R10, R-state).
 
 **R5. Newcomer welcome via deep-link Start.**
 - Given a newcomer joins, when the bot detects the join, then it posts a short in-group line with an inline button deep-linking to `https://t.me/<bot>?start=welcome`.
-- Given the newcomer taps the button and presses Start, then the bot delivers the welcome privately and opens a pseudonymous session in the same step.
+- Given the newcomer taps the button and presses Start, then the bot delivers the welcome privately; a pseudonymous session opens with their first transcribed message.
 - The bot must never attempt to DM a user who has not initiated contact (doing so returns 403; see R-edge).
 
 **R6. Anonymization guarantees.**
@@ -168,7 +168,7 @@ Design so these remain possible without rework: quote store and `/quote` retriev
 
 - **Pseudonym generation:** random, from a CSPRNG, not a hash or transform of the Telegram user ID. This makes reversal or linkage across sessions infeasible even for the operator.
 - **Session store:** an in-memory map keyed by the private chat_id, holding `{pseudonym, last_seen, meta_anchor}`. Never serialized to disk.
-- **Session lifecycle:** created on first DM or on `/start`; ended by an inactivity timeout (default 45 minutes, configurable 30 to 60) or by an explicit `/start`, which forces a new identity; also lost on job restart. All of these are acceptable and reinforce the anonymity goal.
+- **Session lifecycle:** created lazily on the first transcribed DM; ended by an inactivity timeout (default 45 minutes, configurable 30 to 60) or by an explicit `/flush`, which forces a new identity; also lost on job restart. All of these are acceptable and reinforce the anonymity goal. `/start` only delivers the welcome; `/whoami` discloses the current pseudonym without rotating it.
 - **Write discipline:** because nothing is buffered persistently, content is written to Meta incrementally as it arrives (optionally debounced per R2/N2), so a mid-session restart never loses already-received content.
 
 ---
@@ -210,7 +210,7 @@ Loaded from the tool home directory (env or a `0600`-permission file), not the r
 A single long-running asyncio process:
 
 - **Transport:** `python-telegram-bot`, long polling.
-- **Dispatcher / handlers:** `/log` reply handler; DM message handler; `/start` (welcome + session open) handler; join handler (deep-link button); `my_chat_member` handler (greet-on-entry).
+- **Dispatcher / handlers:** `/log` reply handler; DM message handler; `/start` (welcome), `/flush` (identity reset), `/whoami`, `/help`, and `/privacy` handlers; join handler (deep-link button); `my_chat_member` handler (greet-on-entry).
 - **Publisher:** MediaWiki module (`mwclient`/`pywikibot`), `appendtext`, maxlag-aware, retrying.
 - **Anonymizer:** in-memory session store with a periodic TTL sweep task.
 - **Sanitizer:** wikitext neutralization (R7), applied to all user content before publish.

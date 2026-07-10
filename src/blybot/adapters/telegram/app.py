@@ -98,6 +98,15 @@ def build_application(
     )
     application.add_handler(CommandHandler("log", group_handlers.on_log))
     application.add_handler(CommandHandler("start", private_handlers.on_start))
+    application.add_handler(CommandHandler("flush", private_handlers.on_flush))
+    application.add_handler(CommandHandler("whoami", private_handlers.on_whoami))
+    application.add_handler(CommandHandler("privacy", private_handlers.on_privacy))
+    application.add_handler(
+        CommandHandler("help", private_handlers.on_help, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("help", group_handlers.on_help, filters=filters.ChatType.GROUPS)
+    )
     application.add_handler(
         ChatMemberHandler(group_handlers.on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )

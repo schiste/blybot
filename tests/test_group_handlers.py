@@ -190,3 +190,19 @@ async def test_newcomer_handler_ignores_updates_without_membership_change() -> N
     context, bot = tg.make_context()
     await handlers.on_newcomer(tg.command_update(tg.message(text="hi")), context)
     assert tg.sent_texts(bot) == []
+
+
+async def test_group_help_explains_the_log_gesture() -> None:
+    handlers, _, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_help(tg.command_update(tg.message(text="/help")), context)
+    (sent,) = tg.sent_texts(bot)
+    assert "/log" in sent
+
+
+async def test_group_help_stays_silent_in_unlisted_groups_and_dms() -> None:
+    handlers, _, _ = make_handlers(allowed={-42})
+    context, bot = tg.make_context()
+    await handlers.on_help(tg.command_update(tg.message(text="/help")), context)
+    await handlers.on_help(tg.command_update(tg.message(chat=tg.PRIVATE, text="/help")), context)
+    assert tg.sent_texts(bot) == []

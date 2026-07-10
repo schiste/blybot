@@ -32,31 +32,78 @@ def dm(text: str | None) -> Update:
     return tg.command_update(tg.message(chat=tg.PRIVATE, text=text, from_user=tg.ALICE))
 
 
-async def test_start_welcomes_and_opens_a_pseudonymous_session() -> None:
+async def test_start_delivers_the_welcome_and_nothing_else() -> None:
+    """/start is the doorway (R5): welcome copy only — no session side effects."""
     handlers, _ = make_handlers()
     context, bot = tg.make_context()
     await handlers.on_start(dm("/start welcome"), context)
 
-    (sent,) = tg.sent_texts(bot)
-    assert sent.startswith("Welcome to Blybot.")
-    assert "Anon-1" in sent
-    assert "Meta talk:Community/Discussions#Anon-1" in sent
+    assert tg.sent_texts(bot) == ["Welcome to Blybot."]
+    assert handlers.sessions.peek(tg.PRIVATE.id) is None  # no identity minted
 
 
-async def test_start_always_forces_a_fresh_identity() -> None:
+async def test_flush_forces_a_fresh_identity_and_announces_it() -> None:
     handlers, _ = make_handlers()
-    context, _ = tg.make_context()
-    await handlers.on_start(dm("/start"), context)
-    await handlers.on_start(dm("/start"), context)
+    context, bot = tg.make_context()
+    await handlers.on_dm(dm("hello"), context)  # session Anon-1 opens lazily
+    await handlers.on_flush(dm("/flush"), context)
+
     session = handlers.sessions.peek(tg.PRIVATE.id)
     assert session is not None
     assert session.pseudonym.value == "Anon-2"
+    assert "Anon-2" in tg.sent_texts(bot)[-1]
+    assert h.REPLY_FLUSHED.strip() in tg.sent_texts(bot)[-1]
 
 
-async def test_start_outside_private_chat_is_ignored() -> None:
+async def test_whoami_discloses_without_rotating() -> None:
     handlers, _ = make_handlers()
     context, bot = tg.make_context()
-    await handlers.on_start(tg.command_update(tg.message(chat=tg.GROUP, text="/start")), context)
+    await handlers.on_dm(dm("hello"), context)
+    await handlers.on_whoami(dm("/whoami"), context)
+
+    assert "Anon-1" in tg.sent_texts(bot)[-1]
+    session = handlers.sessions.peek(tg.PRIVATE.id)
+    assert session is not None
+    assert session.pseudonym.value == "Anon-1"  # unchanged
+
+
+async def test_whoami_without_a_session_explains_lazy_minting() -> None:
+    handlers, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_whoami(dm("/whoami"), context)
+    assert tg.sent_texts(bot) == [h.REPLY_NO_SESSION]
+
+
+async def test_private_help_lists_the_commands() -> None:
+    handlers, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_help(dm("/help"), context)
+    (sent,) = tg.sent_texts(bot)
+    for command in ("/whoami", "/flush", "/privacy", "/log"):
+        assert command in sent
+
+
+async def test_privacy_statement_covers_the_guarantees() -> None:
+    handlers, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_privacy(dm("/privacy"), context)
+    (sent,) = tg.sent_texts(bot)
+    assert "pseudonym" in sent
+    assert "permanently" in sent
+
+
+async def test_private_commands_outside_private_chats_are_ignored() -> None:
+    handlers, _ = make_handlers()
+    context, bot = tg.make_context()
+    group_update = tg.command_update(tg.message(chat=tg.GROUP, text="/x"))
+    for handler in (
+        handlers.on_start,
+        handlers.on_flush,
+        handlers.on_whoami,
+        handlers.on_help,
+        handlers.on_privacy,
+    ):
+        await handler(group_update, context)
     assert tg.sent_texts(bot) == []
 
 

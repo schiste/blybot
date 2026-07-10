@@ -25,7 +25,7 @@ from blybot.observability import Counters, log_event
 from blybot.services.publish import NothingToPublishError
 
 if TYPE_CHECKING:
-    from telegram import ChatMemberUpdated, Message, Update
+    from telegram import Chat, ChatMemberUpdated, Message, Update
     from telegram.ext import ContextTypes
 
     from blybot.domain.models import Session
@@ -44,10 +44,40 @@ REPLY_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see detail
 REPLY_AUTHOR_ONLY: Final = "This group's consent policy only lets authors /log their own messages."
 REPLY_SESSION_INFO: Final = (
     "You are appearing as {pseudonym}; this exchange is recorded at {page}. "
-    "Send /start any time for a fresh identity."
+    "Send /flush any time for a fresh identity."
+)
+REPLY_FLUSHED: Final = "Fresh identity minted. "
+REPLY_NO_SESSION: Final = (
+    "You have no active session. Your next message will mint a fresh pseudonym automatically."
 )
 NEWCOMER_PROMPT: Final = "Welcome! Tap below for a private note on how I work."
 NEWCOMER_BUTTON: Final = "What is this bot?"
+HELP_PRIVATE: Final = (
+    "Anything you write to me here is transcribed to a public Meta-wiki page "
+    "under a random per-session pseudonym.\n\n"
+    "/whoami — show the pseudonym you currently appear as\n"
+    "/flush — discard it and mint a fresh, unlinkable one\n"
+    "/privacy — what I collect and publish\n"
+    "/help — this message\n\n"
+    "In groups, reply to a message with /log to publish it anonymously."
+)
+HELP_GROUP: Final = (
+    "Reply to a message with /log to publish it anonymously to the Meta-wiki "
+    "log. Message me privately for anonymous transcription — /help there for details."
+)
+PRIVACY_TEXT: Final = (
+    "What I ingest: only messages explicitly marked with /log in groups, and "
+    "what you send me in this private chat. Telegram's privacy mode means "
+    "ordinary group chatter is never even delivered to me.\n\n"
+    "What I publish: sanitized text on public Meta-wiki pages — permanently. "
+    "/log entries carry no attribution at all; private messages appear under "
+    "a random per-session pseudonym that is never derived from your account.\n\n"
+    "What I store: nothing. No user IDs, usernames, or message archives; "
+    "sessions live only in memory and vanish on timeout, /flush, or restart. "
+    "My operational logs contain no content and no identifiers.\n\n"
+    "What I cannot protect: content that identifies you in its own words, "
+    "and the wiki's public edit timestamps."
+)
 
 _GROUP_TYPES: Final = frozenset({ChatType.GROUP, ChatType.SUPERGROUP})
 _MEMBER_STATUSES: Final = frozenset(
@@ -152,6 +182,13 @@ class GroupHandlers:
         user = message.from_user
         return user is None or self.limiter.allow("user", user.id)
 
+    async def on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Explain the /log gesture when asked in a served group."""
+        chat = update.effective_chat
+        if chat is None or chat.type not in _GROUP_TYPES or not self.groups.is_allowed(chat.id):
+            return
+        await context.bot.send_message(chat_id=chat.id, text=HELP_GROUP)
+
     async def on_newcomer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Offer newcomers a private welcome via a deep-link button (R5).
 
@@ -186,24 +223,62 @@ class PrivateHandlers:
     welcome_text: str
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Deliver the welcome and open a fresh pseudonymous session (R4, R5).
+        """Deliver the welcome message (R5) — nothing else.
 
-        ``/start`` always mints a new identity (spec 10) — both on first
-        contact (including the ``?start=welcome`` deep link) and when a
-        returning user wants to shed their current pseudonym.
+        ``/start`` arrives automatically when someone opens the chat
+        (including via the newcomer deep link). It neither mints nor
+        resets an identity: sessions are created lazily by the first
+        transcribed message, and rotation is the explicit ``/flush``.
         """
-        chat = update.effective_chat
-        if chat is None or chat.type != ChatType.PRIVATE:
+        chat = self._private_chat(update)
+        if chat is not None:
+            await context.bot.send_message(chat_id=chat.id, text=self.welcome_text)
+            log_event("welcome_delivered", "ok")
+
+    async def on_flush(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Discard the current pseudonym and mint a fresh one (spec 10).
+
+        This is the user-facing unlinkability boundary: nothing ties
+        what was said before a ``/flush`` to what is said after it.
+        """
+        chat = self._private_chat(update)
+        if chat is None:
             return
         session = self.sessions.reset(chat.id)
-        info = self._opened_session_notice(session)
-        await context.bot.send_message(chat_id=chat.id, text=f"{self.welcome_text}\n\n{info}")
+        notice = self._opened_session_notice(session)
+        await context.bot.send_message(chat_id=chat.id, text=f"{REPLY_FLUSHED}{notice}")
+
+    async def on_whoami(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Disclose the current pseudonym without rotating it."""
+        chat = self._private_chat(update)
+        if chat is None:
+            return
+        session = self.sessions.peek(chat.id)
+        if session is None:
+            await context.bot.send_message(chat_id=chat.id, text=REPLY_NO_SESSION)
+            return
+        info = REPLY_SESSION_INFO.format(
+            pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
+        )
+        await context.bot.send_message(chat_id=chat.id, text=info)
+
+    async def on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List the private-chat commands and what transcription means."""
+        chat = self._private_chat(update)
+        if chat is not None:
+            await context.bot.send_message(chat_id=chat.id, text=HELP_PRIVATE)
+
+    async def on_privacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """State exactly what is ingested, published, and stored."""
+        chat = self._private_chat(update)
+        if chat is not None:
+            await context.bot.send_message(chat_id=chat.id, text=PRIVACY_TEXT)
 
     async def on_dm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Transcribe one private message under the session pseudonym (R4)."""
         message = update.effective_message
-        chat = update.effective_chat
-        if chat is None or chat.type != ChatType.PRIVATE:
+        chat = self._private_chat(update)
+        if chat is None:
             return
         if message is None or not message.text:
             return
@@ -226,3 +301,11 @@ class PrivateHandlers:
         return REPLY_SESSION_INFO.format(
             pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
         )
+
+    @staticmethod
+    def _private_chat(update: Update) -> Chat | None:
+        """Return the chat if this update came from a private chat."""
+        chat = update.effective_chat
+        if chat is None or chat.type != ChatType.PRIVATE:
+            return None
+        return chat

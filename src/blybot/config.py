@@ -37,8 +37,8 @@ DEFAULT_GROUP_GREETING: Final = (
 DEFAULT_WELCOME: Final = (
     "Welcome! Anything you write to me here is transcribed to a public "
     "Meta-wiki page under a random per-session pseudonym. Your Telegram "
-    "name and ID are never recorded anywhere. Send /start at any time to "
-    "get a fresh identity."
+    "name and ID are never recorded anywhere. Send /flush at any time to "
+    "get a fresh identity, and /help for all commands."
 )
 
 

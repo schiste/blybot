@@ -27,6 +27,7 @@ from blybot.services.directory import ChannelDirectory
 from blybot.services.feedback import FeedbackService
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
+from blybot.services.repo import GroupRepoService
 from blybot.services.sessions import SessionRegistry
 from blybot.services.transcribe import DmTranscriptionService
 
@@ -83,6 +84,13 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 2
+    binding = TokenBinding(clock=clock)
+    gateway = GitHubRepoGateway(user_agent=config.user_agent)
+
+    async def release_clients() -> None:
+        await publisher.aclose()
+        await gateway.aclose()
+
     directory = ChannelDirectory(
         store=store,
         default_log_page=config.log_target_page,
@@ -112,16 +120,12 @@ def main() -> int:
         group_greeting_text=config.group_greeting_text,
         maintainer=config.maintainer,
         newcomer_welcome_enabled=config.newcomer_welcome_enabled,
+        repo_service=(
+            GroupRepoService(gateway=gateway, vault=store, directory=directory) if store else None
+        ),
         cleanup_delay_seconds=config.log_cleanup_seconds,
         reply_cleanup_delay_seconds=config.reply_cleanup_seconds,
     )
-    binding = TokenBinding(clock=clock)
-    gateway = GitHubRepoGateway(user_agent=config.user_agent)
-
-    async def release_clients() -> None:
-        await publisher.aclose()
-        await gateway.aclose()
-
     tracker = (
         GitHubIssueTracker(
             repo=config.github_repo,

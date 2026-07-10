@@ -121,6 +121,7 @@ class InMemoryProfiles:
     cursors: dict[int, str] = field(default_factory=dict)
     fail: bool = False
     fail_token_writes: bool = False
+    fail_token_reads: bool = False
 
     def _check(self) -> None:
         if self.fail:
@@ -167,6 +168,8 @@ class InMemoryProfiles:
 
     async def fetch_token(self, chat_id: int) -> str | None:
         self._check()
+        if self.fail_token_reads:
+            raise StorageError
         return self.tokens.get(chat_id)
 
     async def delete_token(self, chat_id: int) -> None:

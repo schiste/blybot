@@ -20,14 +20,16 @@ _BODY_PREAMBLE: Final = (
 )
 
 
-def _title_from(text: str) -> str:
+def issue_title(text: str) -> str:
+    """Collapse text into a capped single-line issue title."""
     first_line = " ".join(text.split())
     if len(first_line) > _TITLE_LIMIT:
         first_line = first_line[: _TITLE_LIMIT - 1] + "…"
     return first_line
 
 
-def _as_code_block(text: str) -> str:
+def as_code_block(text: str) -> str:
+    """Indent text so GitHub renders it verbatim: no pings, no markdown."""
     return "\n".join(f"    {line}" for line in text.splitlines())
 
 
@@ -40,6 +42,6 @@ class FeedbackService:
     async def report(self, text: str) -> str:
         """File ``text`` as an anonymous issue; return the issue URL."""
         return await self.tracker.open_issue(
-            title=_title_from(text),
-            body=_BODY_PREAMBLE + _as_code_block(text),
+            title=issue_title(text),
+            body=_BODY_PREAMBLE + as_code_block(text),
         )

@@ -16,11 +16,13 @@ from blybot.observability import Counters
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
+from blybot.services.repo import GroupRepoService
 from tests import tg
 from tests.fakes import (
     FailingPublisher,
     FakeClock,
     FakePublisher,
+    FakeRepoGateway,
     InMemoryProfiles,
     PassthroughSanitizer,
     SequentialPseudonyms,
@@ -42,9 +44,21 @@ def make_handlers(
     cleanup_delay_seconds: float = 0,
     reply_cleanup_delay_seconds: float = 0,
     newcomer_welcome_enabled: bool = True,
+    store: InMemoryProfiles | None = None,
+    gateway: FakeRepoGateway | None = None,
+    with_repo_service: bool = True,
 ) -> tuple[h.GroupHandlers, FakePublisher | FailingPublisher, GroupPolicy]:
     publisher = publisher if publisher is not None else FakePublisher()
     policy = GroupPolicy(allowed=allowed if allowed is not None else set())
+    store = store if store is not None else InMemoryProfiles()
+    gateway = gateway if gateway is not None else FakeRepoGateway()
+    directory = ChannelDirectory(
+        store=store,
+        default_log_page=LOG_PAGE,
+        default_consent=consent_mode,
+        default_repo="",
+        page_prefix="Telegram logs/",
+    )
     handlers = h.GroupHandlers(
         log_service=LogPublicationService(
             publisher=publisher,
@@ -57,20 +71,19 @@ def make_handlers(
         ),
         groups=policy,
         limiter=SlidingWindowLimiter(clock=FakeClock(), limit=limit, window=timedelta(minutes=1)),
-        directory=ChannelDirectory(
-            store=InMemoryProfiles(),
-            default_log_page=LOG_PAGE,
-            default_consent=consent_mode,
-            default_repo="schiste/blybot",
-            page_prefix="Telegram logs/",
-        ),
+        directory=directory,
         page_url_for=page_url_for,
         counters=Counters(),
         group_greeting_text="Hello, I am Blybot.",
         maintainer="Test Maintainer",
+        newcomer_welcome_enabled=newcomer_welcome_enabled,
+        repo_service=(
+            GroupRepoService(gateway=gateway, vault=store, directory=directory)
+            if with_repo_service
+            else None
+        ),
         cleanup_delay_seconds=cleanup_delay_seconds,
         reply_cleanup_delay_seconds=reply_cleanup_delay_seconds,
-        newcomer_welcome_enabled=newcomer_welcome_enabled,
     )
     return handlers, publisher, policy
 
@@ -329,3 +342,139 @@ async def test_log_publishes_to_the_group_configured_page() -> None:
     assert isinstance(publisher, FakePublisher)
     assert publisher.started[0][0] == "Telegram logs/Ours"
     assert "Telegram_logs/Ours#" in tg.sent_texts(bot)[0]
+
+
+async def bind_repo(
+    handlers: h.GroupHandlers, store: InMemoryProfiles, gateway: FakeRepoGateway
+) -> None:
+    await handlers.directory.set_repo(tg.GROUP.id, "wikimedia/mediawiki")
+    await store.store_token(tg.GROUP.id, "ghp_group")
+    gateway.valid_tokens.add("ghp_group")
+
+
+async def test_issue_files_with_the_group_token() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway()
+    handlers, _, _ = make_handlers(store=store, gateway=gateway)
+    await bind_repo(handlers, store, gateway)
+    context, bot = tg.make_context(args=["something", "broke"])
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue something broke")), context)
+
+    ((repo, token, title, body),) = gateway.issues
+    assert (repo, token, title) == ("wikimedia/mediawiki", "ghp_group", "something broke")
+    assert "anonymously" in body
+    assert tg.sent_texts(bot) == [
+        h.REPLY_BUG_FILED.format(url="https://github.com/wikimedia/mediawiki/issues/1")
+    ]
+
+
+async def test_issue_without_description_shows_usage() -> None:
+    handlers, _, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_USAGE]
+
+
+async def test_issue_without_binding_or_token_explains_what_is_missing() -> None:
+    store = InMemoryProfiles()
+    handlers, _, _ = make_handlers(store=store)
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
+
+    await handlers.directory.set_repo(tg.GROUP.id, "x/y")  # bound, but no token
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
+
+
+async def test_issue_in_v1_mode_points_at_setup() -> None:
+    handlers, _, _ = make_handlers(with_repo_service=False)
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
+
+
+async def test_issue_is_rate_limited() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway()
+    handlers, _, _ = make_handlers(store=store, gateway=gateway, limit=1)
+    await bind_repo(handlers, store, gateway)
+    for _ in range(2):
+        context, bot = tg.make_context(args=["x"])
+        await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
+    assert len(gateway.issues) == 1
+    assert tg.sent_texts(bot) == [h.REPLY_THROTTLED]
+
+
+async def test_issue_github_failure_reports_neutrally() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway()
+    handlers, _, _ = make_handlers(store=store, gateway=gateway)
+    await bind_repo(handlers, store, gateway)
+    gateway.fail = True
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_FAILED]
+
+
+async def test_issue_storage_failure_reports_neutrally() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway()
+    handlers, _, _ = make_handlers(store=store, gateway=gateway)
+    await bind_repo(handlers, store, gateway)
+    store.fail = True
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]  # resolve degraded to defaults
+
+    store.fail = False
+    store.fail_token_reads = True  # vault outage after a healthy resolve
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_FAILED]
+
+
+async def test_repo_summarizes_the_bound_repository() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway()
+    handlers, _, _ = make_handlers(store=store, gateway=gateway)
+    await bind_repo(handlers, store, gateway)
+    context, bot = tg.make_context()
+    await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
+    (sent,) = tg.sent_texts(bot)
+    assert "wikimedia/mediawiki: 2 open items" in sent
+    assert "A; B" in sent
+
+
+async def test_repo_without_binding_or_service_explains() -> None:
+    handlers, _, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
+
+    handlers, _, _ = make_handlers(with_repo_service=False)
+    context, bot = tg.make_context()
+    await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
+
+
+async def test_repo_reports_missing_token_and_failures() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway()
+    handlers, _, _ = make_handlers(store=store, gateway=gateway)
+    await handlers.directory.set_repo(tg.GROUP.id, "x/y")
+    context, bot = tg.make_context()
+    await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
+
+    await store.store_token(tg.GROUP.id, "ghp_group")
+    gateway.valid_tokens.add("ghp_group")
+    gateway.fail = True
+    context, bot = tg.make_context()
+    await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_FAILED]
+
+
+async def test_issue_and_repo_ignore_unlisted_groups_and_private_chats() -> None:
+    handlers, _, _ = make_handlers(allowed={-42})
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
+    await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
+    private = tg.command_update(tg.message(chat=tg.PRIVATE, text="/repo"))
+    await handlers.on_repo(private, context)
+    assert tg.sent_texts(bot) == []

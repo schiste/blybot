@@ -119,8 +119,18 @@ def build_application(
     application.add_handler(CommandHandler("flush", private_handlers.on_flush))
     application.add_handler(CommandHandler("whoami", private_handlers.on_whoami))
     application.add_handler(CommandHandler("privacy", private_handlers.on_privacy))
-    application.add_handler(CommandHandler("bug", private_handlers.on_bug))
-    application.add_handler(CommandHandler("issue", private_handlers.on_bug))
+    application.add_handler(
+        CommandHandler("bug", private_handlers.on_bug, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("issue", private_handlers.on_bug, filters=filters.ChatType.PRIVATE)
+    )
+    application.add_handler(
+        CommandHandler("issue", group_handlers.on_issue, filters=filters.ChatType.GROUPS)
+    )
+    application.add_handler(
+        CommandHandler("repo", group_handlers.on_repo, filters=filters.ChatType.GROUPS)
+    )
     for name, callback in (
         ("setup", admin_handlers.on_setup),
         ("setpage", admin_handlers.on_setpage),

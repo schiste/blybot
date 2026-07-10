@@ -26,6 +26,7 @@ from blybot.domain.models import ConsentMode
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 from blybot.observability import Counters, log_event
 from blybot.services.publish import NothingToPublishError
+from blybot.services.repo import NoRepoBoundError, NoTokenError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.publish import LogPublicationService
+    from blybot.services.repo import GroupRepoService
     from blybot.services.sessions import SessionRegistry
     from blybot.services.transcribe import DmTranscriptionService
 
@@ -70,6 +72,18 @@ REPLY_BUG_USAGE: Final = (
 REPLY_BUG_FILED: Final = "Filed anonymously: {url}"
 REPLY_BUG_DISABLED: Final = "Chat bug reports aren't enabled; please open an issue at {url}"
 REPLY_BUG_FAILED: Final = "Sorry, filing the issue failed — please report it at {url}"
+REPLY_ISSUE_USAGE: Final = "Describe the issue after the command: /issue something is broken"
+REPLY_ISSUE_UNBOUND: Final = (
+    "No repository is bound to this group — an admin can bind one with /setrepo."
+)
+REPLY_ISSUE_NO_PAT: Final = (
+    "A repository is bound but its token step was never completed — an admin "
+    "should run /setrepo again and follow the private link."
+)
+REPLY_ISSUE_FAILED: Final = "Sorry, GitHub refused that — the token may have expired (/setrepo)."
+REPLY_REPO_SUMMARY: Final = (
+    "{repo}: {count} open items. Recent: {titles}\nhttps://github.com/{repo}/issues"
+)
 REPLY_LINK_EXPIRED: Final = (
     "That configuration link is no longer valid. Run /setrepo in the group again for a fresh one."
 )
@@ -108,7 +122,8 @@ HELP_PRIVATE: Final = (
 HELP_GROUP: Final = (
     "Reply to a message with /log to publish it anonymously to the Meta-wiki "
     "log. Message me privately for anonymous transcription — /help there for "
-    "details. Group admins: /setup to configure me for this group."
+    "details. /issue files a bug in this group's repo; /repo shows its "
+    "status. Group admins: /setup to configure me."
 )
 PRIVACY_TEXT: Final = (
     "What I ingest: only messages explicitly marked with /log in groups, and "
@@ -180,6 +195,7 @@ class GroupHandlers:
     group_greeting_text: str
     maintainer: str
     newcomer_welcome_enabled: bool
+    repo_service: GroupRepoService | None
     # The /log command message is deleted after this delay, hiding who
     # requested the publication. Requires the "Delete messages" admin
     # right; without it the cleanup is skipped silently.
@@ -267,6 +283,77 @@ class GroupHandlers:
             return False
         user = message.from_user
         return user is None or self.limiter.allow("user", user.id)
+
+    async def on_issue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """File an anonymous issue in the group's bound repository."""
+        chat = self._served_group(update)
+        if chat is None:
+            return
+
+        async def reply(text: str) -> None:
+            await context.bot.send_message(chat_id=chat.id, text=text)
+
+        description = " ".join(context.args or ()).strip()
+        if not description:
+            await reply(REPLY_ISSUE_USAGE)
+            return
+        if self.repo_service is None:
+            await reply(REPLY_ISSUE_UNBOUND)
+            return
+        if not self.limiter.allow("issue", chat.id):
+            await reply(REPLY_THROTTLED)
+            return
+        try:
+            url = await self.repo_service.file_issue(chat.id, description)
+        except NoRepoBoundError:
+            await reply(REPLY_ISSUE_UNBOUND)
+        except NoTokenError:
+            await reply(REPLY_ISSUE_NO_PAT)
+        except StorageError:
+            await reply(REPLY_ISSUE_FAILED)
+        except IssueTrackerError:
+            log_event("group_issue", "error")
+            await reply(REPLY_ISSUE_FAILED)
+        else:
+            self.counters.increment("group_issues_filed")
+            log_event("group_issue", "ok")
+            await reply(REPLY_BUG_FILED.format(url=url))
+
+    async def on_repo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show the bound repository's open-items summary."""
+        chat = self._served_group(update)
+        if chat is None:
+            return
+
+        async def reply(text: str) -> None:
+            await context.bot.send_message(chat_id=chat.id, text=text)
+
+        if self.repo_service is None:
+            await reply(REPLY_ISSUE_UNBOUND)
+            return
+        try:
+            summary = await self.repo_service.summary(chat.id)
+        except NoRepoBoundError:
+            await reply(REPLY_ISSUE_UNBOUND)
+        except NoTokenError:
+            await reply(REPLY_ISSUE_NO_PAT)
+        except (StorageError, IssueTrackerError):
+            await reply(REPLY_ISSUE_FAILED)
+        else:
+            await reply(
+                REPLY_REPO_SUMMARY.format(
+                    repo=summary.repo,
+                    count=summary.open_count,
+                    titles="; ".join(summary.recent_titles) or "none",
+                )
+            )
+
+    def _served_group(self, update: Update) -> Chat | None:
+        """Return the chat when this is a group the bot serves."""
+        chat = update.effective_chat
+        if chat is None or chat.type not in _GROUP_TYPES or not self.groups.is_allowed(chat.id):
+            return None
+        return chat
 
     async def on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain the /log gesture when asked in a served group."""

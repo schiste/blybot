@@ -62,6 +62,7 @@ class Config:
     burst_debounce: timedelta
     timestamp_granularity: TimestampGranularity
     consent_mode: ConsentMode
+    newcomer_welcome_enabled: bool
     log_throttle_per_minute: int
     group_greeting_text: str
     welcome_text: str
@@ -119,6 +120,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         burst_debounce=timedelta(seconds=_parse_positive_int(source, "BURST_DEBOUNCE_SECONDS", 8)),
         timestamp_granularity=granularity,
         consent_mode=_parse_consent_mode(source.get("CONSENT_MODE", "immediate")),
+        newcomer_welcome_enabled=_parse_newcomer_welcome(source.get("NEWCOMER_WELCOME", "prompt")),
         log_throttle_per_minute=_parse_positive_int(source, "LOG_THROTTLE_PER_MINUTE", 6),
         group_greeting_text=source.get(
             "GROUP_GREETING_TEXT", DEFAULT_GROUP_GREETING.format(bot_name=bot_name)
@@ -129,6 +131,16 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         github_token=source.get("GITHUB_TOKEN", ""),
         user_agent=source["USER_AGENT"],
     )
+
+
+def _parse_newcomer_welcome(raw: str) -> bool:
+    """R5's in-group deep-link prompt is an operator switch: prompt or off."""
+    if raw == "prompt":
+        return True
+    if raw == "off":
+        return False
+    msg = "NEWCOMER_WELCOME must be one of: prompt, off"
+    raise ConfigurationError(msg)
 
 
 def _parse_consent_mode(raw: str) -> ConsentMode:

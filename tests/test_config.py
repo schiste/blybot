@@ -123,6 +123,14 @@ def test_maintainer_defaults_to_empty_and_page_url_builds_wmf_urls() -> None:
     assert named.maintainer == "User:Schiste"
 
 
+def test_newcomer_welcome_defaults_on_and_can_be_switched_off() -> None:
+    assert load_config(dict(REQUIRED)).newcomer_welcome_enabled is True
+    off = load_config(dict(REQUIRED) | {"NEWCOMER_WELCOME": "off"})
+    assert off.newcomer_welcome_enabled is False
+    with pytest.raises(ConfigurationError, match="NEWCOMER_WELCOME"):
+        load_config(dict(REQUIRED) | {"NEWCOMER_WELCOME": "sometimes"})
+
+
 def test_github_settings_default_to_public_repo_and_no_token() -> None:
     config = load_config(dict(REQUIRED))
     assert config.github_repo == "schiste/blybot"

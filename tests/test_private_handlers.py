@@ -296,3 +296,11 @@ async def test_bug_outside_private_chat_is_ignored() -> None:
     context, bot = tg.make_context(args=["x"])
     await handlers.on_bug(tg.command_update(tg.message(chat=tg.GROUP, text="/bug x")), context)
     assert tg.sent_texts(bot) == []
+
+
+async def test_newcomer_prompt_can_be_switched_off() -> None:
+    group_handlers, _, _ = make_group_handlers(newcomer_welcome_enabled=False)
+    context, bot = tg.make_context()
+    join = tg.membership_update(tg.GROUP, user=tg.ALICE, joined=True, mine=False)
+    await group_handlers.on_newcomer(join, context)
+    assert tg.sent_texts(bot) == []

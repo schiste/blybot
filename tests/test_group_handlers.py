@@ -34,6 +34,7 @@ def make_handlers(
     limit: int = 100,
     cleanup_delay_seconds: float = 0,
     reply_cleanup_delay_seconds: float = 0,
+    newcomer_welcome_enabled: bool = True,
 ) -> tuple[h.GroupHandlers, FakePublisher | FailingPublisher, GroupPolicy]:
     publisher = publisher if publisher is not None else FakePublisher()
     policy = GroupPolicy(allowed=allowed if allowed is not None else set())
@@ -57,6 +58,7 @@ def make_handlers(
         maintainer="Test Maintainer",
         cleanup_delay_seconds=cleanup_delay_seconds,
         reply_cleanup_delay_seconds=reply_cleanup_delay_seconds,
+        newcomer_welcome_enabled=newcomer_welcome_enabled,
     )
     return handlers, publisher, policy
 

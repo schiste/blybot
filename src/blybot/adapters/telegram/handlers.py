@@ -147,6 +147,7 @@ class GroupHandlers:
     log_page: str
     log_page_url: str
     maintainer: str
+    newcomer_welcome_enabled: bool
     # The /log command message is deleted after this delay, hiding who
     # requested the publication. Requires the "Delete messages" admin
     # right; without it the cleanup is skipped silently.
@@ -269,7 +270,10 @@ class GroupHandlers:
         The bot never DMs anyone unprompted — a private chat only opens
         when the newcomer taps the button and presses Start themselves,
         which is both the Telegram constraint and the privacy stance.
+        The whole prompt is an operator switch (NEWCOMER_WELCOME).
         """
+        if not self.newcomer_welcome_enabled:
+            return
         change = update.chat_member
         if change is None or change.chat.type not in _GROUP_TYPES:
             return

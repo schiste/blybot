@@ -76,16 +76,19 @@ def test_run_polling_opts_into_exactly_the_updates_privacy_mode_needs(
     assert seen["allowed_updates"] == [Update.MESSAGE, Update.MY_CHAT_MEMBER, Update.CHAT_MEMBER]
 
 
-async def test_post_init_starts_the_maintenance_task() -> None:
+async def test_post_init_starts_maintenance_and_shutdown_cancels_it() -> None:
     lifecycle, _, _ = make_lifecycle()
-    created: list[Any] = []
-    app = cast("_App", SimpleNamespace(create_task=created.append))
+    lifecycle.maintenance.interval_seconds = 3600  # never actually ticks
+    app = cast("_App", SimpleNamespace())
 
     await lifecycle.post_init(app)
+    task = lifecycle._maintenance_task
+    assert task is not None
+    assert not task.done()
 
-    (coroutine,) = created
-    assert coroutine.__qualname__ == "Maintenance.run_forever"
-    coroutine.close()  # not scheduled in this test
+    await lifecycle.post_shutdown(app)
+    await asyncio.sleep(0)  # let the cancellation land
+    assert task.cancelled()
 
 
 async def test_post_shutdown_flushes_buffers_then_releases_the_client() -> None:

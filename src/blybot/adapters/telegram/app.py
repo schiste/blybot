@@ -13,7 +13,7 @@ DM buffers so debounced content is not lost on a graceful restart.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
 from telegram import Update
@@ -68,15 +68,22 @@ class Lifecycle:
     maintenance: Maintenance
     transcription: DmTranscriptionService
     release: Callable[[], Awaitable[None]]
+    # Scheduled directly on the loop (PTB's create_task pre-start warns and
+    # would not track it anyway); held here so shutdown can cancel it.
+    _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False)
 
     async def post_init(self, app: _App) -> None:
         """Start the maintenance task once the event loop is running."""
-        app.create_task(self.maintenance.run_forever())
+        del app
+        loop = asyncio.get_running_loop()
+        self._maintenance_task = loop.create_task(self.maintenance.run_forever())
         log_event("startup", "ok")
 
     async def post_shutdown(self, app: _App) -> None:
-        """Flush pending DM buffers, then release the wiki client."""
+        """Stop maintenance, flush pending DM buffers, release the wiki client."""
         del app
+        if self._maintenance_task is not None:
+            self._maintenance_task.cancel()
         await self.transcription.flush_all()
         await self.release()
         log_event("shutdown", "ok")

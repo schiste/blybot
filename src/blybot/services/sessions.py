@@ -33,13 +33,10 @@ class SessionRegistry:
         Accessing a session refreshes its ``last_seen``; an expired
         session is replaced by a fresh identity rather than revived.
         """
-        now = self.clock.now()
-        existing = self._sessions.get(chat_id)
-        if existing is not None and now - existing.last_seen < self.ttl:
-            refreshed = replace(existing, last_seen=now)
-            self._sessions[chat_id] = refreshed
-            return refreshed
-        return self._mint(chat_id)
+        live = self.peek(chat_id)
+        if live is None:
+            return self._mint(chat_id)
+        return self._store(chat_id, replace(live, last_seen=self.clock.now()))
 
     def advance(self, chat_id: int) -> Session:
         """Like :meth:`touch`, but also count one recorded message.
@@ -48,9 +45,7 @@ class SessionRegistry:
         of the message being recorded — its discussion indentation depth.
         """
         current = self.touch(chat_id)
-        advanced = replace(current, message_count=current.message_count + 1)
-        self._sessions[chat_id] = advanced
-        return advanced
+        return self._store(chat_id, replace(current, message_count=current.message_count + 1))
 
     def peek(self, chat_id: int) -> Session | None:
         """Return the live session without refreshing or minting one.
@@ -82,5 +77,8 @@ class SessionRegistry:
             anchor=pseudonym.value,
             last_seen=self.clock.now(),
         )
+        return self._store(chat_id, session)
+
+    def _store(self, chat_id: int, session: Session) -> Session:
         self._sessions[chat_id] = session
         return session

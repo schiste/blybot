@@ -26,17 +26,25 @@ class FakePublisher:
     async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
         self.continued.append((page, heading, text, summary))
 
+    @property
+    def wrote_nothing(self) -> bool:
+        """Whether no text reached the wiki through ANY write operation.
+
+        Emptiness checks must cover both operations, or a handler
+        switched to the other write path would slip past them.
+        """
+        return not self.started and not self.continued
+
 
 class FailingPublisher:
     """Publisher whose every write fails (as if retries were exhausted)."""
 
-    async def start_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+    async def _fail(self, page: str, heading: str, text: str, summary: str) -> None:
         del page, heading, text, summary
         raise WikiWriteError
 
-    async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
-        del page, heading, text, summary
-        raise WikiWriteError
+    start_discussion = _fail
+    continue_discussion = _fail
 
 
 @dataclass

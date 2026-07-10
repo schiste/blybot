@@ -33,18 +33,6 @@ class ConsentMode(Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class LogEntry:
-    """A single sanitized message ready for publication to the group log."""
-
-    text: str
-
-    def __post_init__(self) -> None:
-        if not self.text.strip():
-            msg = "LogEntry text must be non-empty"
-            raise ValueError(msg)
-
-
-@dataclass(frozen=True, slots=True)
 class Pseudonym:
     """A per-session anonymous handle, minted from a CSPRNG (spec R6, section 10)."""
 

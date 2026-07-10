@@ -25,9 +25,10 @@ from blybot.observability import Counters, log_event
 from blybot.services.publish import NothingToPublishError
 
 if TYPE_CHECKING:
-    from telegram import Message, Update
+    from telegram import ChatMemberUpdated, Message, Update
     from telegram.ext import ContextTypes
 
+    from blybot.domain.models import Session
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.publish import LogPublicationService
     from blybot.services.sessions import SessionRegistry
@@ -64,6 +65,14 @@ def _same_author(command: Message, target: Message) -> bool:
         command.from_user is not None
         and target.from_user is not None
         and command.from_user.id == target.from_user.id
+    )
+
+
+def _just_joined(change: ChatMemberUpdated) -> bool:
+    """Whether this membership update is a fresh join (not a leave/promotion)."""
+    return (
+        change.old_chat_member.status not in _MEMBER_STATUSES
+        and change.new_chat_member.status in _MEMBER_STATUSES
     )
 
 
@@ -123,9 +132,7 @@ class GroupHandlers:
         change = update.my_chat_member
         if change is None or change.chat.type not in _GROUP_TYPES:
             return
-        was_in = change.old_chat_member.status in _MEMBER_STATUSES
-        is_in = change.new_chat_member.status in _MEMBER_STATUSES
-        if was_in or not is_in or not self.groups.is_allowed(change.chat.id):
+        if not _just_joined(change) or not self.groups.is_allowed(change.chat.id):
             return
         await context.bot.send_message(chat_id=change.chat.id, text=self.group_greeting_text)
         log_event("greeting", "ok")
@@ -155,11 +162,9 @@ class GroupHandlers:
         change = update.chat_member
         if change is None or change.chat.type not in _GROUP_TYPES:
             return
-        if not self.groups.is_allowed(change.chat.id):
+        if not _just_joined(change) or not self.groups.is_allowed(change.chat.id):
             return
-        was_in = change.old_chat_member.status in _MEMBER_STATUSES
-        is_in = change.new_chat_member.status in _MEMBER_STATUSES
-        if was_in or not is_in or change.new_chat_member.user.is_bot:
+        if change.new_chat_member.user.is_bot:
             return
         deep_link = f"https://t.me/{context.bot.username}?start=welcome"
         button = InlineKeyboardButton(text=NEWCOMER_BUTTON, url=deep_link)
@@ -191,11 +196,7 @@ class PrivateHandlers:
         if chat is None or chat.type != ChatType.PRIVATE:
             return
         session = self.sessions.reset(chat.id)
-        self.counters.increment("sessions_opened")
-        log_event("session_opened", "ok")
-        info = REPLY_SESSION_INFO.format(
-            pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
-        )
+        info = self._opened_session_notice(session)
         await context.bot.send_message(chat_id=chat.id, text=f"{self.welcome_text}\n\n{info}")
 
     async def on_dm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -215,9 +216,13 @@ class PrivateHandlers:
         if is_new_session:
             # Sessions can also start (or roll over) mid-conversation;
             # tell the user which identity their words appear under.
-            self.counters.increment("sessions_opened")
-            log_event("session_opened", "ok")
-            info = REPLY_SESSION_INFO.format(
-                pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
-            )
-            await context.bot.send_message(chat_id=chat.id, text=info)
+            notice = self._opened_session_notice(session)
+            await context.bot.send_message(chat_id=chat.id, text=notice)
+
+    def _opened_session_notice(self, session: Session) -> str:
+        """Count and log a session opening; return the user-facing notice."""
+        self.counters.increment("sessions_opened")
+        log_event("session_opened", "ok")
+        return REPLY_SESSION_INFO.format(
+            pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
+        )

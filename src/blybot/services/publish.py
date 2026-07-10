@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from blybot.domain.models import LogEntry, TimestampGranularity
+from blybot.domain.models import TimestampGranularity
 from blybot.domain.rendering import discussion_line
 
 if TYPE_CHECKING:
@@ -45,11 +45,10 @@ class LogPublicationService:
             msg = "referenced message has no text"
             raise NothingToPublishError(msg)
 
-        entry = LogEntry(text=self.sanitizer.sanitize(raw_text))
         await self.publisher.start_discussion(
             page=self.target_page,
             heading=self._heading(),
-            text=discussion_line(1, entry.text),
+            text=discussion_line(1, self.sanitizer.sanitize(raw_text)),
             summary=self.edit_summary,
         )
 

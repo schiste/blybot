@@ -8,29 +8,20 @@ from telegram import Update, User
 
 from blybot.adapters.telegram import handlers as h
 from blybot.observability import Counters
-from blybot.services.sessions import SessionRegistry
-from blybot.services.transcribe import DmTranscriptionService
 from tests import tg
-from tests.fakes import FakeClock, FakePublisher, PassthroughSanitizer, SequentialPseudonyms
+from tests.fakes import FakeClock, FakePublisher
 from tests.test_group_handlers import make_handlers as make_group_handlers
+from tests.test_transcribe import make_service
 
 TTL = timedelta(minutes=45)
 
 
 def make_handlers(clock: FakeClock | None = None) -> tuple[h.PrivateHandlers, FakePublisher]:
-    clock = clock or FakeClock()
     publisher = FakePublisher()
-    sessions = SessionRegistry(pseudonyms=SequentialPseudonyms(), clock=clock, ttl=TTL)
+    transcription = make_service(publisher, clock or FakeClock())
     handlers = h.PrivateHandlers(
-        transcription=DmTranscriptionService(
-            publisher=publisher,
-            sanitizer=PassthroughSanitizer(),
-            sessions=sessions,
-            target_page="Meta:Community/Discussions",
-            edit_summary="Log entry via Blybot",
-            debounce_seconds=0,
-        ),
-        sessions=sessions,
+        transcription=transcription,
+        sessions=transcription.sessions,
         counters=Counters(),
         welcome_text="Welcome to Blybot.",
     )
@@ -49,7 +40,7 @@ async def test_start_welcomes_and_opens_a_pseudonymous_session() -> None:
     (sent,) = tg.sent_texts(bot)
     assert sent.startswith("Welcome to Blybot.")
     assert "Anon-1" in sent
-    assert "Meta:Community/Discussions#Anon-1" in sent
+    assert "Meta talk:Community/Discussions#Anon-1" in sent
 
 
 async def test_start_always_forces_a_fresh_identity() -> None:
@@ -75,7 +66,7 @@ async def test_dm_is_transcribed_under_the_session_pseudonym() -> None:
     await handlers.on_dm(dm("hello there"), context)
 
     (page, heading, text, _) = publisher.started[0]
-    assert page == "Meta:Community/Discussions"
+    assert page == "Meta talk:Community/Discussions"
     assert heading == "Anon-1"
     assert text == ": [sanitized]hello there"
 
@@ -108,8 +99,7 @@ async def test_group_messages_never_reach_transcription() -> None:
     context, _ = tg.make_context()
     group_msg = tg.command_update(tg.message(chat=tg.GROUP, text="group chatter"))
     await handlers.on_dm(group_msg, context)
-    assert publisher.started == []
-    assert publisher.continued == []
+    assert publisher.wrote_nothing
 
 
 async def test_newcomer_gets_a_deep_link_button_not_a_dm() -> None:

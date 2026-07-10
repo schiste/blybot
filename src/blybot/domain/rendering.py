@@ -11,9 +11,10 @@ from __future__ import annotations
 def discussion_line(depth: int, text: str) -> str:
     """Render one indented discussion line.
 
-    ``depth`` is the message's ordinal in its exchange — each reply
-    indents one level deeper, the wiki convention for a back-and-forth.
-    Newlines inside the message become ``<br>`` so a multi-line message
-    stays one discussion line and the indentation cannot be broken.
+    ``depth`` is the message's 1-based ordinal in its exchange — each
+    reply indents one level deeper, the wiki convention for a
+    back-and-forth. Newlines inside the message become ``<br>`` so a
+    multi-line message stays one discussion line and the indentation
+    cannot be broken.
     """
-    return ":" * max(depth, 1) + " " + text.replace("\n", "<br>")
+    return ":" * depth + " " + text.replace("\n", "<br>")

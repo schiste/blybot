@@ -67,7 +67,7 @@ async def test_log_without_reply_explains_usage() -> None:
     context, bot = tg.make_context()
     await handlers.on_log(log_command(None), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.started == []
+    assert publisher.wrote_nothing
     assert tg.sent_texts(bot) == [h.REPLY_USAGE]
 
 
@@ -78,7 +78,7 @@ async def test_log_on_media_only_message_declines(  # R2: media-only
     target = tg.message(text=None, from_user=tg.ALICE)
     await handlers.on_log(log_command(target), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.started == []
+    assert publisher.wrote_nothing
     assert tg.sent_texts(bot) == [h.REPLY_MEDIA_DECLINED]
 
 
@@ -87,7 +87,7 @@ async def test_log_in_unlisted_group_is_ignored_silently() -> None:
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.started == []
+    assert publisher.wrote_nothing
     assert tg.sent_texts(bot) == []
 
 
@@ -97,7 +97,7 @@ async def test_log_outside_a_group_is_ignored() -> None:
     command = tg.message(chat=tg.PRIVATE, text="/log")
     await handlers.on_log(tg.command_update(command), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.started == []
+    assert publisher.wrote_nothing
     assert tg.sent_texts(bot) == []
 
 
@@ -107,7 +107,7 @@ async def test_author_only_mode_blocks_logging_others() -> None:
     target = tg.message(text="Alice's words", from_user=tg.ALICE)
     await handlers.on_log(log_command(target, sender=tg.BOB), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.started == []
+    assert publisher.wrote_nothing
     assert tg.sent_texts(bot) == [h.REPLY_AUTHOR_ONLY]
 
 

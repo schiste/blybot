@@ -6,6 +6,7 @@ from datetime import timedelta
 
 from telegram import Chat, Message, Update, User
 from telegram.constants import ChatType
+from telegram.error import TelegramError
 
 from blybot.adapters.telegram import handlers as h
 from blybot.domain.models import ConsentMode, TimestampGranularity
@@ -13,7 +14,13 @@ from blybot.observability import Counters
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
 from tests import tg
-from tests.fakes import FailingPublisher, FakeClock, FakePublisher, PassthroughSanitizer
+from tests.fakes import (
+    FailingPublisher,
+    FakeClock,
+    FakePublisher,
+    PassthroughSanitizer,
+    SequentialPseudonyms,
+)
 
 LOG_PAGE = "Meta:Community/Log"
 
@@ -23,6 +30,7 @@ def make_handlers(
     consent_mode: ConsentMode = ConsentMode.IMMEDIATE,
     allowed: set[int] | None = None,
     limit: int = 100,
+    cleanup_delay_seconds: float = 0,
 ) -> tuple[h.GroupHandlers, FakePublisher | FailingPublisher, GroupPolicy]:
     publisher = publisher if publisher is not None else FakePublisher()
     policy = GroupPolicy(allowed=allowed if allowed is not None else set())
@@ -30,6 +38,7 @@ def make_handlers(
         log_service=LogPublicationService(
             publisher=publisher,
             sanitizer=PassthroughSanitizer(),
+            pseudonyms=SequentialPseudonyms(),
             clock=FakeClock(),
             target_page=LOG_PAGE,
             edit_summary="Log entry via Blybot",
@@ -43,6 +52,7 @@ def make_handlers(
         log_page=LOG_PAGE,
         log_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Log",
         maintainer="Test Maintainer",
+        cleanup_delay_seconds=cleanup_delay_seconds,
     )
     return handlers, publisher, policy
 
@@ -232,3 +242,37 @@ async def test_group_help_stays_silent_in_unlisted_groups_and_dms() -> None:
     await handlers.on_help(tg.command_update(tg.message(text="/help")), context)
     await handlers.on_help(tg.command_update(tg.message(chat=tg.PRIVATE, text="/help")), context)
     assert tg.sent_texts(bot) == []
+
+
+async def test_log_command_message_is_deleted_after_handling() -> None:
+    """The command's deletion hides who requested the publication."""
+    handlers, _, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+
+    call = bot.delete_message.await_args
+    assert call is not None
+    assert call.kwargs == {"chat_id": tg.GROUP.id, "message_id": 10}
+
+
+async def test_command_cleanup_without_delete_right_is_silent() -> None:
+    """Bots need the 'Delete messages' admin right to remove others' messages."""
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    bot.delete_message.side_effect = TelegramError("not enough rights")
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+
+    assert isinstance(publisher, FakePublisher)
+    assert len(publisher.started) == 1  # publication is unaffected
+
+
+async def test_command_cleanup_runs_as_a_background_task_when_delayed() -> None:
+    handlers, _, _ = make_handlers(cleanup_delay_seconds=0.01)
+    context, bot = tg.make_context()
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+
+    assert bot.delete_message.await_count == 0  # not yet: delay pending
+    for task in list(handlers._cleanup_tasks):
+        await task
+    assert bot.delete_message.await_count == 1
+    assert not handlers._cleanup_tasks  # done-callback pruned the registry

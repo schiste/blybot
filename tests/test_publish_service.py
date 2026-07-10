@@ -6,7 +6,7 @@ import pytest
 
 from blybot.domain.models import TimestampGranularity
 from blybot.services.publish import LogPublicationService, NothingToPublishError
-from tests.fakes import FakeClock, FakePublisher, PassthroughSanitizer
+from tests.fakes import FakeClock, FakePublisher, PassthroughSanitizer, SequentialPseudonyms
 
 
 def make_service(
@@ -16,6 +16,7 @@ def make_service(
     return LogPublicationService(
         publisher=publisher,
         sanitizer=PassthroughSanitizer(),
+        pseudonyms=SequentialPseudonyms(),
         clock=FakeClock(),
         target_page="Meta talk:Community/Log",
         edit_summary="Log entry via Blybot",
@@ -29,8 +30,8 @@ async def test_each_log_opens_its_own_section_with_an_indented_entry() -> None:
 
     (page, heading, text, summary) = publisher.started[0]
     assert page == "Meta talk:Community/Log"
-    assert heading == "2026-07-10"  # coarse date only (spec section 9)
-    assert text == ": [sanitized]we decided X"
+    assert heading == "2026-07-10 : Anon-1"  # date + one-off pseudonym
+    assert text == ": [sanitized]we decided X --Anon-1"
     assert summary == "Log entry via Blybot"
 
 
@@ -62,25 +63,30 @@ async def test_media_only_messages_are_declined(raw: str | None) -> None:
 async def test_multi_line_messages_stay_one_discussion_line() -> None:
     publisher = FakePublisher()
     await make_service(publisher).publish("line one\nline two")
-    assert publisher.started[0][2] == ": [sanitized]line one<br>line two"
+    assert publisher.started[0][2] == ": [sanitized]line one<br>line two --Anon-1"
 
 
 async def test_none_granularity_uses_a_neutral_heading() -> None:
     publisher = FakePublisher()
     await make_service(publisher, TimestampGranularity.NONE).publish("hello")
     heading = publisher.started[0][1]
-    assert heading == "Log entry"
+    assert heading == "Anon-1"  # pseudonym alone when timestamps are off
     assert "2026" not in heading
 
 
 async def test_minute_granularity_stamps_time_in_the_heading() -> None:
     publisher = FakePublisher()
     await make_service(publisher, TimestampGranularity.MINUTE).publish("hello")
-    assert publisher.started[0][1] == "2026-07-10 - 12:00 UTC"
+    assert publisher.started[0][1] == "2026-07-10 - 12:00 UTC : Anon-1"
 
 
-async def test_log_entries_are_never_signed() -> None:
-    """R6: /log carries no attribution — not even a pseudonym."""
+async def test_each_log_entry_gets_a_fresh_one_off_pseudonym() -> None:
+    """R6: the signature is a label minted per entry — zero linkage."""
     publisher = FakePublisher()
-    await make_service(publisher).publish("hello")
-    assert "--" not in publisher.started[0][2]
+    service = make_service(publisher)
+    await service.publish("first")
+    await service.publish("second")
+    headings = [entry[1] for entry in publisher.started]
+    signatures = [entry[2].rsplit("--", 1)[1] for entry in publisher.started]
+    assert signatures == ["Anon-1", "Anon-2"]  # never repeated
+    assert headings == ["2026-07-10 : Anon-1", "2026-07-10 : Anon-2"]

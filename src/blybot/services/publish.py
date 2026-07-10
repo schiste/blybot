@@ -1,10 +1,11 @@
 """Use-case: publish a ``/log``-marked group message to the Meta log page (spec R2).
 
 Every ``/log`` opens its own section on the log talk page (one section =
-one log), with the entry indented as an *unsigned* discussion line —
-log entries carry no attribution, not even a pseudonym (R6). The
-heading is the publication timestamp at the configured granularity, or
-a fixed neutral title when timestamps are disabled.
+one log). The entry is signed with a **one-off pseudonym minted for
+that single entry** — a pure label with zero linkage: it never repeats,
+so it identifies nothing and nobody (R6). The heading is the
+publication timestamp at the configured granularity plus that
+pseudonym.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from blybot.domain.rendering import discussion_line, section_heading, timestamp
 
 if TYPE_CHECKING:
     from blybot.domain.models import TimestampGranularity
-    from blybot.domain.ports import Clock, Sanitizer, WikiPublisher
+    from blybot.domain.ports import Clock, PseudonymFactory, Sanitizer, WikiPublisher
 
 
 class NothingToPublishError(Exception):
@@ -29,6 +30,7 @@ class LogPublicationService:
 
     publisher: WikiPublisher
     sanitizer: Sanitizer
+    pseudonyms: PseudonymFactory
     clock: Clock
     target_page: str
     edit_summary: str
@@ -45,9 +47,12 @@ class LogPublicationService:
             raise NothingToPublishError(msg)
 
         stamp = timestamp(self.clock.now(), self.timestamp_granularity)
+        entry_pseudonym = self.pseudonyms.mint()  # one-off, never reused
         await self.publisher.start_discussion(
             page=self.target_page,
-            heading=section_heading(stamp, None),
-            text=discussion_line(1, self.sanitizer.sanitize(raw_text)),
+            heading=section_heading(stamp, entry_pseudonym.value),
+            text=discussion_line(
+                1, self.sanitizer.sanitize(raw_text), signature=entry_pseudonym.value
+            ),
             summary=self.edit_summary,
         )

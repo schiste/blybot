@@ -13,11 +13,13 @@ attached) and service messages; ordinary chatter is never delivered.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import asyncio
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatType
+from telegram.error import TelegramError
 
 from blybot.domain.models import ConsentMode
 from blybot.domain.ports import IssueTrackerError, WikiWriteError
@@ -25,7 +27,7 @@ from blybot.observability import Counters, log_event
 from blybot.services.publish import NothingToPublishError
 
 if TYPE_CHECKING:
-    from telegram import Chat, ChatMemberUpdated, Message, Update
+    from telegram import Bot, Chat, ChatMemberUpdated, Message, Update
     from telegram.ext import ContextTypes
 
     from blybot.domain.models import Session
@@ -145,6 +147,11 @@ class GroupHandlers:
     log_page: str
     log_page_url: str
     maintainer: str
+    # The /log command message is deleted after this delay, hiding who
+    # requested the publication. Requires the "Delete messages" admin
+    # right; without it the cleanup is skipped silently.
+    cleanup_delay_seconds: float = 5.0
+    _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
     async def on_log(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Publish the replied-to message anonymously (R2)."""
@@ -160,6 +167,7 @@ class GroupHandlers:
         if not self.groups.is_allowed(chat.id):
             log_event("log_command", "ignored")
             return
+        await self._schedule_command_cleanup(context.bot, chat.id, message.message_id)
 
         async def reply(text: str) -> None:
             await context.bot.send_message(chat_id=chat.id, text=text)
@@ -222,6 +230,23 @@ class GroupHandlers:
             return
         text = HELP_GROUP + _help_footer(self.log_page_url, self.maintainer)
         await context.bot.send_message(chat_id=chat.id, text=text)
+
+    async def _schedule_command_cleanup(self, bot: Bot, chat_id: int, message_id: int) -> None:
+        if self.cleanup_delay_seconds <= 0:
+            await self._delete_after(bot, chat_id, message_id)
+            return
+        task = asyncio.get_running_loop().create_task(self._delete_after(bot, chat_id, message_id))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+
+    async def _delete_after(self, bot: Bot, chat_id: int, message_id: int) -> None:
+        await asyncio.sleep(self.cleanup_delay_seconds)
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except TelegramError:
+            # Deleting others' messages needs the "Delete messages"
+            # admin right; running without it is fine, just untidy.
+            log_event("command_cleanup", "ignored")
 
     async def on_newcomer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Offer newcomers a private welcome via a deep-link button (R5).

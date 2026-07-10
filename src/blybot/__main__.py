@@ -44,8 +44,9 @@ def main() -> int:
         user_agent=config.user_agent,
         counters=counters,
     )
+    pseudonyms = RandomPseudonymFactory()
     sessions = SessionRegistry(
-        pseudonyms=RandomPseudonymFactory(),
+        pseudonyms=pseudonyms,
         clock=clock,
         ttl=config.session_ttl,
     )
@@ -62,6 +63,7 @@ def main() -> int:
         log_service=LogPublicationService(
             publisher=publisher,
             sanitizer=sanitizer,
+            pseudonyms=pseudonyms,
             clock=clock,
             target_page=config.log_target_page,
             edit_summary=config.edit_summary,

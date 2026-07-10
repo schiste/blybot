@@ -23,10 +23,18 @@ class WikiWriteError(Exception):
 
 
 class WikiPublisher(Protocol):
-    """Appends text to a wiki page (spec section 9: ``action=edit`` + ``appendtext``)."""
+    """Writes discussions to a wiki talk page (spec section 9).
 
-    async def append(self, page: str, text: str, summary: str) -> None:
-        """Append ``text`` to ``page`` with a generic, non-identifying ``summary``."""
+    Every log is one section: a single ``/log`` entry opens its own
+    section, and a DM session holds one section for its whole exchange.
+    """
+
+    async def start_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        """Open a new section titled ``heading`` on ``page`` (always a new section)."""
+        ...
+
+    async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        """Append ``text`` inside the latest section titled ``heading``, creating it if absent."""
         ...
 
 

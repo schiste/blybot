@@ -51,7 +51,7 @@ def main() -> int:
         publisher=publisher,
         sanitizer=sanitizer,
         sessions=sessions,
-        target_base=config.dm_target_base,
+        target_page=config.dm_target_base,
         edit_summary=config.edit_summary,
         debounce_seconds=config.burst_debounce.total_seconds(),
     )

@@ -4,7 +4,8 @@ Implements :class:`blybot.domain.ports.WikiPublisher` directly against the
 MediaWiki Action API with ``httpx`` (async, and already in the dependency
 tree via python-telegram-bot):
 
-* ``action=edit`` + ``appendtext`` — server-side append, conflict-free;
+* ``section=new`` for new discussions and ``appendtext`` into a located
+  section for continuations — both server-side appends, conflict-free;
 * BotPassword login with automatic re-login on ``assertuserfailed``;
 * ``assert=user`` on every edit so a dropped session fails loudly
   instead of editing logged-out;
@@ -64,10 +65,6 @@ class MetaWikiPublisher:
             timeout=httpx.Timeout(30.0),
             transport=transport,
         )
-
-    async def append(self, page: str, text: str, summary: str) -> None:
-        """Append ``text`` to ``page``; raise :class:`WikiPublishError` on failure."""
-        await self._submit_edit({"title": page, "appendtext": text, "summary": summary})
 
     async def start_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
         """Open a new section on ``page`` (``section=new`` is an atomic append)."""

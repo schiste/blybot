@@ -6,16 +6,37 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from blybot.domain.models import Pseudonym
+from blybot.domain.ports import WikiWriteError
 
 
 @dataclass
 class FakePublisher:
-    """Records appends instead of hitting the network."""
+    """Records discussion writes instead of hitting the network.
 
-    appends: list[tuple[str, str, str]] = field(default_factory=list)
+    Each recorded entry is ``(page, heading, text, summary)``; ``started``
+    holds new sections, ``continued`` holds appends into existing ones.
+    """
 
-    async def append(self, page: str, text: str, summary: str) -> None:
-        self.appends.append((page, text, summary))
+    started: list[tuple[str, str, str, str]] = field(default_factory=list)
+    continued: list[tuple[str, str, str, str]] = field(default_factory=list)
+
+    async def start_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        self.started.append((page, heading, text, summary))
+
+    async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        self.continued.append((page, heading, text, summary))
+
+
+class FailingPublisher:
+    """Publisher whose every write fails (as if retries were exhausted)."""
+
+    async def start_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        del page, heading, text, summary
+        raise WikiWriteError
+
+    async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        del page, heading, text, summary
+        raise WikiWriteError
 
 
 class PassthroughSanitizer:

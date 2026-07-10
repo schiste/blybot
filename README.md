@@ -8,9 +8,12 @@ bots, rebuilt around a privacy-first premise. It never journals conversations
 and keeps no statistics. It only ever ingests two things:
 
 1. a group message a user **explicitly marks** by replying with `/log` —
-   published to a configured Meta page with **no attribution**;
+   published to a configured Meta talk page with **no attribution**, one
+   section per entry;
 2. messages sent to it in a **private chat** — transcribed to Meta as an
-   anonymized discussion under a per-session pseudonym that is never persisted.
+   anonymized talk-page discussion (one section per session, each message
+   indented one level deeper) under a per-session pseudonym that is never
+   persisted.
 
 The bot is *structurally* incapable of seeing ordinary group chatter: it runs
 with Telegram's privacy mode **on**, so non-command messages are never even
@@ -34,7 +37,8 @@ words, and the precise edit times in the wiki's public history. `/log` means
 
 **Feature-complete for v1** (spec Phases 1–3): the group `/log` flow with
 confirmation and consent policy, greet-on-entry, DM transcription with
-per-session subpages and burst coalescing, the newcomer deep-link welcome,
+per-session talk-page sections and burst coalescing, the newcomer deep-link
+welcome,
 rate limiting, and a maxlag-aware MediaWiki publisher. What remains before
 going live is Phase 0 operations — BotFather registration (privacy mode ON),
 the on-wiki BotPassword, target pages, and the Toolforge outbound check —
@@ -51,13 +55,13 @@ src/blybot/
 │   ├── sanitizer.py    wikitext neutralization (entity encoding)
 │   └── pseudonym.py    CSPRNG pseudonym minting
 ├── services/     use-cases, depend on domain ports only
-│   ├── publish.py      /log → sanitized append to the Meta log page
-│   ├── transcribe.py   DM transcription: per-session subpages, debounced writes
+│   ├── publish.py      /log → one talk-page section per entry
+│   ├── transcribe.py   DM sessions: one section each, indented discussion
 │   ├── sessions.py     volatile DM session registry (TTL, peek, reset, sweep)
 │   └── policy.py       group allowlist + supergroup migration, /log throttle
 ├── adapters/     the only layer allowed to touch I/O libraries
 │   ├── telegram/       handlers (the anonymity boundary) + polling bootstrap
-│   ├── mediawiki/      async appendtext publisher: maxlag, backoff, assert=user
+│   ├── mediawiki/      async discussion publisher: sections, maxlag, assert=user
 │   └── system.py       wall clock
 ├── observability.py    identifier-free event logging and counters
 ├── config.py     env-based configuration, validates without echoing secrets
@@ -105,8 +109,8 @@ Pre-flight checklist (spec Phase 0) before the first launch:
 2. Register the bot with BotFather and confirm **privacy mode is ON**.
 3. Create the on-wiki bot account, issue a least-privilege BotPassword,
    and ideally request the bot flag.
-4. Create `LOG_TARGET_PAGE` and the `DM_TARGET_BASE` root, and confirm the
-   account can edit them (DM sessions create subpages under the base).
+4. Create the `LOG_TARGET_PAGE` and `DM_TARGET_BASE` talk pages and confirm
+   the account can edit them (every log/session becomes a section on them).
 5. For reliable newcomer detection (`chat_member` updates), make the bot a
    group admin; without admin, greet-on-entry still works but silent link
    joins may be missed.

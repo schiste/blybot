@@ -1,11 +1,11 @@
 """Use-case: transcribe a DM session to Meta (spec R4, N2, N3).
 
-**Anchoring (resolves the spec section 18 design question):** each
-session writes to its own subpage, ``{DM_TARGET_BASE}/{pseudonym}``.
-``appendtext`` always appends at the end of a page, so concurrent
-sessions sharing one page would interleave; per-session subpages are the
-only layout that keeps N3's no-interleaving guarantee while staying
-conflict-free.
+**Layout:** the DM target is one talk page; each session is one section
+on it (heading = pseudonym), so one section = one whole exchange. Every
+message is a discussion line indented one level deeper than the last —
+the wiki convention for a back-and-forth. Sections never interleave:
+appends land inside the session's own section by heading, and the
+publisher creates the section if it is missing.
 
 **Write discipline (spec 10):** nothing is buffered persistently.
 Messages are coalesced for at most ``debounce_seconds`` (N2) in memory,
@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from blybot.domain.ports import WikiWriteError
+from blybot.domain.rendering import discussion_line
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ class DmTranscriptionService:
     publisher: WikiPublisher
     sanitizer: Sanitizer
     sessions: SessionRegistry
-    target_base: str
+    target_page: str
     edit_summary: str
     debounce_seconds: float
     _buffers: dict[int, _Buffer] = field(default_factory=dict)
@@ -56,13 +57,13 @@ class DmTranscriptionService:
         With debounce zero the write is immediate and failures propagate
         to the caller.
         """
-        session = self.sessions.touch(chat_id)
-        line = f": {session.pseudonym.value}: {self.sanitizer.sanitize(text)}"
+        session = self.sessions.advance(chat_id)
+        line = discussion_line(session.message_count, self.sanitizer.sanitize(text))
 
         buffer = self._buffers.get(chat_id)
         if buffer is not None and buffer.anchor != session.anchor:
             # The session rolled over mid-buffer; close out the old
-            # identity's page before writing under the new one.
+            # identity's section before writing under the new one.
             await self._flush(chat_id)
             buffer = None
         if buffer is None:
@@ -87,8 +88,8 @@ class DmTranscriptionService:
                 log_event("dm_flush", "error")
 
     def page_for(self, session: Session) -> str:
-        """Return the wiki page this session's discussion lands on."""
-        return f"{self.target_base}/{session.anchor}"
+        """Return the page (with section anchor) this session's discussion lands on."""
+        return f"{self.target_page}#{session.anchor}"
 
     async def _flush_later(self, chat_id: int) -> None:
         await asyncio.sleep(self.debounce_seconds)
@@ -106,9 +107,10 @@ class DmTranscriptionService:
             # A rollover or shutdown flushed this buffer early; the
             # scheduled flusher must not fire against the next buffer.
             flusher.cancel()
-        await self.publisher.append(
-            page=f"{self.target_base}/{buffer.anchor}",
-            text="\n" + "\n".join(buffer.lines),
+        await self.publisher.continue_discussion(
+            page=self.target_page,
+            heading=buffer.anchor,
+            text="\n".join(buffer.lines),
             summary=self.edit_summary,
         )
         log_event("dm_flush", "ok", lines=len(buffer.lines))

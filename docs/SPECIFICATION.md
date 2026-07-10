@@ -154,9 +154,9 @@ Design so these remain possible without rework: quote store and `/quote` retriev
 
 **Write method.** Prefer `action=edit` with `appendtext` for appends. `appendtext` is server-side and largely conflict-free, which suits incremental writes from multiple concurrent DM sessions.
 
-**Page layout.**
-- **Group log:** entries append to a running section on the configured log page.
-- **DM discussions:** each session writes to its own section (heading = pseudonym) or its own subpage, so concurrent sessions do not interleave (N3). Messages render as an indented discussion, each line prefixed by the session pseudonym.
+**Page layout.** Output is talk-page style: **one section = one log**.
+- **Group log:** every `/log` opens its own section on the configured log talk page (`section=new`, an atomic append). The entry renders as an indented discussion line; the heading is the coarse date (or a neutral title when timestamps are off).
+- **DM discussions:** each session is one section on the DM talk page (heading = pseudonym), holding the whole exchange. Each message is a discussion line indented one level deeper than the last, tracking the back-and-forth. Appends target the session's section by heading, so concurrent sessions never interleave (N3); if the section is missing (archived mid-session), it is recreated.
 
 **Timestamps.** On-page timestamps default to coarse (date only) or none, to limit correlation with Telegram activity. Note that the MediaWiki edit history records the precise edit time regardless; this residual exposure is acknowledged, not eliminated.
 

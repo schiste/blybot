@@ -8,19 +8,13 @@ from telegram import Message, Update, User
 
 from blybot.adapters.telegram import handlers as h
 from blybot.domain.models import ConsentMode, TimestampGranularity
-from blybot.domain.ports import WikiWriteError
 from blybot.observability import Counters
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
 from tests import tg
-from tests.fakes import FakeClock, FakePublisher, PassthroughSanitizer
+from tests.fakes import FailingPublisher, FakeClock, FakePublisher, PassthroughSanitizer
 
 LOG_PAGE = "Meta:Community/Log"
-
-
-class FailingPublisher:
-    async def append(self, page: str, text: str, summary: str) -> None:  # noqa: ARG002
-        raise WikiWriteError
 
 
 def make_handlers(
@@ -62,7 +56,7 @@ async def test_log_publishes_target_text_and_confirms() -> None:
     await handlers.on_log(log_command(target), context)
 
     assert isinstance(publisher, FakePublisher)
-    (page, text, _) = publisher.appends[0]
+    (page, _, text, _) = publisher.started[0]
     assert page == LOG_PAGE
     assert "[sanitized]we decided X" in text
     assert tg.sent_texts(bot) == [h.REPLY_PUBLISHED.format(page=LOG_PAGE)]
@@ -73,7 +67,7 @@ async def test_log_without_reply_explains_usage() -> None:
     context, bot = tg.make_context()
     await handlers.on_log(log_command(None), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.appends == []
+    assert publisher.started == []
     assert tg.sent_texts(bot) == [h.REPLY_USAGE]
 
 
@@ -84,7 +78,7 @@ async def test_log_on_media_only_message_declines(  # R2: media-only
     target = tg.message(text=None, from_user=tg.ALICE)
     await handlers.on_log(log_command(target), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.appends == []
+    assert publisher.started == []
     assert tg.sent_texts(bot) == [h.REPLY_MEDIA_DECLINED]
 
 
@@ -93,7 +87,7 @@ async def test_log_in_unlisted_group_is_ignored_silently() -> None:
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.appends == []
+    assert publisher.started == []
     assert tg.sent_texts(bot) == []
 
 
@@ -103,7 +97,7 @@ async def test_log_outside_a_group_is_ignored() -> None:
     command = tg.message(chat=tg.PRIVATE, text="/log")
     await handlers.on_log(tg.command_update(command), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.appends == []
+    assert publisher.started == []
     assert tg.sent_texts(bot) == []
 
 
@@ -113,7 +107,7 @@ async def test_author_only_mode_blocks_logging_others() -> None:
     target = tg.message(text="Alice's words", from_user=tg.ALICE)
     await handlers.on_log(log_command(target, sender=tg.BOB), context)
     assert isinstance(publisher, FakePublisher)
-    assert publisher.appends == []
+    assert publisher.started == []
     assert tg.sent_texts(bot) == [h.REPLY_AUTHOR_ONLY]
 
 
@@ -123,7 +117,7 @@ async def test_author_only_mode_allows_logging_your_own_message() -> None:
     target = tg.message(text="my own words", from_user=tg.ALICE)
     await handlers.on_log(log_command(target, sender=tg.ALICE), context)
     assert isinstance(publisher, FakePublisher)
-    assert len(publisher.appends) == 1
+    assert len(publisher.started) == 1
 
 
 async def test_flooding_is_throttled(  # N4
@@ -133,7 +127,7 @@ async def test_flooding_is_throttled(  # N4
     for _ in range(3):
         await handlers.on_log(log_command(tg.message(text="x", from_user=tg.ALICE)), context)
     assert isinstance(publisher, FakePublisher)
-    assert len(publisher.appends) == 2
+    assert len(publisher.started) == 2
     assert tg.sent_texts(bot)[-1] == h.REPLY_THROTTLED
 
 

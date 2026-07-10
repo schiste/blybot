@@ -26,7 +26,7 @@ def make_handlers(clock: FakeClock | None = None) -> tuple[h.PrivateHandlers, Fa
             publisher=publisher,
             sanitizer=PassthroughSanitizer(),
             sessions=sessions,
-            target_base="Meta:Community/Discussions",
+            target_page="Meta:Community/Discussions",
             edit_summary="Log entry via Blybot",
             debounce_seconds=0,
         ),
@@ -49,7 +49,7 @@ async def test_start_welcomes_and_opens_a_pseudonymous_session() -> None:
     (sent,) = tg.sent_texts(bot)
     assert sent.startswith("Welcome to Blybot.")
     assert "Anon-1" in sent
-    assert "Meta:Community/Discussions/Anon-1" in sent
+    assert "Meta:Community/Discussions#Anon-1" in sent
 
 
 async def test_start_always_forces_a_fresh_identity() -> None:
@@ -74,9 +74,10 @@ async def test_dm_is_transcribed_under_the_session_pseudonym() -> None:
     context, _ = tg.make_context()
     await handlers.on_dm(dm("hello there"), context)
 
-    (page, text, _) = publisher.appends[0]
-    assert page == "Meta:Community/Discussions/Anon-1"
-    assert text == "\n: Anon-1: [sanitized]hello there"
+    (page, heading, text, _) = publisher.continued[0]
+    assert page == "Meta:Community/Discussions"
+    assert heading == "Anon-1"
+    assert text == ": [sanitized]hello there"
 
 
 async def test_first_dm_announces_the_identity_then_stays_quiet() -> None:
@@ -107,7 +108,7 @@ async def test_group_messages_never_reach_transcription() -> None:
     context, _ = tg.make_context()
     group_msg = tg.command_update(tg.message(chat=tg.GROUP, text="group chatter"))
     await handlers.on_dm(group_msg, context)
-    assert publisher.appends == []
+    assert publisher.continued == []
 
 
 async def test_newcomer_gets_a_deep_link_button_not_a_dm() -> None:

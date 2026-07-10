@@ -1,14 +1,23 @@
-"""Use-case: publish a ``/log``-marked group message to the Meta log page (spec R2)."""
+"""Use-case: publish a ``/log``-marked group message to the Meta log page (spec R2).
+
+Every ``/log`` opens its own section on the log talk page (one section =
+one log), with the entry indented as a discussion line. The heading is
+the coarse date — or a fixed neutral title when timestamps are disabled —
+so nothing in the section identifies the author (R6).
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import LogEntry, TimestampGranularity
+from blybot.domain.rendering import discussion_line
 
 if TYPE_CHECKING:
     from blybot.domain.ports import Clock, Sanitizer, WikiPublisher
+
+UNDATED_HEADING: Final = "Log entry"
 
 
 class NothingToPublishError(Exception):
@@ -17,7 +26,7 @@ class NothingToPublishError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class LogPublicationService:
-    """Sanitizes and appends one anonymous entry to the configured log page."""
+    """Sanitizes one message and opens a section for it on the log page."""
 
     publisher: WikiPublisher
     sanitizer: Sanitizer
@@ -37,14 +46,14 @@ class LogPublicationService:
             raise NothingToPublishError(msg)
 
         entry = LogEntry(text=self.sanitizer.sanitize(raw_text))
-        await self.publisher.append(
+        await self.publisher.start_discussion(
             page=self.target_page,
-            text=self._render(entry),
+            heading=self._heading(),
+            text=discussion_line(1, entry.text),
             summary=self.edit_summary,
         )
 
-    def _render(self, entry: LogEntry) -> str:
+    def _heading(self) -> str:
         if self.timestamp_granularity is TimestampGranularity.DATE:
-            stamp = self.clock.now().strftime("%Y-%m-%d")
-            return f"\n* ({stamp}) {entry.text}"
-        return f"\n* {entry.text}"
+            return self.clock.now().strftime("%Y-%m-%d")
+        return UNDATED_HEADING

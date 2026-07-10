@@ -98,13 +98,12 @@ def make_publisher(
     return publisher, sleep
 
 
-async def test_logs_in_on_demand_and_appends_with_etiquette_params() -> None:
+async def test_logs_in_on_demand_and_edits_with_etiquette_params() -> None:
     wiki = FakeWiki()
     publisher, _ = make_publisher(wiki)
-    await publisher.append("Meta:Log", "\n* entry", "Log entry via Blybot")
+    await publisher.start_discussion("Talk:Log", "2026-07-10", ": entry", "Log entry via Blybot")
 
     (edit,) = wiki.edits
-    assert edit["appendtext"] == "\n* entry"
     assert edit["summary"] == "Log entry via Blybot"
     assert edit["assert"] == "user"
     assert edit["maxlag"] == "5"
@@ -116,7 +115,7 @@ async def test_maxlag_is_retried_with_backoff() -> None:
     wiki.edit_faults = ["maxlag", "maxlag"]
     counters = Counters()
     publisher, sleep = make_publisher(wiki, counters)
-    await publisher.append("Meta:Log", "x", "s")
+    await publisher.start_discussion("Talk:Log", "h", ": x", "s")
 
     assert len(wiki.edits) == 1
     assert sleep.calls == [2.0, 4.0]
@@ -130,7 +129,7 @@ async def test_non_retryable_error_fails_fast() -> None:
     wiki.edit_faults = ["protectedpage"]
     publisher, sleep = make_publisher(wiki)
     with pytest.raises(WikiPublishError, match="protectedpage"):
-        await publisher.append("Meta:Log", "x", "s")
+        await publisher.start_discussion("Talk:Log", "h", ": x", "s")
     assert sleep.calls == []  # no pointless retry against a protected page
     await publisher.aclose()
 
@@ -138,11 +137,11 @@ async def test_non_retryable_error_fails_fast() -> None:
 async def test_session_loss_triggers_relogin_and_succeeds() -> None:
     wiki = FakeWiki()
     publisher, _ = make_publisher(wiki)
-    await publisher.append("Meta:Log", "first", "s")
+    await publisher.start_discussion("Talk:Log", "h", ": first", "s")
 
     wiki.logged_in = False  # server-side session drop
     wiki.edit_faults = ["assertuserfailed"]
-    await publisher.append("Meta:Log", "second", "s")
+    await publisher.start_discussion("Talk:Log", "h", ": second", "s")
     assert len(wiki.edits) == 2
     await publisher.aclose()
 
@@ -153,7 +152,7 @@ async def test_bounded_attempts_then_error() -> None:
     counters = Counters()
     publisher, _ = make_publisher(wiki, counters)
     with pytest.raises(WikiPublishError, match="maxlag"):
-        await publisher.append("Meta:Log", "x", "s")
+        await publisher.start_discussion("Talk:Log", "h", ": x", "s")
     assert counters.snapshot()["publishes_failed"] == 1
     assert wiki.edits == []
     await publisher.aclose()
@@ -164,7 +163,7 @@ async def test_bad_credentials_raise() -> None:
     wiki.login_result = "Failed"
     publisher, _ = make_publisher(wiki)
     with pytest.raises(WikiPublishError):
-        await publisher.append("Meta:Log", "x", "s")
+        await publisher.start_discussion("Talk:Log", "h", ": x", "s")
     await publisher.aclose()
 
 
@@ -221,7 +220,6 @@ async def test_no_identifier_ever_reaches_the_wiki_request() -> None:
     """R6 spot check: requests carry only page, text, summary and API plumbing."""
     wiki = FakeWiki()
     publisher, _ = make_publisher(wiki)
-    await publisher.append("Meta:Log", "safe text", "generic summary")
     await publisher.start_discussion("Talk:Log", "heading", ": text", "summary")
     await publisher.continue_discussion("Talk:Log", "heading", ":: more", "summary")
     allowed = {

@@ -1,0 +1,73 @@
+# Blybot quality gates.
+#
+# Install all three stages (or just run `make hooks`):
+#   pre-commit install --install-hooks -t pre-commit -t commit-msg -t pre-push
+#
+# Fast, per-file checks run at commit time; the full typecheck + test
+# suite runs at push time so commits stay cheap but nothing broken
+# leaves your machine.
+
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+
+repos:
+  # --- hygiene (pre-commit stage) -----------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=200]
+      - id: check-case-conflict
+      - id: detect-private-key
+      - id: debug-statements
+
+  # --- secrets never reach a commit (pre-commit stage) --------------------
+  # The spec keeps credentials in the Toolforge home dir; this gate makes
+  # "never in git" mechanical rather than aspirational.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # --- lint + format (pre-commit stage) ------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.3.0
+    hooks:
+      - id: codespell
+        args: [--ignore-words-list=blybot]
+
+  # --- commit message convention (commit-msg stage) ------------------------
+  - repo: https://github.com/compilerla/conventional-pre-commit
+    rev: v3.6.0
+    hooks:
+      - id: conventional-pre-commit
+        stages: [commit-msg]
+
+  # --- full verification (pre-push stage) -----------------------------------
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy --strict
+        entry: uv run mypy
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: pytest
+        name: pytest (with coverage gate)
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

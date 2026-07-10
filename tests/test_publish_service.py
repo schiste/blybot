@@ -26,7 +26,8 @@ def make_service(
 
 async def test_each_log_opens_its_own_section_with_an_indented_entry() -> None:
     publisher = FakePublisher()
-    await make_service(publisher).publish("we decided X")
+    heading = await make_service(publisher).publish("we decided X")
+    assert heading == "2026-07-10 : Anon-1"  # returned for section links
 
     (page, heading, text, summary) = publisher.started[0]
     assert page == "Meta talk:Community/Log"

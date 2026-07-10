@@ -46,7 +46,7 @@ REPLY_LOG_IS_GROUP_ONLY: Final = (
 REPLY_MEDIA_DECLINED: Final = (
     "That message has no text I can publish — media is not supported (yet)."
 )
-REPLY_PUBLISHED: Final = "Published anonymously to {page}."
+REPLY_PUBLISHED: Final = "Published anonymously: {url}"
 REPLY_THROTTLED: Final = "Rate limit reached — please try again in a minute."
 REPLY_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see details in the logs."
 REPLY_AUTHOR_ONLY: Final = "This group's consent policy only lets authors /log their own messages."
@@ -144,7 +144,6 @@ class GroupHandlers:
     consent_mode: ConsentMode
     counters: Counters
     group_greeting_text: str
-    log_page: str
     log_page_url: str
     maintainer: str
     newcomer_welcome_enabled: bool
@@ -198,7 +197,7 @@ class GroupHandlers:
             return
 
         try:
-            await self.log_service.publish(target.text)
+            heading = await self.log_service.publish(target.text)
         except NothingToPublishError:
             self.counters.increment("log_declined_media")
             await reply(REPLY_MEDIA_DECLINED)
@@ -206,7 +205,8 @@ class GroupHandlers:
             await reply(REPLY_WIKI_ERROR)
         else:
             log_event("log_command", "ok")
-            await reply(REPLY_PUBLISHED.format(page=self.log_page))
+            section_url = f"{self.log_page_url}#{heading.replace(' ', '_')}"
+            await reply(REPLY_PUBLISHED.format(url=section_url))
 
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Greet once when added to a group (R3)."""

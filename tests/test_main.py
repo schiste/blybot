@@ -48,5 +48,6 @@ def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> No
     assert isinstance(lifecycle.transcription.publisher, MetaWikiPublisher)
     assert lifecycle.release == lifecycle.transcription.publisher.aclose
     # Group /log and DM transcription target the configured pages.
-    assert seen["group_handlers"].log_page == REQUIRED["LOG_TARGET_PAGE"]
+    expected_url = "https://meta.wikimedia.org/wiki/Meta:Community/Log"
+    assert seen["group_handlers"].log_page_url == expected_url
     assert lifecycle.transcription.target_page == REQUIRED["DM_TARGET_BASE"]

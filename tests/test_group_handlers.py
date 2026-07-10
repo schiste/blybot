@@ -25,6 +25,7 @@ from tests.fakes import (
 )
 
 LOG_PAGE = "Meta:Community/Log"
+LOG_PAGE_URL = "https://meta.wikimedia.org/wiki/Meta:Community/Log"
 
 
 def make_handlers(
@@ -53,8 +54,7 @@ def make_handlers(
         consent_mode=consent_mode,
         counters=Counters(),
         group_greeting_text="Hello, I am Blybot.",
-        log_page=LOG_PAGE,
-        log_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Log",
+        log_page_url=LOG_PAGE_URL,
         maintainer="Test Maintainer",
         cleanup_delay_seconds=cleanup_delay_seconds,
         reply_cleanup_delay_seconds=reply_cleanup_delay_seconds,
@@ -78,7 +78,9 @@ async def test_log_publishes_target_text_and_confirms() -> None:
     (page, _, text, _) = publisher.started[0]
     assert page == LOG_PAGE
     assert "[sanitized]we decided X" in text
-    assert tg.sent_texts(bot) == [h.REPLY_PUBLISHED.format(page=LOG_PAGE)]
+    # Confirmation links straight to the created section (Anon-1: no
+    # timestamp at NONE granularity, so the heading is the pseudonym).
+    assert tg.sent_texts(bot) == [h.REPLY_PUBLISHED.format(url=f"{LOG_PAGE_URL}#Anon-1")]
 
 
 async def test_log_without_reply_explains_usage() -> None:
@@ -238,7 +240,7 @@ async def test_group_help_explains_the_log_gesture() -> None:
     await handlers.on_help(tg.command_update(tg.message(text="/help")), context)
     (sent,) = tg.sent_texts(bot)
     assert "/log" in sent
-    assert "https://meta.wikimedia.org/wiki/Meta_talk:Community/Log" in sent
+    assert LOG_PAGE_URL in sent
     assert "maintained by Test Maintainer" in sent
 
 

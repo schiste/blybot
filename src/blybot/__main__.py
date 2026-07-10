@@ -78,7 +78,6 @@ def main() -> int:
         consent_mode=config.consent_mode,
         counters=counters,
         group_greeting_text=config.group_greeting_text,
-        log_page=config.log_target_page,
         log_page_url=config.page_url(config.log_target_page),
         maintainer=config.maintainer,
         newcomer_welcome_enabled=config.newcomer_welcome_enabled,

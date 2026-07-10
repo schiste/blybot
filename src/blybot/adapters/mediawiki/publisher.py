@@ -67,6 +67,46 @@ class MetaWikiPublisher:
 
     async def append(self, page: str, text: str, summary: str) -> None:
         """Append ``text`` to ``page``; raise :class:`WikiPublishError` on failure."""
+        await self._submit_edit({"title": page, "appendtext": text, "summary": summary})
+
+    async def start_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        """Open a new section on ``page`` (``section=new`` is an atomic append)."""
+        await self._submit_edit(
+            {
+                "title": page,
+                "section": "new",
+                "sectiontitle": heading,
+                "text": text,
+                "summary": summary,
+            }
+        )
+
+    async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        """Append ``text`` inside the most recent section titled ``heading``.
+
+        If the section (or the page) does not exist — first write of a
+        discussion, or the section was archived mid-conversation — it is
+        created instead, so a discussion can always continue somewhere.
+        """
+        index = await self._find_section(page, heading)
+        if index is None:
+            await self.start_discussion(page, heading, text, summary)
+            return
+        await self._submit_edit(
+            {
+                "title": page,
+                "section": index,
+                "appendtext": "\n" + text,
+                "summary": summary,
+            }
+        )
+
+    async def aclose(self) -> None:
+        """Release the underlying HTTP client."""
+        await self._client.aclose()
+
+    async def _submit_edit(self, edit_params: dict[str, str]) -> None:
+        """Perform one edit with login, retry, and backoff handling (R8)."""
         self._counters.increment("publishes_attempted")
         last_error = "unknown"
         for attempt in range(self._max_attempts):
@@ -75,7 +115,7 @@ class MetaWikiPublisher:
                 log_event("wiki_edit", "retry", attempt=attempt)
                 await self._sleep(min(2.0**attempt, 16.0))
             try:
-                data = await self._edit(page, text, summary)
+                data = await self._edit(edit_params)
             except httpx.HTTPError:
                 last_error = "http"
                 continue
@@ -99,21 +139,33 @@ class MetaWikiPublisher:
         msg = f"edit failed after retries: {last_error}"
         raise WikiPublishError(msg)
 
-    async def aclose(self) -> None:
-        """Release the underlying HTTP client."""
-        await self._client.aclose()
+    async def _find_section(self, page: str, heading: str) -> str | None:
+        """Return the edit index of the last section titled ``heading``, if any.
 
-    async def _edit(self, page: str, text: str, summary: str) -> dict[str, Any]:
+        New sections are always appended at the end of a page, so the
+        index of an existing section is stable against concurrent
+        discussions starting.
+        """
+        try:
+            data = await self._post(action="parse", page=page, prop="sections")
+        except httpx.HTTPError:
+            return None
+        matches = [
+            str(section.get("index"))
+            for section in data.get("parse", {}).get("sections", [])
+            if section.get("line") == heading and str(section.get("index", "")).isdigit()
+        ]
+        return matches[-1] if matches else None
+
+    async def _edit(self, edit_params: dict[str, str]) -> dict[str, Any]:
         token = await self._ensure_csrf_token()
         return await self._post(
             action="edit",
-            title=page,
-            appendtext=text,
-            summary=summary,
             token=token,
             bot="1",
             maxlag=_MAXLAG_SECONDS,
             **{"assert": "user"},
+            **edit_params,
         )
 
     async def _ensure_csrf_token(self) -> str:

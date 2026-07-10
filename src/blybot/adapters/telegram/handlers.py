@@ -27,10 +27,13 @@ from blybot.observability import Counters, log_event
 from blybot.services.publish import NothingToPublishError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from telegram import Bot, Chat, ChatMemberUpdated, Message, Update
     from telegram.ext import ContextTypes
 
     from blybot.domain.models import Session
+    from blybot.services.directory import ChannelDirectory
     from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.publish import LogPublicationService
@@ -78,7 +81,8 @@ HELP_PRIVATE: Final = (
 )
 HELP_GROUP: Final = (
     "Reply to a message with /log to publish it anonymously to the Meta-wiki "
-    "log. Message me privately for anonymous transcription — /help there for details."
+    "log. Message me privately for anonymous transcription — /help there for "
+    "details. Group admins: /setup to configure me for this group."
 )
 PRIVACY_TEXT: Final = (
     "What I ingest: only messages explicitly marked with /log in groups, and "
@@ -141,10 +145,10 @@ class GroupHandlers:
     log_service: LogPublicationService
     groups: GroupPolicy
     limiter: SlidingWindowLimiter
-    consent_mode: ConsentMode
+    directory: ChannelDirectory
+    page_url_for: Callable[[str], str]
     counters: Counters
     group_greeting_text: str
-    log_page_url: str
     maintainer: str
     newcomer_welcome_enabled: bool
     # The /log command message is deleted after this delay, hiding who
@@ -185,7 +189,8 @@ class GroupHandlers:
         if target is None:
             await reply(REPLY_USAGE)
             return
-        if self.consent_mode is ConsentMode.AUTHOR_ONLY and not _same_author(message, target):
+        settings = await self.directory.resolve(chat.id)
+        if settings.consent_mode is ConsentMode.AUTHOR_ONLY and not _same_author(message, target):
             # N1 hook: ConsentMode.CONFIRM would branch here into a
             # DM-confirmation flow; configuration rejects it until built.
             self.counters.increment("log_declined_consent")
@@ -197,7 +202,7 @@ class GroupHandlers:
             return
 
         try:
-            heading = await self.log_service.publish(target.text)
+            heading = await self.log_service.publish(target.text, target_page=settings.log_page)
         except NothingToPublishError:
             self.counters.increment("log_declined_media")
             await reply(REPLY_MEDIA_DECLINED)
@@ -205,7 +210,8 @@ class GroupHandlers:
             await reply(REPLY_WIKI_ERROR)
         else:
             log_event("log_command", "ok")
-            section_url = f"{self.log_page_url}#{heading.replace(' ', '_')}"
+            page_url = self.page_url_for(settings.log_page)
+            section_url = f"{page_url}#{heading.replace(' ', '_')}"
             await reply(REPLY_PUBLISHED.format(url=section_url))
 
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -238,7 +244,9 @@ class GroupHandlers:
         chat = update.effective_chat
         if chat is None or chat.type not in _GROUP_TYPES or not self.groups.is_allowed(chat.id):
             return
-        text = HELP_GROUP + _help_footer(self.log_page_url, self.maintainer)
+        settings = await self.directory.resolve(chat.id)
+        page_url = self.page_url_for(settings.log_page)
+        text = HELP_GROUP + _help_footer(page_url, self.maintainer)
         await context.bot.send_message(chat_id=chat.id, text=text)
 
     async def _schedule_cleanup(

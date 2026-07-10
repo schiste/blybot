@@ -8,6 +8,7 @@ import pytest
 
 import blybot.__main__ as entry
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
+from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from tests.test_config import REQUIRED
@@ -48,6 +49,8 @@ def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> No
     assert isinstance(lifecycle.transcription.publisher, MetaWikiPublisher)
     assert lifecycle.release == lifecycle.transcription.publisher.aclose
     # Group /log and DM transcription target the configured pages.
-    expected_url = "https://meta.wikimedia.org/wiki/Meta:Community/Log"
-    assert seen["group_handlers"].log_page_url == expected_url
+    assert isinstance(seen["admin_handlers"], AdminHandlers)
+    directory = seen["group_handlers"].directory
+    assert seen["admin_handlers"].directory is directory  # one directory, shared
+    assert directory.default_log_page == REQUIRED["LOG_TARGET_PAGE"]
     assert lifecycle.transcription.target_page == REQUIRED["DM_TARGET_BASE"]

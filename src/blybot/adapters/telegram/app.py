@@ -24,6 +24,7 @@ from blybot.observability import log_event
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from blybot.adapters.telegram.admin import AdminHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.observability import Counters
     from blybot.services.sessions import SessionRegistry
@@ -93,6 +94,7 @@ def build_application(
     token: str,
     group_handlers: GroupHandlers,
     private_handlers: PrivateHandlers,
+    admin_handlers: AdminHandlers,
     lifecycle: Lifecycle,
 ) -> _App:
     """Build the PTB application with every handler registered."""
@@ -110,6 +112,14 @@ def build_application(
     application.add_handler(CommandHandler("privacy", private_handlers.on_privacy))
     application.add_handler(CommandHandler("bug", private_handlers.on_bug))
     application.add_handler(CommandHandler("issue", private_handlers.on_bug))
+    for name, callback in (
+        ("setup", admin_handlers.on_setup),
+        ("setpage", admin_handlers.on_setpage),
+        ("setconsent", admin_handlers.on_setconsent),
+        ("settings", admin_handlers.on_settings),
+        ("reset", admin_handlers.on_reset),
+    ):
+        application.add_handler(CommandHandler(name, callback, filters=filters.ChatType.GROUPS))
     application.add_handler(
         CommandHandler("help", private_handlers.on_help, filters=filters.ChatType.PRIVATE)
     )
@@ -137,8 +147,11 @@ def run_polling(
     token: str,
     group_handlers: GroupHandlers,
     private_handlers: PrivateHandlers,
+    admin_handlers: AdminHandlers,
     lifecycle: Lifecycle,
 ) -> None:
     """Poll until stopped; blocks for the process lifetime."""
-    application = build_application(token, group_handlers, private_handlers, lifecycle)
+    application = build_application(
+        token, group_handlers, private_handlers, admin_handlers, lifecycle
+    )
     application.run_polling(allowed_updates=_ALLOWED_UPDATES)

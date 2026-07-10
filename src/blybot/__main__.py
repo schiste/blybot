@@ -12,12 +12,14 @@ from datetime import timedelta
 from blybot.adapters.github.issues import GitHubIssueTracker
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
+from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.config import ConfigurationError, load_config
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging
+from blybot.services.directory import ChannelDirectory
 from blybot.services.feedback import FeedbackService
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
@@ -60,6 +62,13 @@ def main() -> int:
         debounce_seconds=config.burst_debounce.total_seconds(),
         timestamp_granularity=config.timestamp_granularity,
     )
+    directory = ChannelDirectory(
+        store=None,  # self-service store lands with the ToolsDB wiring
+        default_log_page=config.log_target_page,
+        default_consent=config.consent_mode,
+        default_repo=config.github_repo,
+        page_prefix="",
+    )
     group_handlers = GroupHandlers(
         log_service=LogPublicationService(
             publisher=publisher,
@@ -76,10 +85,10 @@ def main() -> int:
             limit=config.log_throttle_per_minute,
             window=timedelta(minutes=1),
         ),
-        consent_mode=config.consent_mode,
+        directory=directory,
+        page_url_for=config.page_url,
         counters=counters,
         group_greeting_text=config.group_greeting_text,
-        log_page_url=config.page_url(config.log_target_page),
         maintainer=config.maintainer,
         newcomer_welcome_enabled=config.newcomer_welcome_enabled,
         cleanup_delay_seconds=config.log_cleanup_seconds,
@@ -108,10 +117,17 @@ def main() -> int:
         ),
     )
 
+    admin_handlers = AdminHandlers(
+        directory=directory,
+        counters=counters,
+        page_url_for=config.page_url,
+    )
+
     run_polling(
         token=config.telegram_bot_token,
         group_handlers=group_handlers,
         private_handlers=private_handlers,
+        admin_handlers=admin_handlers,
         lifecycle=Lifecycle(
             maintenance=Maintenance(sessions=sessions, counters=counters),
             transcription=transcription,

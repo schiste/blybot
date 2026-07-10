@@ -13,6 +13,7 @@ import pytest
 from telegram import Update
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler
 
+from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, build_application, run_polling
 from blybot.observability import Counters
 from blybot.services.sessions import SessionRegistry
@@ -42,20 +43,31 @@ def make_lifecycle(
     return lifecycle, sessions, release
 
 
+def make_admin_handlers() -> AdminHandlers:
+    group_handlers, _, _ = make_group_handlers()
+    return AdminHandlers(
+        directory=group_handlers.directory,
+        counters=Counters(),
+        page_url_for=group_handlers.page_url_for,
+    )
+
+
 def build() -> Application[Any, Any, Any, Any, Any, Any]:
     group_handlers, _, _ = make_group_handlers()
     private_handlers, _ = make_private_handlers()
     lifecycle, _, _ = make_lifecycle()
-    return build_application(TOKEN, group_handlers, private_handlers, lifecycle)
+    return build_application(
+        TOKEN, group_handlers, private_handlers, make_admin_handlers(), lifecycle
+    )
 
 
 def test_build_registers_every_handler() -> None:
     application = build()
     handlers = application.handlers[0]
     kinds = [type(handler) for handler in handlers]
-    assert (
-        kinds.count(CommandHandler) == 9
-    )  # log, start, flush, whoami, privacy, bug, issue, help x2
+    # log, start, flush, whoami, privacy, bug, issue, help x2,
+    # setup, setpage, setconsent, settings, reset
+    assert kinds.count(CommandHandler) == 14
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 2  # migration and DM text
 
@@ -73,7 +85,7 @@ def test_run_polling_opts_into_exactly_the_updates_privacy_mode_needs(
     group_handlers, _, _ = make_group_handlers()
     private_handlers, _ = make_private_handlers()
     lifecycle, _, _ = make_lifecycle()
-    run_polling(TOKEN, group_handlers, private_handlers, lifecycle)
+    run_polling(TOKEN, group_handlers, private_handlers, make_admin_handlers(), lifecycle)
 
     assert seen["allowed_updates"] == [Update.MESSAGE, Update.MY_CHAT_MEMBER, Update.CHAT_MEMBER]
 

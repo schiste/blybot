@@ -36,12 +36,14 @@ class LogPublicationService:
     edit_summary: str
     timestamp_granularity: TimestampGranularity
 
-    async def publish(self, raw_text: str | None) -> str:
+    async def publish(self, raw_text: str | None, target_page: str | None = None) -> str:
         """Publish ``raw_text`` anonymously; return the created section heading.
 
         Callers pass only the message *text* — never the author. The
-        signature is the anonymity boundary (spec R6). Raises
-        :class:`NothingToPublishError` when there is nothing to publish.
+        signature is the anonymity boundary (spec R6). ``target_page``
+        overrides the configured default (per-group pages, spec v2).
+        Raises :class:`NothingToPublishError` when there is nothing to
+        publish.
         """
         if raw_text is None or not raw_text.strip():
             msg = "referenced message has no text"
@@ -51,7 +53,7 @@ class LogPublicationService:
         entry_pseudonym = self.pseudonyms.mint()  # one-off, never reused
         heading = section_heading(stamp, entry_pseudonym.value)
         await self.publisher.start_discussion(
-            page=self.target_page,
+            page=target_page or self.target_page,
             heading=heading,
             text=discussion_line(
                 1, self.sanitizer.sanitize(raw_text), signature=entry_pseudonym.value

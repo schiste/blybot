@@ -13,6 +13,7 @@ from telegram.error import TelegramError
 from blybot.adapters.telegram import handlers as h
 from blybot.domain.models import ConsentMode, TimestampGranularity
 from blybot.observability import Counters
+from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
 from tests import tg
@@ -20,12 +21,17 @@ from tests.fakes import (
     FailingPublisher,
     FakeClock,
     FakePublisher,
+    InMemoryProfiles,
     PassthroughSanitizer,
     SequentialPseudonyms,
 )
 
 LOG_PAGE = "Meta:Community/Log"
 LOG_PAGE_URL = "https://meta.wikimedia.org/wiki/Meta:Community/Log"
+
+
+def page_url_for(title: str) -> str:
+    return f"https://meta.wikimedia.org/wiki/{title.replace(' ', '_')}"
 
 
 def make_handlers(
@@ -51,10 +57,16 @@ def make_handlers(
         ),
         groups=policy,
         limiter=SlidingWindowLimiter(clock=FakeClock(), limit=limit, window=timedelta(minutes=1)),
-        consent_mode=consent_mode,
+        directory=ChannelDirectory(
+            store=InMemoryProfiles(),
+            default_log_page=LOG_PAGE,
+            default_consent=consent_mode,
+            default_repo="schiste/blybot",
+            page_prefix="Telegram logs/",
+        ),
+        page_url_for=page_url_for,
         counters=Counters(),
         group_greeting_text="Hello, I am Blybot.",
-        log_page_url=LOG_PAGE_URL,
         maintainer="Test Maintainer",
         cleanup_delay_seconds=cleanup_delay_seconds,
         reply_cleanup_delay_seconds=reply_cleanup_delay_seconds,
@@ -293,3 +305,27 @@ async def test_cleanup_can_be_disabled_entirely() -> None:
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
     bot.delete_message.assert_not_awaited()
+
+
+async def test_consent_policy_is_resolved_per_group() -> None:
+    """A group's stored consent policy overrides the deployment default."""
+    handlers, publisher, _ = make_handlers(consent_mode=ConsentMode.IMMEDIATE)
+    await handlers.directory.set_consent(tg.GROUP.id, ConsentMode.AUTHOR_ONLY)
+    context, bot = tg.make_context()
+    target = tg.message(text="Alice's words", from_user=tg.ALICE)
+    await handlers.on_log(log_command(target, sender=tg.BOB), context)
+
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert h.REPLY_AUTHOR_ONLY in tg.sent_texts(bot)
+
+
+async def test_log_publishes_to_the_group_configured_page() -> None:
+    handlers, publisher, _ = make_handlers()
+    await handlers.directory.set_log_page(tg.GROUP.id, "Telegram logs/Ours")
+    context, bot = tg.make_context()
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.started[0][0] == "Telegram logs/Ours"
+    assert "Telegram_logs/Ours#" in tg.sent_texts(bot)[0]

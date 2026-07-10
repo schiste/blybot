@@ -24,14 +24,19 @@ def test_mints_are_distinct_across_calls() -> None:
     assert len(minted) == 200
 
 
-def test_pseudonym_is_a_sane_wiki_byline() -> None:
-    """Must be safe to embed as a discussion byline without re-sanitizing."""
+def test_pseudonym_is_a_sane_wiki_heading_and_anchor() -> None:
+    """Must be safe as a section heading AND as a #anchor in links.
+
+    Spaces or punctuation would be percent/underscore-mangled by
+    MediaWiki's anchor encoding, breaking the page#anchor links the bot
+    hands to DM users.
+    """
     factory = RandomPseudonymFactory()
     for _ in range(50):
         value = factory.mint().value
         assert value
         assert len(value) <= 40
-        assert not set(value) & set("{}[]<>|=~\n")
+        assert all(char.isalnum() or char == "-" for char in value)
 
 
 def test_module_does_not_use_non_cryptographic_randomness() -> None:

@@ -12,6 +12,12 @@ tree via python-telegram-bot):
 * ``maxlag=5`` honored with bounded exponential backoff, also applied to
   ``ratelimited``/``readonly`` and transient HTTP failures;
 * descriptive ``User-Agent`` from configuration (WMF policy).
+
+Known trade-off: retrying after a *lost response* is not idempotent for
+``section=new`` — if the server committed the edit but the response
+timed out, the retry creates a duplicate section. The MediaWiki API
+offers no cheap idempotency token; this rare duplication is accepted
+over silently dropping entries.
 """
 
 from __future__ import annotations
@@ -36,6 +42,10 @@ _ANONYMOUS_TOKEN: Final = "+\\"  # noqa: S105
 
 class WikiPublishError(WikiWriteError):
     """Raised when an edit could not be completed after bounded retries."""
+
+    def __init__(self, message: str, code: str = "unknown") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class MetaWikiPublisher:
@@ -81,22 +91,32 @@ class MetaWikiPublisher:
     async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
         """Append ``text`` inside the most recent section titled ``heading``.
 
-        If the section (or the page) does not exist — first write of a
-        discussion, or the section was archived mid-conversation — it is
-        created instead, so a discussion can always continue somewhere.
+        If the page or section does not exist — or vanishes between the
+        lookup and the edit (archived mid-conversation) — the section is
+        recreated, so a discussion can always continue somewhere. A
+        lookup that *fails* (as opposed to finding nothing) raises
+        instead: guessing "absent" on a transient error would fork the
+        discussion into a duplicate section.
         """
         index = await self._find_section(page, heading)
         if index is None:
             await self.start_discussion(page, heading, text, summary)
             return
-        await self._submit_edit(
-            {
-                "title": page,
-                "section": index,
-                "appendtext": "\n" + text,
-                "summary": summary,
-            }
-        )
+        try:
+            await self._submit_edit(
+                {
+                    "title": page,
+                    "section": index,
+                    "appendtext": "\n" + text,
+                    "summary": summary,
+                }
+            )
+        except WikiPublishError as error:
+            if error.code != "nosuchsection":
+                raise
+            # The section was archived between lookup and edit.
+            log_event("wiki_section_recreated", "ok")
+            await self.start_discussion(page, heading, text, summary)
 
     async def aclose(self) -> None:
         """Release the underlying HTTP client."""
@@ -134,19 +154,32 @@ class MetaWikiPublisher:
         self._counters.increment("publishes_failed")
         log_event("wiki_edit", "error")
         msg = f"edit failed after retries: {last_error}"
-        raise WikiPublishError(msg)
+        raise WikiPublishError(msg, code=last_error)
 
     async def _find_section(self, page: str, heading: str) -> str | None:
         """Return the edit index of the last section titled ``heading``, if any.
 
         New sections are always appended at the end of a page, so the
         index of an existing section is stable against concurrent
-        discussions starting.
+        discussions starting. Transient HTTP failures are retried with
+        the same backoff as edits and raise after the attempt budget —
+        they must never be mistaken for "section absent".
         """
-        try:
-            data = await self._post(action="parse", page=page, prop="sections")
-        except httpx.HTTPError:
-            return None
+        data: dict[str, Any] | None = None
+        for attempt in range(self._max_attempts):
+            if attempt:
+                self._counters.increment("api_retries")
+                await self._sleep(min(2.0**attempt, 16.0))
+            try:
+                data = await self._post(action="parse", page=page, prop="sections")
+                break
+            except httpx.HTTPError:
+                continue
+        if data is None:
+            msg = "section lookup failed after retries"
+            raise WikiPublishError(msg, code="http")
+        if data.get("error", {}).get("code") == "missingtitle":
+            return None  # page not created yet: genuinely absent
         matches = [
             str(section.get("index"))
             for section in data.get("parse", {}).get("sections", [])

@@ -74,7 +74,7 @@ async def test_dm_is_transcribed_under_the_session_pseudonym() -> None:
     context, _ = tg.make_context()
     await handlers.on_dm(dm("hello there"), context)
 
-    (page, heading, text, _) = publisher.continued[0]
+    (page, heading, text, _) = publisher.started[0]
     assert page == "Meta:Community/Discussions"
     assert heading == "Anon-1"
     assert text == ": [sanitized]hello there"
@@ -108,6 +108,7 @@ async def test_group_messages_never_reach_transcription() -> None:
     context, _ = tg.make_context()
     group_msg = tg.command_update(tg.message(chat=tg.GROUP, text="group chatter"))
     await handlers.on_dm(group_msg, context)
+    assert publisher.started == []
     assert publisher.continued == []
 
 

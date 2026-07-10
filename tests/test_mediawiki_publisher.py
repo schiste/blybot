@@ -24,10 +24,13 @@ class FakeWiki:
         self.login_result = "Success"
         self.requests: list[dict[str, str]] = []
         self.sections: dict[str, list[str]] = {}  # page -> section headings, in order
+        self.parse_faults: list[Exception] = []  # raised (as transport errors) on parse
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         params = {key: values[0] for key, values in parse_qs(request.content.decode()).items()}
         self.requests.append(params)
+        if params["action"] == "parse" and self.parse_faults:
+            raise self.parse_faults.pop(0)
         return httpx.Response(200, json=self._dispatch(params))
 
     def _dispatch(self, params: dict[str, str]) -> dict[str, Any]:
@@ -229,4 +232,44 @@ async def test_no_identifier_ever_reaches_the_wiki_request() -> None:
     }  # fmt: skip
     for request in wiki.requests:
         assert set(request) <= allowed
+    await publisher.aclose()
+
+
+async def test_transient_parse_failure_is_retried_not_mistaken_for_absence() -> None:
+    """A network blip on the section lookup must not fork the discussion."""
+    wiki = FakeWiki()
+    publisher, sleep = make_publisher(wiki)
+    await publisher.start_discussion("Talk:D", "Guest-1", ": first", "s")
+
+    wiki.parse_faults = [httpx.ConnectError("blip")]
+    await publisher.continue_discussion("Talk:D", "Guest-1", ":: second", "s")
+
+    assert wiki.sections["Talk:D"] == ["Guest-1"]  # no duplicate section
+    assert wiki.edits[-1]["appendtext"] == "\n:: second"
+    assert sleep.calls == [2.0]
+    await publisher.aclose()
+
+
+async def test_persistent_parse_failure_raises_instead_of_duplicating() -> None:
+    wiki = FakeWiki()
+    publisher, _ = make_publisher(wiki)
+    await publisher.start_discussion("Talk:D", "Guest-1", ": first", "s")
+
+    wiki.parse_faults = [httpx.ConnectError("down")] * 10
+    with pytest.raises(WikiPublishError, match="lookup"):
+        await publisher.continue_discussion("Talk:D", "Guest-1", ":: second", "s")
+    assert wiki.sections["Talk:D"] == ["Guest-1"]  # still no duplicate
+    await publisher.aclose()
+
+
+async def test_section_archived_between_lookup_and_edit_is_recreated() -> None:
+    wiki = FakeWiki()
+    publisher, _ = make_publisher(wiki)
+    await publisher.start_discussion("Talk:D", "Guest-1", ": first", "s")
+
+    wiki.edit_faults = ["nosuchsection"]  # archived after the lookup
+    await publisher.continue_discussion("Talk:D", "Guest-1", ":: second", "s")
+
+    assert wiki.sections["Talk:D"] == ["Guest-1", "Guest-1"]  # recreated
+    assert wiki.edits[-1]["section"] == "new"
     await publisher.aclose()

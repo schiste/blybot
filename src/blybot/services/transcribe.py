@@ -11,6 +11,11 @@ publisher creates the section if it is missing.
 Messages are coalesced for at most ``debounce_seconds`` (N2) in memory,
 then appended; a crash inside the window loses at most that burst, and
 already-written content always survives restarts.
+
+Known trade-off: indentation depth follows ``Session.message_count``,
+which counts *received* messages. If a flush fails and its burst is
+dropped (the accepted failure policy), the next published line skips the
+lost depths — a visible seam that honestly reflects the gap.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ if TYPE_CHECKING:
 @dataclass
 class _Buffer:
     anchor: str
+    continuation: bool  # False until the session's section exists on the wiki
     lines: list[str] = field(default_factory=list)
     flusher: asyncio.Task[None] | None = None
 
@@ -47,6 +53,12 @@ class DmTranscriptionService:
     edit_summary: str
     debounce_seconds: float
     _buffers: dict[int, _Buffer] = field(default_factory=dict)
+    # Anchors whose section has been created on the wiki. Kept so the
+    # first flush of a session *opens* its section instead of "continuing"
+    # one — which could otherwise target a stale section from an old
+    # session that happened to mint the same pseudonym. Entries are tiny
+    # pseudonym strings (no identifiers) and are pruned on rollover.
+    _published_anchors: set[str] = field(default_factory=set)
 
     async def record(self, chat_id: int, text: str) -> Session:
         """Queue one DM for publication; return the session it belongs to.
@@ -63,11 +75,20 @@ class DmTranscriptionService:
         buffer = self._buffers.get(chat_id)
         if buffer is not None and buffer.anchor != session.anchor:
             # The session rolled over mid-buffer; close out the old
-            # identity's section before writing under the new one.
-            await self._flush(chat_id)
+            # identity's section before writing under the new one. A
+            # failure here follows the debounced-failure policy (logged,
+            # burst dropped) — it must not swallow the new message too.
+            try:
+                await self._flush(chat_id)
+            except WikiWriteError:
+                log_event("dm_flush", "error")
+            self._published_anchors.discard(buffer.anchor)
             buffer = None
         if buffer is None:
-            buffer = _Buffer(anchor=session.anchor)
+            buffer = _Buffer(
+                anchor=session.anchor,
+                continuation=session.anchor in self._published_anchors,
+            )
             self._buffers[chat_id] = buffer
         buffer.lines.append(line)
 
@@ -107,10 +128,16 @@ class DmTranscriptionService:
             # A rollover or shutdown flushed this buffer early; the
             # scheduled flusher must not fire against the next buffer.
             flusher.cancel()
-        await self.publisher.continue_discussion(
+        write = (
+            self.publisher.continue_discussion
+            if buffer.continuation
+            else self.publisher.start_discussion
+        )
+        await write(
             page=self.target_page,
             heading=buffer.anchor,
             text="\n".join(buffer.lines),
             summary=self.edit_summary,
         )
+        self._published_anchors.add(buffer.anchor)
         log_event("dm_flush", "ok", lines=len(buffer.lines))

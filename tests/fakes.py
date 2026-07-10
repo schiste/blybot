@@ -39,6 +39,27 @@ class FailingPublisher:
         raise WikiWriteError
 
 
+@dataclass
+class FlakyPublisher:
+    """Fails the first ``failures`` writes, then records like :class:`FakePublisher`."""
+
+    failures: int = 1
+    recorder: FakePublisher = field(default_factory=FakePublisher)
+
+    async def start_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        self._maybe_fail()
+        await self.recorder.start_discussion(page, heading, text, summary)
+
+    async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
+        self._maybe_fail()
+        await self.recorder.continue_discussion(page, heading, text, summary)
+
+    def _maybe_fail(self) -> None:
+        if self.failures > 0:
+            self.failures -= 1
+            raise WikiWriteError
+
+
 class PassthroughSanitizer:
     """Marks text so tests can assert sanitization happened before publish."""
 

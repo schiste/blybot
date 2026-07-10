@@ -45,6 +45,17 @@ class SessionRegistry:
             return refreshed
         return self._mint(chat_id)
 
+    def peek(self, chat_id: int) -> Session | None:
+        """Return the live session without refreshing or minting one.
+
+        Expired sessions read as ``None``: an aged-out identity is never
+        revived, only replaced by :meth:`touch`.
+        """
+        existing = self._sessions.get(chat_id)
+        if existing is None or self.clock.now() - existing.last_seen >= self.ttl:
+            return None
+        return existing
+
     def reset(self, chat_id: int) -> Session:
         """Force a new identity for ``chat_id`` (explicit ``/start``, spec section 10)."""
         return self._mint(chat_id)

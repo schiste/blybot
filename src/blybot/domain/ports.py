@@ -14,6 +14,14 @@ from typing import Protocol
 from blybot.domain.models import Pseudonym
 
 
+class WikiWriteError(Exception):
+    """A wiki write failed after bounded retries.
+
+    Defined in the domain so services can handle publish failures
+    without importing the adapter that raised them.
+    """
+
+
 class WikiPublisher(Protocol):
     """Appends text to a wiki page (spec section 9: ``action=edit`` + ``appendtext``)."""
 

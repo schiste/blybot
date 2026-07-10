@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
+from blybot.domain.ports import WikiWriteError
 from blybot.observability import Counters, log_event
 
 if TYPE_CHECKING:
@@ -32,7 +33,7 @@ _RETRYABLE_API_CODES: Final = frozenset({"maxlag", "ratelimited", "readonly", "e
 _ANONYMOUS_TOKEN: Final = "+\\"  # noqa: S105
 
 
-class WikiPublishError(Exception):
+class WikiPublishError(WikiWriteError):
     """Raised when an edit could not be completed after bounded retries."""
 
 

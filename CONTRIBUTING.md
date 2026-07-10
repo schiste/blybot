@@ -37,7 +37,7 @@ locally just saves you a round-trip.
 |---|---|---|
 | `pre-commit` | ruff (lint+format), gitleaks, codespell, hygiene hooks | fast, per-file feedback |
 | `commit-msg` | conventional commits check | readable history, mechanical changelogs |
-| `pre-push` | `mypy --strict`, `pytest` with ≥ 90 % branch coverage | nothing broken leaves your machine |
+| `pre-push` | `mypy --strict`, `pytest` with **100 % branch coverage** and warnings-as-errors | nothing broken leaves your machine |
 | CI | all of the above, tests on Python 3.11–3.13 | the same bar for every PR |
 
 Run everything at once with `make check`.

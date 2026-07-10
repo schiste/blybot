@@ -11,7 +11,7 @@ from datetime import timedelta
 
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
-from blybot.adapters.telegram.app import run_polling
+from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.config import ConfigurationError, load_config
 from blybot.domain.pseudonym import RandomPseudonymFactory
@@ -86,10 +86,11 @@ def main() -> int:
         token=config.telegram_bot_token,
         group_handlers=group_handlers,
         private_handlers=private_handlers,
-        sessions=sessions,
-        transcription=transcription,
-        counters=counters,
-        shutdown=publisher.aclose,
+        lifecycle=Lifecycle(
+            maintenance=Maintenance(sessions=sessions, counters=counters),
+            transcription=transcription,
+            release=publisher.aclose,
+        ),
     )
     return 0
 

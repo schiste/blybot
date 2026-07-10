@@ -168,3 +168,25 @@ async def test_supergroup_migration_updates_the_allowlist(  # spec 8
     await handlers.on_migration(tg.command_update(service_message), context)
     assert policy.is_allowed(-100999)
     assert not policy.is_allowed(tg.GROUP.id)
+
+
+async def test_membership_updates_outside_groups_are_ignored() -> None:
+    handlers, _, _ = make_handlers()
+    context, bot = tg.make_context()
+    private_change = tg.membership_update(tg.PRIVATE, user=tg.ALICE, joined=True, mine=True)
+    await handlers.on_my_chat_member(private_change, context)
+    assert tg.sent_texts(bot) == []
+
+
+async def test_regular_messages_are_not_migrations() -> None:
+    handlers, _, policy = make_handlers(allowed={tg.GROUP.id})
+    context, _ = tg.make_context()
+    await handlers.on_migration(tg.command_update(tg.message(text="hello")), context)
+    assert policy.allowed == {tg.GROUP.id}  # untouched
+
+
+async def test_newcomer_handler_ignores_updates_without_membership_change() -> None:
+    handlers, _, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_newcomer(tg.command_update(tg.message(text="hi")), context)
+    assert tg.sent_texts(bot) == []

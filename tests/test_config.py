@@ -104,3 +104,8 @@ def test_confirm_consent_mode_is_rejected_as_unimplemented() -> None:
 def test_unknown_consent_mode_is_rejected() -> None:
     with pytest.raises(ConfigurationError, match="CONSENT_MODE"):
         load_config(dict(REQUIRED) | {"CONSENT_MODE": "ask-nicely"})
+
+
+def test_explicit_ttl_override_is_honored() -> None:
+    config = load_config(dict(REQUIRED) | {"SESSION_TTL_MINUTES": "30"})
+    assert config.session_ttl == timedelta(minutes=30)

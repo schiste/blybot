@@ -9,7 +9,7 @@ from telegram import Update, User
 from blybot.adapters.telegram import handlers as h
 from blybot.observability import Counters
 from tests import tg
-from tests.fakes import FakeClock, FakePublisher
+from tests.fakes import FailingPublisher, FakeClock, FakePublisher
 from tests.test_group_handlers import make_handlers as make_group_handlers
 from tests.test_transcribe import make_service
 
@@ -131,3 +131,24 @@ async def test_newcomers_in_unlisted_groups_are_ignored() -> None:
     join = tg.membership_update(tg.GROUP, user=tg.ALICE, joined=True, mine=False)
     await group_handlers.on_newcomer(join, context)
     assert tg.sent_texts(bot) == []
+
+
+async def test_dm_without_text_is_ignored() -> None:
+    handlers, publisher = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_dm(dm(None), context)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == []
+
+
+async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() -> None:
+    transcription = make_service(FailingPublisher(), FakeClock())
+    handlers = h.PrivateHandlers(
+        transcription=transcription,
+        sessions=transcription.sessions,
+        counters=Counters(),
+        welcome_text="Welcome.",
+    )
+    context, bot = tg.make_context()
+    await handlers.on_dm(dm("doomed"), context)
+    assert tg.sent_texts(bot) == [h.REPLY_WIKI_ERROR]

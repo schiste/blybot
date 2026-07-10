@@ -167,3 +167,18 @@ async def test_rollover_flush_failure_never_swallows_the_new_message() -> None:
 
     assert [entry[1] for entry in publisher.recorder.started] == ["Anon-2"]
     assert publisher.recorder.started[0][2] == ": [sanitized]after"
+
+
+async def test_flush_all_contains_write_failures() -> None:
+    service = make_service(FailingPublisher(), FakeClock(), debounce_seconds=60)
+    await service.record(chat_id=1, text="pending")
+    await service.flush_all()  # failure is logged, never raised at shutdown
+
+
+async def test_flush_of_an_unknown_chat_is_a_quiet_noop() -> None:
+    """Guards the race where a scheduled flusher fires after its buffer
+    was already drained by flush_all or a rollover."""
+    publisher = FakePublisher()
+    service = make_service(publisher, FakeClock())
+    await service._flush(chat_id=999)
+    assert publisher.wrote_nothing

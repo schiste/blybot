@@ -13,6 +13,7 @@ DM buffers so debounced content is not lost on a graceful restart.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from telegram import Update
@@ -28,53 +29,73 @@ if TYPE_CHECKING:
     from blybot.services.sessions import SessionRegistry
     from blybot.services.transcribe import DmTranscriptionService
 
-MAINTENANCE_INTERVAL_SECONDS: Final = 60
-HEARTBEAT_EVERY_TICKS: Final = 15  # one liveness line roughly every 15 minutes
-
 _ALLOWED_UPDATES: Final = [Update.MESSAGE, Update.MY_CHAT_MEMBER, Update.CHAT_MEMBER]
 
 _App = Application[Any, Any, Any, Any, Any, Any]
 
 
-async def _maintenance_loop(sessions: SessionRegistry, counters: Counters) -> None:
-    """Sweep expired sessions and prove liveness (spec 10, 16)."""
-    ticks = 0
-    while True:
-        await asyncio.sleep(MAINTENANCE_INTERVAL_SECONDS)
-        expired = sessions.sweep()
+@dataclass(eq=False)
+class Maintenance:
+    """Periodic session sweep and liveness heartbeat (spec 10, 16)."""
+
+    sessions: SessionRegistry
+    counters: Counters
+    interval_seconds: float = 60
+    heartbeat_every_ticks: int = 15  # one liveness line roughly every 15 minutes
+
+    async def run_forever(self) -> None:
+        """Tick until cancelled (the polling process's whole lifetime)."""
+        ticks = 0
+        while True:
+            await asyncio.sleep(self.interval_seconds)
+            ticks += 1
+            self.tick(ticks)
+
+    def tick(self, ticks: int) -> None:
+        """Sweep expired sessions; prove liveness every Nth tick."""
+        expired = self.sessions.sweep()
         if expired:
-            counters.increment("sessions_expired", expired)
+            self.counters.increment("sessions_expired", expired)
             log_event("session_sweep", "ok", expired=expired)
-        ticks += 1
-        if ticks % HEARTBEAT_EVERY_TICKS == 0:
-            log_event("heartbeat", "ok", **counters.snapshot())
+        if ticks % self.heartbeat_every_ticks == 0:
+            log_event("heartbeat", "ok", **self.counters.snapshot())
 
 
-def run_polling(  # noqa: PLR0913 -- the composition root hands every collaborator over
+@dataclass(eq=False)
+class Lifecycle:
+    """Startup and graceful-shutdown hooks for the polling application."""
+
+    maintenance: Maintenance
+    transcription: DmTranscriptionService
+    release: Callable[[], Awaitable[None]]
+
+    async def post_init(self, app: _App) -> None:
+        """Start the maintenance task once the event loop is running."""
+        app.create_task(self.maintenance.run_forever())
+        log_event("startup", "ok")
+
+    async def post_shutdown(self, app: _App) -> None:
+        """Flush pending DM buffers, then release the wiki client."""
+        del app
+        await self.transcription.flush_all()
+        await self.release()
+        log_event("shutdown", "ok")
+
+
+def build_application(
     token: str,
     group_handlers: GroupHandlers,
     private_handlers: PrivateHandlers,
-    sessions: SessionRegistry,
-    transcription: DmTranscriptionService,
-    counters: Counters,
-    shutdown: Callable[[], Awaitable[None]],
-) -> None:
-    """Build the PTB application, register handlers, and poll until stopped."""
-
-    async def post_init(app: _App) -> None:
-        app.create_task(_maintenance_loop(sessions, counters))
-        log_event("startup", "ok")
-
-    async def post_shutdown(app: _App) -> None:
-        del app
-        await transcription.flush_all()
-        await shutdown()
-        log_event("shutdown", "ok")
-
+    lifecycle: Lifecycle,
+) -> _App:
+    """Build the PTB application with every handler registered."""
     application = (
-        Application.builder().token(token).post_init(post_init).post_shutdown(post_shutdown).build()
+        Application.builder()
+        .token(token)
+        .post_init(lifecycle.post_init)
+        .post_shutdown(lifecycle.post_shutdown)
+        .build()
     )
-
     application.add_handler(CommandHandler("log", group_handlers.on_log))
     application.add_handler(CommandHandler("start", private_handlers.on_start))
     application.add_handler(
@@ -91,5 +112,15 @@ def run_polling(  # noqa: PLR0913 -- the composition root hands every collaborat
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_handlers.on_dm
         )
     )
+    return application
 
+
+def run_polling(
+    token: str,
+    group_handlers: GroupHandlers,
+    private_handlers: PrivateHandlers,
+    lifecycle: Lifecycle,
+) -> None:
+    """Poll until stopped; blocks for the process lifetime."""
+    application = build_application(token, group_handlers, private_handlers, lifecycle)
     application.run_polling(allowed_updates=_ALLOWED_UPDATES)

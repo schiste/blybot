@@ -104,27 +104,24 @@ show_error_codes = true
 # Pytest + coverage (runs at pre-push stage and in CI)
 # ---------------------------------------------------------------------------
 [tool.pytest.ini_options]
-addopts = "--strict-markers --cov=blybot --cov-report=term-missing"
+addopts = "--strict-markers --strict-config --cov=blybot --cov-report=term-missing"
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# No warning may pass silently: anything a dependency or our own code
+# warns about fails the suite (and therefore pre-push and CI).
+filterwarnings = ["error"]
 
 [tool.coverage.run]
 branch = true
 source = ["blybot"]
-# Only the process bootstrap is exempt: the composition root and the
-# blocking run_polling wiring. Everything else, adapters included, is
-# unit-covered.
-omit = [
-    "*/blybot/__main__.py",
-    "*/blybot/adapters/telegram/app.py",
-]
 
 [tool.coverage.report]
-fail_under = 90
+fail_under = 100
 show_missing = true
 exclude_also = [
     "if TYPE_CHECKING:",
-    "raise NotImplementedError",
     # Protocol bodies are interface declarations; they never execute.
     "class .*\\bProtocol\\):",
+    # The module self-invocation guard duplicates the console script.
+    "if __name__ == .__main__.:",
 ]

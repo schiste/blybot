@@ -99,10 +99,11 @@ class DmTranscriptionService:
         return session
 
     async def flush_all(self) -> None:
-        """Flush every pending buffer immediately (graceful shutdown)."""
-        for chat_id, buffer in list(self._buffers.items()):
-            if buffer.flusher is not None and not buffer.flusher.done():
-                buffer.flusher.cancel()
+        """Flush every pending buffer immediately (graceful shutdown).
+
+        ``_flush`` itself cancels each buffer's scheduled flusher.
+        """
+        for chat_id in list(self._buffers):
             try:
                 await self._flush(chat_id)
             except WikiWriteError:

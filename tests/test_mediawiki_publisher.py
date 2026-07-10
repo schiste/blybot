@@ -25,12 +25,18 @@ class FakeWiki:
         self.requests: list[dict[str, str]] = []
         self.sections: dict[str, list[str]] = {}  # page -> section headings, in order
         self.parse_faults: list[Exception] = []  # raised (as transport errors) on parse
+        self.edit_exceptions: list[Exception] = []  # raised (as transport errors) on edit
+        self.csrf_always_anonymous = False  # simulates a broken login session
+        self.login_token_missing = False
+        self.transcluded_headings: list[str] = []  # parse-only entries with T- indexes
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         params = {key: values[0] for key, values in parse_qs(request.content.decode()).items()}
         self.requests.append(params)
         if params["action"] == "parse" and self.parse_faults:
             raise self.parse_faults.pop(0)
+        if params["action"] == "edit" and self.edit_exceptions:
+            raise self.edit_exceptions.pop(0)
         return httpx.Response(200, json=self._dispatch(params))
 
     def _dispatch(self, params: dict[str, str]) -> dict[str, Any]:
@@ -47,8 +53,10 @@ class FakeWiki:
 
     def _on_query(self, params: dict[str, str]) -> dict[str, Any]:
         if params.get("type") == "login":
+            if self.login_token_missing:
+                return {"query": {"tokens": {}}}
             return {"query": {"tokens": {"logintoken": "LOGIN+\\"}}}
-        token = "CSRF123" if self.logged_in else "+\\"
+        token = "CSRF123" if self.logged_in and not self.csrf_always_anonymous else "+\\"
         return {"query": {"tokens": {"csrftoken": token}}}
 
     def _on_login(self, params: dict[str, str]) -> dict[str, Any]:
@@ -60,7 +68,11 @@ class FakeWiki:
         page = params["page"]
         if page not in self.sections:
             return {"error": {"code": "missingtitle"}}
-        listed = [
+        listed: list[dict[str, str]] = [
+            {"line": heading, "index": f"T-{position}"}
+            for position, heading in enumerate(self.transcluded_headings, start=1)
+        ]
+        listed += [
             {"line": heading, "index": str(position)}
             for position, heading in enumerate(self.sections[page], start=1)
         ]
@@ -272,4 +284,58 @@ async def test_section_archived_between_lookup_and_edit_is_recreated() -> None:
 
     assert wiki.sections["Talk:D"] == ["Guest-1", "Guest-1"]  # recreated
     assert wiki.edits[-1]["section"] == "new"
+    await publisher.aclose()
+
+
+async def test_non_archival_failure_on_continuation_is_not_papered_over() -> None:
+    """Only nosuchsection triggers recreation; real failures must surface."""
+    wiki = FakeWiki()
+    publisher, _ = make_publisher(wiki)
+    await publisher.start_discussion("Talk:D", "Guest-1", ": first", "s")
+
+    wiki.edit_faults = ["protectedpage"]
+    with pytest.raises(WikiPublishError, match="protectedpage"):
+        await publisher.continue_discussion("Talk:D", "Guest-1", ":: second", "s")
+    assert wiki.sections["Talk:D"] == ["Guest-1"]  # no bogus recreation
+    await publisher.aclose()
+
+
+async def test_transient_transport_error_on_edit_is_retried() -> None:
+    wiki = FakeWiki()
+    publisher, sleep = make_publisher(wiki)
+    wiki.edit_exceptions = [httpx.ConnectError("blip")]
+    await publisher.start_discussion("Talk:D", "Guest-1", ": first", "s")
+
+    assert wiki.sections["Talk:D"] == ["Guest-1"]
+    assert sleep.calls == [2.0]
+    await publisher.aclose()
+
+
+async def test_unobtainable_csrf_token_raises_a_credentials_hint() -> None:
+    wiki = FakeWiki()
+    wiki.csrf_always_anonymous = True  # login "succeeds" but session never sticks
+    publisher, _ = make_publisher(wiki)
+    with pytest.raises(WikiPublishError, match="CSRF"):
+        await publisher.start_discussion("Talk:D", "h", ": x", "s")
+    await publisher.aclose()
+
+
+async def test_missing_login_token_raises() -> None:
+    wiki = FakeWiki()
+    wiki.login_token_missing = True
+    publisher, _ = make_publisher(wiki)
+    with pytest.raises(WikiPublishError, match="login token"):
+        await publisher.start_discussion("Talk:D", "h", ": x", "s")
+    await publisher.aclose()
+
+
+async def test_transcluded_sections_are_never_edit_targets() -> None:
+    """Transcluded sections (index T-n) cannot be edited via section=n."""
+    wiki = FakeWiki()
+    wiki.transcluded_headings = ["Guest-1"]  # same heading, transcluded from elsewhere
+    publisher, _ = make_publisher(wiki)
+    await publisher.start_discussion("Talk:D", "Guest-1", ": first", "s")
+    await publisher.continue_discussion("Talk:D", "Guest-1", ":: second", "s")
+
+    assert wiki.edits[-1]["section"] == "1"  # the real section, not the transclusion
     await publisher.aclose()

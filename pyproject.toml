@@ -1,0 +1,132 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blybot"
+version = "0.1.0"
+description = "A privacy-first Telegram bot that publishes explicitly selected messages to a Meta-wiki page, anonymously."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Blybot contributors" }]
+keywords = ["telegram", "mediawiki", "wikimedia", "toolforge", "privacy"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Other Audience",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Communications :: Chat",
+]
+dependencies = [
+    "python-telegram-bot>=21.0",
+    "mwclient>=0.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/schiste/blybot"
+Issues = "https://github.com/schiste/blybot/issues"
+
+[project.scripts]
+blybot = "blybot.__main__:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.13",
+    "pre-commit>=4.0",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter (runs at pre-commit stage)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "F",    # pyflakes
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "S",    # flake8-bandit (security)
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "DTZ",  # flake8-datetimez (naive datetimes are bugs)
+    "ISC",  # implicit string concat
+    "PIE",  # misc lints
+    "PT",   # pytest style
+    "RET",  # return statements
+    "SIM",  # simplify
+    "ARG",  # unused arguments
+    "PTH",  # prefer pathlib
+    "PL",   # pylint
+    "TRY",  # tryceratops (exception handling)
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "ISC001",  # conflicts with the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # asserts are the point of tests
+    "PLR2004", # magic values are fine in assertions
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+# ---------------------------------------------------------------------------
+# Mypy — strict typing (runs at pre-push stage and in CI)
+# ---------------------------------------------------------------------------
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src", "tests"]
+warn_unreachable = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "mwclient.*"
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest + coverage (runs at pre-push stage and in CI)
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+addopts = "--strict-markers --cov=blybot --cov-report=term-missing"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+branch = true
+source = ["blybot"]
+# Adapters and the composition root are I/O wiring, exercised by
+# integration tests once Phase 1/2 land; unit coverage gates the core.
+omit = [
+    "*/blybot/adapters/*",
+    "*/blybot/__main__.py",
+]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    # Protocol bodies are interface declarations; they never execute.
+    "class .*\\bProtocol\\):",
+]

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import Pseudonym
-from blybot.domain.ports import WikiWriteError
+from blybot.domain.models import GroupProfile, Pseudonym
+from blybot.domain.ports import StorageError, WikiWriteError
 
 
 @dataclass
@@ -110,3 +110,62 @@ class SequentialPseudonyms:
     def mint(self) -> Pseudonym:
         self.counter += 1
         return Pseudonym(f"Anon-{self.counter}")
+
+
+@dataclass
+class InMemoryProfiles:
+    """ProfileStore + TokenVault over plain dicts, with a failure switch."""
+
+    profiles: dict[int, GroupProfile] = field(default_factory=dict)
+    tokens: dict[int, str] = field(default_factory=dict)
+    cursors: dict[int, str] = field(default_factory=dict)
+    fail: bool = False
+
+    def _check(self) -> None:
+        if self.fail:
+            raise StorageError
+
+    async def get(self, chat_id: int) -> GroupProfile | None:
+        self._check()
+        profile = self.profiles.get(chat_id)
+        if profile is None:
+            return None
+        return replace(profile, has_token=chat_id in self.tokens)
+
+    async def upsert(self, profile: GroupProfile) -> None:
+        self._check()
+        self.profiles[profile.chat_id] = profile
+
+    async def delete(self, chat_id: int) -> None:
+        self._check()
+        self.profiles.pop(chat_id, None)
+        self.tokens.pop(chat_id, None)
+        self.cursors.pop(chat_id, None)
+
+    async def list_event_enabled(self) -> list[GroupProfile]:
+        self._check()
+        return [
+            replace(profile, has_token=chat_id in self.tokens)
+            for chat_id, profile in self.profiles.items()
+            if profile.events_enabled
+        ]
+
+    async def get_cursor(self, chat_id: int) -> str | None:
+        self._check()
+        return self.cursors.get(chat_id)
+
+    async def set_cursor(self, chat_id: int, cursor: str) -> None:
+        self._check()
+        self.cursors[chat_id] = cursor
+
+    async def store_token(self, chat_id: int, token: str) -> None:
+        self._check()
+        self.tokens[chat_id] = token
+
+    async def fetch_token(self, chat_id: int) -> str | None:
+        self._check()
+        return self.tokens.get(chat_id)
+
+    async def delete_token(self, chat_id: int) -> None:
+        self._check()
+        self.tokens.pop(chat_id, None)

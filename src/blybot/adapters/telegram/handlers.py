@@ -154,7 +154,7 @@ class GroupHandlers:
     # The bot's own /log replies (confirmation, hints) self-delete after
     # this delay — long enough to read, then the group stays tidy.
     # Deleting its own messages needs no admin right.
-    reply_cleanup_delay_seconds: float = 30.0
+    reply_cleanup_delay_seconds: float = 15.0
     _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
     async def on_log(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

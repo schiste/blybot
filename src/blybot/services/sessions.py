@@ -8,7 +8,7 @@ restart; all three are acceptable by design.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -36,14 +36,21 @@ class SessionRegistry:
         now = self.clock.now()
         existing = self._sessions.get(chat_id)
         if existing is not None and now - existing.last_seen < self.ttl:
-            refreshed = Session(
-                pseudonym=existing.pseudonym,
-                anchor=existing.anchor,
-                last_seen=now,
-            )
+            refreshed = replace(existing, last_seen=now)
             self._sessions[chat_id] = refreshed
             return refreshed
         return self._mint(chat_id)
+
+    def advance(self, chat_id: int) -> Session:
+        """Like :meth:`touch`, but also count one recorded message.
+
+        The returned session's ``message_count`` is the 1-based ordinal
+        of the message being recorded — its discussion indentation depth.
+        """
+        current = self.touch(chat_id)
+        advanced = replace(current, message_count=current.message_count + 1)
+        self._sessions[chat_id] = advanced
+        return advanced
 
     def peek(self, chat_id: int) -> Session | None:
         """Return the live session without refreshing or minting one.

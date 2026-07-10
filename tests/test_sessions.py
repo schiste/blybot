@@ -64,6 +64,28 @@ def test_concurrent_chats_get_distinct_identities() -> None:
     assert a.pseudonym != b.pseudonym
 
 
+def test_advance_counts_messages_within_a_session() -> None:
+    registry = make_registry(FakeClock())
+    first = registry.advance(chat_id=111)
+    second = registry.advance(chat_id=111)
+    assert (first.message_count, second.message_count) == (1, 2)
+    assert second.pseudonym == first.pseudonym
+
+
+def test_touch_preserves_the_message_count() -> None:
+    registry = make_registry(FakeClock())
+    registry.advance(chat_id=111)
+    assert registry.touch(chat_id=111).message_count == 1
+
+
+def test_expiry_resets_the_message_count() -> None:
+    clock = FakeClock()
+    registry = make_registry(clock)
+    registry.advance(chat_id=111)
+    clock.advance(TTL)
+    assert registry.advance(chat_id=111).message_count == 1
+
+
 def test_sweep_drops_only_expired_sessions() -> None:
     clock = FakeClock()
     registry = make_registry(clock)

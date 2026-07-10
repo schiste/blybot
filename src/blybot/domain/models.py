@@ -64,8 +64,13 @@ class Session:
     id itself lives only in the volatile registry keys, never inside this
     value object — so a ``Session`` can be passed to publication code
     without carrying any Telegram identifier.
+
+    ``message_count`` is how many messages the session has recorded; on a
+    talk page it doubles as the indentation depth of the next line, which
+    is what renders the back-and-forth of a discussion.
     """
 
     pseudonym: Pseudonym
     anchor: str
     last_seen: datetime
+    message_count: int = 0

@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatType
 
 from blybot.domain.models import ConsentMode
@@ -29,6 +30,8 @@ if TYPE_CHECKING:
 
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.publish import LogPublicationService
+    from blybot.services.sessions import SessionRegistry
+    from blybot.services.transcribe import DmTranscriptionService
 
 REPLY_USAGE: Final = "Reply to a text message with /log to publish it anonymously."
 REPLY_MEDIA_DECLINED: Final = (
@@ -38,6 +41,12 @@ REPLY_PUBLISHED: Final = "Published anonymously to {page}."
 REPLY_THROTTLED: Final = "Rate limit reached — please try again in a minute."
 REPLY_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see details in the logs."
 REPLY_AUTHOR_ONLY: Final = "This group's consent policy only lets authors /log their own messages."
+REPLY_SESSION_INFO: Final = (
+    "You are appearing as {pseudonym}; this exchange is recorded at {page}. "
+    "Send /start any time for a fresh identity."
+)
+NEWCOMER_PROMPT: Final = "Welcome! Tap below for a private note on how I work."
+NEWCOMER_BUTTON: Final = "What is this bot?"
 
 _GROUP_TYPES: Final = frozenset({ChatType.GROUP, ChatType.SUPERGROUP})
 _MEMBER_STATUSES: Final = frozenset(
@@ -135,3 +144,80 @@ class GroupHandlers:
             return False
         user = message.from_user
         return user is None or self.limiter.allow("user", user.id)
+
+    async def on_newcomer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Offer newcomers a private welcome via a deep-link button (R5).
+
+        The bot never DMs anyone unprompted — a private chat only opens
+        when the newcomer taps the button and presses Start themselves,
+        which is both the Telegram constraint and the privacy stance.
+        """
+        change = update.chat_member
+        if change is None or change.chat.type not in _GROUP_TYPES:
+            return
+        if not self.groups.is_allowed(change.chat.id):
+            return
+        was_in = change.old_chat_member.status in _MEMBER_STATUSES
+        is_in = change.new_chat_member.status in _MEMBER_STATUSES
+        if was_in or not is_in or change.new_chat_member.user.is_bot:
+            return
+        deep_link = f"https://t.me/{context.bot.username}?start=welcome"
+        button = InlineKeyboardButton(text=NEWCOMER_BUTTON, url=deep_link)
+        await context.bot.send_message(
+            chat_id=change.chat.id,
+            text=NEWCOMER_PROMPT,
+            reply_markup=InlineKeyboardMarkup([[button]]),
+        )
+        log_event("newcomer_prompt", "ok")
+
+
+@dataclass(eq=False)
+class PrivateHandlers:
+    """Handlers for pseudonymous DM sessions (R4, R5)."""
+
+    transcription: DmTranscriptionService
+    sessions: SessionRegistry
+    counters: Counters
+    welcome_text: str
+
+    async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Deliver the welcome and open a fresh pseudonymous session (R4, R5).
+
+        ``/start`` always mints a new identity (spec 10) — both on first
+        contact (including the ``?start=welcome`` deep link) and when a
+        returning user wants to shed their current pseudonym.
+        """
+        chat = update.effective_chat
+        if chat is None or chat.type != ChatType.PRIVATE:
+            return
+        session = self.sessions.reset(chat.id)
+        self.counters.increment("sessions_opened")
+        log_event("session_opened", "ok")
+        info = REPLY_SESSION_INFO.format(
+            pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
+        )
+        await context.bot.send_message(chat_id=chat.id, text=f"{self.welcome_text}\n\n{info}")
+
+    async def on_dm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Transcribe one private message under the session pseudonym (R4)."""
+        message = update.effective_message
+        chat = update.effective_chat
+        if chat is None or chat.type != ChatType.PRIVATE:
+            return
+        if message is None or not message.text:
+            return
+        is_new_session = self.sessions.peek(chat.id) is None
+        try:
+            session = await self.transcription.record(chat.id, message.text)
+        except WikiWriteError:
+            await context.bot.send_message(chat_id=chat.id, text=REPLY_WIKI_ERROR)
+            return
+        if is_new_session:
+            # Sessions can also start (or roll over) mid-conversation;
+            # tell the user which identity their words appear under.
+            self.counters.increment("sessions_opened")
+            log_event("session_opened", "ok")
+            info = REPLY_SESSION_INFO.format(
+                pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
+            )
+            await context.bot.send_message(chat_id=chat.id, text=info)

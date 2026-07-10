@@ -111,11 +111,12 @@ asyncio_mode = "auto"
 [tool.coverage.run]
 branch = true
 source = ["blybot"]
-# Adapters and the composition root are I/O wiring, exercised by
-# integration tests once Phase 1/2 land; unit coverage gates the core.
+# Only the process bootstrap is exempt: the composition root and the
+# blocking run_polling wiring. Everything else, adapters included, is
+# unit-covered.
 omit = [
-    "*/blybot/adapters/*",
     "*/blybot/__main__.py",
+    "*/blybot/adapters/telegram/app.py",
 ]
 
 [tool.coverage.report]

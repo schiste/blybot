@@ -7,7 +7,7 @@ from datetime import timedelta
 import pytest
 
 from blybot.config import Config, ConfigurationError, load_config
-from blybot.domain.models import TimestampGranularity
+from blybot.domain.models import ConsentMode, TimestampGranularity
 
 REQUIRED = {
     "TELEGRAM_BOT_TOKEN": "123:abc",
@@ -28,6 +28,10 @@ def test_loads_with_defaults() -> None:
     assert config.burst_debounce == timedelta(seconds=8)
     assert config.timestamp_granularity is TimestampGranularity.DATE
     assert config.allowed_group_ids == frozenset()
+    assert config.consent_mode is ConsentMode.IMMEDIATE
+    assert config.log_throttle_per_minute == 6
+    assert "Blybot" in config.group_greeting_text
+    assert config.welcome_text
 
 
 def test_missing_keys_are_all_named_but_values_never_echoed() -> None:
@@ -76,3 +80,27 @@ def test_invalid_timestamp_granularity_is_rejected() -> None:
 def test_edit_summary_is_generic_and_follows_bot_name() -> None:
     config = load_config(dict(REQUIRED) | {"BOT_NAME": "Renamed"})
     assert config.edit_summary == "Log entry via Renamed"
+
+
+def test_default_copy_follows_bot_name_but_custom_copy_is_verbatim() -> None:
+    renamed = load_config(dict(REQUIRED) | {"BOT_NAME": "Renamed"})
+    assert "Renamed" in renamed.group_greeting_text
+
+    custom = load_config(dict(REQUIRED) | {"GROUP_GREETING_TEXT": "Hi {bot_name}!"})
+    assert custom.group_greeting_text == "Hi {bot_name}!"
+
+
+def test_author_only_consent_mode_is_accepted() -> None:
+    config = load_config(dict(REQUIRED) | {"CONSENT_MODE": "author_only"})
+    assert config.consent_mode is ConsentMode.AUTHOR_ONLY
+
+
+def test_confirm_consent_mode_is_rejected_as_unimplemented() -> None:
+    """N1 hook: 'confirm' is reserved; failing loudly beats silent degradation."""
+    with pytest.raises(ConfigurationError, match="not implemented"):
+        load_config(dict(REQUIRED) | {"CONSENT_MODE": "confirm"})
+
+
+def test_unknown_consent_mode_is_rejected() -> None:
+    with pytest.raises(ConfigurationError, match="CONSENT_MODE"):
+        load_config(dict(REQUIRED) | {"CONSENT_MODE": "ask-nicely"})

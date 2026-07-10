@@ -19,6 +19,19 @@ class TimestampGranularity(Enum):
     DATE = "date"
 
 
+class ConsentMode(Enum):
+    """Policy for publishing another person's message via ``/log`` (spec 17-18).
+
+    ``CONFIRM`` is the N1 hook: the value is reserved and recognized, but
+    the DM-confirmation flow is not implemented in v1 — configuring it is
+    rejected at startup rather than silently degraded.
+    """
+
+    IMMEDIATE = "immediate"
+    AUTHOR_ONLY = "author_only"
+    CONFIRM = "confirm"
+
+
 @dataclass(frozen=True, slots=True)
 class LogEntry:
     """A single sanitized message ready for publication to the group log."""

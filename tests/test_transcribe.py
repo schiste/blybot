@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from blybot.domain.models import Pseudonym, Session
+from blybot.domain.models import Pseudonym, Session, TimestampGranularity
 from blybot.domain.ports import WikiWriteError
 from blybot.services.sessions import SessionRegistry
 from blybot.services.transcribe import DmTranscriptionService
@@ -28,6 +28,7 @@ def make_service(
     publisher: FakePublisher | FailingPublisher,
     clock: FakeClock,
     debounce_seconds: float = 0.0,
+    granularity: TimestampGranularity = TimestampGranularity.NONE,
 ) -> DmTranscriptionService:
     sessions = SessionRegistry(pseudonyms=SequentialPseudonyms(), clock=clock, ttl=TTL)
     return DmTranscriptionService(
@@ -37,6 +38,7 @@ def make_service(
         target_page=PAGE,
         edit_summary="Log entry via Blybot",
         debounce_seconds=debounce_seconds,
+        timestamp_granularity=granularity,
     )
 
 
@@ -47,10 +49,12 @@ async def test_messages_land_in_the_session_section_with_growing_indentation() -
     await service.record(chat_id=1, text="and then")
 
     # The first flush OPENS the session's section; later ones continue it.
-    assert publisher.started == [(PAGE, "Anon-1", ": [sanitized]hello", "Log entry via Blybot")]
+    assert publisher.started == [
+        (PAGE, "Anon-1", ": [sanitized]hello --Anon-1", "Log entry via Blybot")
+    ]
     (continuation,) = publisher.continued
     assert continuation[1] == "Anon-1"
-    assert continuation[2] == ":: [sanitized]and then"  # one level deeper each message
+    assert continuation[2] == ":: [sanitized]and then --Anon-1"  # one level deeper each time
     assert service.page_for(session) == f"{PAGE}#Anon-1"
 
 
@@ -71,7 +75,7 @@ async def test_burst_is_coalesced_into_one_edit_with_stepped_indentation() -> No
     await asyncio.sleep(0.1)
     (_, heading, text, _) = publisher.started[0]
     assert heading == "Anon-1"
-    assert text == ": [sanitized]one\n:: [sanitized]two"
+    assert text == ": [sanitized]one --Anon-1\n:: [sanitized]two --Anon-1"
     assert (len(publisher.started), len(publisher.continued)) == (1, 0)
 
 
@@ -85,7 +89,7 @@ async def test_messages_after_a_flush_continue_the_same_discussion_deeper() -> N
 
     assert [entry[1] for entry in publisher.started] == ["Anon-1"]
     assert [entry[1] for entry in publisher.continued] == ["Anon-1"]
-    assert publisher.continued[0][2] == ":: [sanitized]two"
+    assert publisher.continued[0][2] == ":: [sanitized]two --Anon-1"
 
 
 async def test_concurrent_sessions_never_share_a_section() -> None:
@@ -107,8 +111,8 @@ async def test_session_rollover_mid_buffer_splits_the_sections() -> None:
     await service.flush_all()
 
     by_heading = {heading: text for (_, heading, text, _) in publisher.started}
-    assert by_heading["Anon-1"] == ": [sanitized]before"
-    assert by_heading["Anon-2"] == ": [sanitized]after"  # fresh identity, depth resets
+    assert by_heading["Anon-1"] == ": [sanitized]before --Anon-1"
+    assert by_heading["Anon-2"] == ": [sanitized]after --Anon-2"  # fresh identity, depth resets
     assert publisher.continued == []  # both were first flushes of their sections
 
 
@@ -160,6 +164,7 @@ async def test_rollover_flush_failure_never_swallows_the_new_message() -> None:
         target_page=PAGE,
         edit_summary="s",
         debounce_seconds=60,
+        timestamp_granularity=TimestampGranularity.NONE,
     )
     await service.record(chat_id=1, text="before")
     clock.advance(TTL)
@@ -167,7 +172,7 @@ async def test_rollover_flush_failure_never_swallows_the_new_message() -> None:
     await service.flush_all()
 
     assert [entry[1] for entry in publisher.recorder.started] == ["Anon-2"]
-    assert publisher.recorder.started[0][2] == ": [sanitized]after"
+    assert publisher.recorder.started[0][2] == ": [sanitized]after --Anon-2"
 
 
 async def test_flush_all_contains_write_failures() -> None:
@@ -191,5 +196,20 @@ def test_page_for_converts_spaces_to_wiki_anchor_underscores() -> None:
         pseudonym=Pseudonym("Trillian Baggins from Gallifrey"),
         anchor="Trillian Baggins from Gallifrey",
         last_seen=datetime(2026, 7, 10, tzinfo=UTC),
+        created_at=datetime(2026, 7, 10, tzinfo=UTC),
     )
     assert service.page_for(session) == f"{PAGE}#Trillian_Baggins_from_Gallifrey"
+
+
+async def test_minute_granularity_headings_carry_session_start_time() -> None:
+    """Heading = 'Date - HH:MM UTC : Pseudonym', stable across all bursts."""
+    clock = FakeClock()
+    publisher = FakePublisher()
+    service = make_service(publisher, clock, granularity=TimestampGranularity.MINUTE)
+    session = await service.record(chat_id=1, text="first")
+    clock.advance(timedelta(minutes=7))  # later burst, same session
+    await service.record(chat_id=1, text="second")
+
+    headings = [publisher.started[0][1], publisher.continued[0][1]]
+    assert headings == ["2026-07-10 - 12:00 UTC : Anon-1"] * 2  # start time, not send time
+    assert service.page_for(session) == f"{PAGE}#2026-07-10_-_12:00_UTC_:_Anon-1"

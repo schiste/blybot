@@ -54,6 +54,7 @@ def main() -> int:
         target_page=config.dm_target_base,
         edit_summary=config.edit_summary,
         debounce_seconds=config.burst_debounce.total_seconds(),
+        timestamp_granularity=config.timestamp_granularity,
     )
     group_handlers = GroupHandlers(
         log_service=LogPublicationService(

@@ -84,10 +84,12 @@ class SessionRegistry:
             if pseudonym.value not in taken:
                 break
             pseudonym = self.pseudonyms.mint()
+        now = self.clock.now()
         session = Session(
             pseudonym=pseudonym,
             anchor=pseudonym.value,
-            last_seen=self.clock.now(),
+            last_seen=now,
+            created_at=now,
         )
         return self._store(chat_id, session)
 

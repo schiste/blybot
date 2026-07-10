@@ -155,10 +155,10 @@ Design so these remain possible without rework: quote store and `/quote` retriev
 **Write method.** Prefer `action=edit` with `appendtext` for appends. `appendtext` is server-side and largely conflict-free, which suits incremental writes from multiple concurrent DM sessions.
 
 **Page layout.** Output is talk-page style: **one section = one log**.
-- **Group log:** every `/log` opens its own section on the configured log talk page (`section=new`, an atomic append). The entry renders as an indented discussion line; the heading is the coarse date (or a neutral title when timestamps are off).
-- **DM discussions:** each session is one section on the DM talk page (heading = pseudonym), holding the whole exchange. Each message is a discussion line indented one level deeper than the last, tracking the back-and-forth. Appends target the session's section by heading, so concurrent sessions never interleave (N3); if the section is missing (archived mid-session), it is recreated.
+- **Group log:** every `/log` opens its own section on the configured log talk page (`section=new`, an atomic append), heading `"YYYY-MM-DD - HH:MM UTC"` at the configured granularity. The entry renders as an *unsigned* indented discussion line (no attribution, not even a pseudonym).
+- **DM discussions:** each session is one section on the DM talk page, heading `"YYYY-MM-DD - HH:MM UTC : Pseudonym"` (session start time), holding the whole exchange. Each message renders as `": message --Pseudonym"`, indented one level deeper than the last (`:`, `::`, `:::`) to track the back-and-forth. Appends target the session's section by heading, so concurrent sessions never interleave (N3); if the section is missing (archived mid-session), it is recreated.
 
-**Timestamps.** On-page timestamps default to coarse (date only) or none, to limit correlation with Telegram activity. Note that the MediaWiki edit history records the precise edit time regardless; this residual exposure is acknowledged, not eliminated.
+**Timestamps.** Heading timestamps are configurable: `none`, `date`, or `minute` (`"YYYY-MM-DD - HH:MM UTC"`). The MediaWiki edit history records the precise edit time regardless, so minute granularity adds little correlation exposure; this residual exposure is acknowledged, not eliminated.
 
 **Edit summaries.** Generic and non-identifying (for example, "Log entry via Blybot").
 
@@ -198,7 +198,7 @@ Loaded from the tool home directory (env or a `0600`-permission file), not the r
 | `ALLOWED_GROUP_IDS` | Optional allowlist of group chat IDs | empty (allow configured) |
 | `SESSION_TTL_MINUTES` | DM session inactivity timeout | 45 |
 | `BURST_DEBOUNCE_SECONDS` | Coalesce window for DM writes | 8 |
-| `TIMESTAMP_GRANULARITY` | `none` or `date` | `date` |
+| `TIMESTAMP_GRANULARITY` | `none`, `date`, or `minute` | `date` |
 | `CONSENT_MODE` | `immediate`, `confirm`, or `author_only` (the open decision) | `immediate` |
 | `WELCOME_TEXT` / `GROUP_GREETING_TEXT` | Message copy | provided |
 | `USER_AGENT` | WMF-compliant UA string | (required) |

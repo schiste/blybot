@@ -13,10 +13,15 @@ from enum import Enum
 
 
 class TimestampGranularity(Enum):
-    """How precisely on-page entries are timestamped (spec section 9)."""
+    """How precisely on-page section headings are timestamped (spec section 9).
+
+    ``MINUTE`` adds HH:MM UTC; the wiki's edit history exposes precise
+    times regardless, so the correlation cost is marginal.
+    """
 
     NONE = "none"
     DATE = "date"
+    MINUTE = "minute"
 
 
 class ConsentMode(Enum):
@@ -61,4 +66,5 @@ class Session:
     pseudonym: Pseudonym
     anchor: str
     last_seen: datetime
+    created_at: datetime
     message_count: int = 0

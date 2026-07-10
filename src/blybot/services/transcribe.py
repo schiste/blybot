@@ -25,11 +25,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from blybot.domain.ports import WikiWriteError
-from blybot.domain.rendering import discussion_line
+from blybot.domain.rendering import discussion_line, section_heading, timestamp
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from blybot.domain.models import Session
+    from blybot.domain.models import Session, TimestampGranularity
     from blybot.domain.ports import Sanitizer, WikiPublisher
     from blybot.services.sessions import SessionRegistry
 
@@ -37,6 +37,7 @@ if TYPE_CHECKING:
 @dataclass
 class _Buffer:
     anchor: str
+    heading: str
     continuation: bool  # False until the session's section exists on the wiki
     lines: list[str] = field(default_factory=list)
     flusher: asyncio.Task[None] | None = None
@@ -52,6 +53,7 @@ class DmTranscriptionService:
     target_page: str
     edit_summary: str
     debounce_seconds: float
+    timestamp_granularity: TimestampGranularity
     _buffers: dict[int, _Buffer] = field(default_factory=dict)
     # Anchors whose section has been created on the wiki. Kept so the
     # first flush of a session *opens* its section instead of "continuing"
@@ -70,7 +72,11 @@ class DmTranscriptionService:
         to the caller.
         """
         session = self.sessions.advance(chat_id)
-        line = discussion_line(session.message_count, self.sanitizer.sanitize(text))
+        line = discussion_line(
+            session.message_count,
+            self.sanitizer.sanitize(text),
+            signature=session.pseudonym.value,
+        )
 
         buffer = self._buffers.get(chat_id)
         if buffer is not None and buffer.anchor != session.anchor:
@@ -87,6 +93,7 @@ class DmTranscriptionService:
         if buffer is None:
             buffer = _Buffer(
                 anchor=session.anchor,
+                heading=self.heading_for(session),
                 continuation=session.anchor in self._published_anchors,
             )
             self._buffers[chat_id] = buffer
@@ -109,13 +116,23 @@ class DmTranscriptionService:
             except WikiWriteError:
                 log_event("dm_flush", "error")
 
+    def heading_for(self, session: Session) -> str:
+        """The session's section heading: creation timestamp + pseudonym.
+
+        Derived from immutable session fields, so every burst of the
+        session reproduces the identical heading.
+        """
+        stamp = timestamp(session.created_at, self.timestamp_granularity)
+        return section_heading(stamp, session.pseudonym.value)
+
     def page_for(self, session: Session) -> str:
         """Return the page (with section anchor) this session's discussion lands on.
 
         MediaWiki turns spaces into underscores in heading anchors; the
-        pseudonym charset (tested) contains nothing else needing escape.
+        heading charset (timestamp, colon, hyphen, pseudonym) contains
+        nothing else needing escape.
         """
-        return f"{self.target_page}#{session.anchor.replace(' ', '_')}"
+        return f"{self.target_page}#{self.heading_for(session).replace(' ', '_')}"
 
     async def _flush_later(self, chat_id: int) -> None:
         await asyncio.sleep(self.debounce_seconds)
@@ -140,7 +157,7 @@ class DmTranscriptionService:
         )
         await write(
             page=self.target_page,
-            heading=buffer.anchor,
+            heading=buffer.heading,
             text="\n".join(buffer.lines),
             summary=self.edit_summary,
         )

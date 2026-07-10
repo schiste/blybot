@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from blybot.domain.models import TimestampGranularity
-from blybot.services.publish import UNDATED_HEADING, LogPublicationService, NothingToPublishError
+from blybot.services.publish import LogPublicationService, NothingToPublishError
 from tests.fakes import FakeClock, FakePublisher, PassthroughSanitizer
 
 
@@ -69,5 +69,18 @@ async def test_none_granularity_uses_a_neutral_heading() -> None:
     publisher = FakePublisher()
     await make_service(publisher, TimestampGranularity.NONE).publish("hello")
     heading = publisher.started[0][1]
-    assert heading == UNDATED_HEADING
+    assert heading == "Log entry"
     assert "2026" not in heading
+
+
+async def test_minute_granularity_stamps_time_in_the_heading() -> None:
+    publisher = FakePublisher()
+    await make_service(publisher, TimestampGranularity.MINUTE).publish("hello")
+    assert publisher.started[0][1] == "2026-07-10 - 12:00 UTC"
+
+
+async def test_log_entries_are_never_signed() -> None:
+    """R6: /log carries no attribution — not even a pseudonym."""
+    publisher = FakePublisher()
+    await make_service(publisher).publish("hello")
+    assert "--" not in publisher.started[0][2]

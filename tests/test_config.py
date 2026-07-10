@@ -71,6 +71,11 @@ def test_invalid_ttl_is_rejected(bad: str) -> None:
         load_config(env)
 
 
+def test_minute_timestamp_granularity_is_accepted() -> None:
+    config = load_config(dict(REQUIRED) | {"TIMESTAMP_GRANULARITY": "minute"})
+    assert config.timestamp_granularity is TimestampGranularity.MINUTE
+
+
 def test_invalid_timestamp_granularity_is_rejected() -> None:
     env = dict(REQUIRED) | {"TIMESTAMP_GRANULARITY": "precise"}
     with pytest.raises(ConfigurationError, match="TIMESTAMP_GRANULARITY"):

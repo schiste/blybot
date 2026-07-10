@@ -19,6 +19,7 @@ def test_value_objects_are_immutable() -> None:
         pseudonym=Pseudonym("Anon-1"),
         anchor="Anon-1",
         last_seen=datetime(2026, 7, 10, tzinfo=UTC),
+        created_at=datetime(2026, 7, 10, tzinfo=UTC),
     )
     with pytest.raises(AttributeError):
         session.anchor = "tampered"  # type: ignore[misc]

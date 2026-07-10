@@ -99,7 +99,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     try:
         granularity = TimestampGranularity(source.get("TIMESTAMP_GRANULARITY", "date"))
     except ValueError as exc:
-        msg = "TIMESTAMP_GRANULARITY must be one of: none, date"
+        msg = "TIMESTAMP_GRANULARITY must be one of: none, date, minute"
         raise ConfigurationError(msg) from exc
 
     bot_name = source.get("BOT_NAME", DEFAULT_BOT_NAME)

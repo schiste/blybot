@@ -1,23 +1,22 @@
 """Use-case: publish a ``/log``-marked group message to the Meta log page (spec R2).
 
 Every ``/log`` opens its own section on the log talk page (one section =
-one log), with the entry indented as a discussion line. The heading is
-the coarse date — or a fixed neutral title when timestamps are disabled —
-so nothing in the section identifies the author (R6).
+one log), with the entry indented as an *unsigned* discussion line —
+log entries carry no attribution, not even a pseudonym (R6). The
+heading is the publication timestamp at the configured granularity, or
+a fixed neutral title when timestamps are disabled.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING
 
-from blybot.domain.models import TimestampGranularity
-from blybot.domain.rendering import discussion_line
+from blybot.domain.rendering import discussion_line, section_heading, timestamp
 
 if TYPE_CHECKING:
+    from blybot.domain.models import TimestampGranularity
     from blybot.domain.ports import Clock, Sanitizer, WikiPublisher
-
-UNDATED_HEADING: Final = "Log entry"
 
 
 class NothingToPublishError(Exception):
@@ -45,14 +44,10 @@ class LogPublicationService:
             msg = "referenced message has no text"
             raise NothingToPublishError(msg)
 
+        stamp = timestamp(self.clock.now(), self.timestamp_granularity)
         await self.publisher.start_discussion(
             page=self.target_page,
-            heading=self._heading(),
+            heading=section_heading(stamp, None),
             text=discussion_line(1, self.sanitizer.sanitize(raw_text)),
             summary=self.edit_summary,
         )
-
-    def _heading(self) -> str:
-        if self.timestamp_granularity is TimestampGranularity.DATE:
-            return self.clock.now().strftime("%Y-%m-%d")
-        return UNDATED_HEADING

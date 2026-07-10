@@ -81,6 +81,7 @@ def main() -> int:
         log_page=config.log_target_page,
         log_page_url=config.page_url(config.log_target_page),
         maintainer=config.maintainer,
+        newcomer_welcome_enabled=config.newcomer_welcome_enabled,
     )
     tracker = (
         GitHubIssueTracker(

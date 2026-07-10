@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 from datetime import timedelta
 
+from blybot.adapters.github.issues import GitHubIssueTracker
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
@@ -17,6 +18,7 @@ from blybot.config import ConfigurationError, load_config
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging
+from blybot.services.feedback import FeedbackService
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
 from blybot.services.sessions import SessionRegistry
@@ -78,6 +80,15 @@ def main() -> int:
         log_page_url=config.page_url(config.log_target_page),
         maintainer=config.maintainer,
     )
+    tracker = (
+        GitHubIssueTracker(
+            repo=config.github_repo,
+            token=config.github_token,
+            user_agent=config.user_agent,
+        )
+        if config.github_token
+        else None
+    )
     private_handlers = PrivateHandlers(
         transcription=transcription,
         sessions=sessions,
@@ -85,6 +96,9 @@ def main() -> int:
         welcome_text=config.welcome_text,
         dm_page_url=config.page_url(config.dm_target_base),
         maintainer=config.maintainer,
+        issues_url=f"https://github.com/{config.github_repo}/issues",
+        feedback=FeedbackService(tracker) if tracker else None,
+        bug_limiter=SlidingWindowLimiter(clock=clock, limit=3, window=timedelta(hours=1)),
     )
 
     run_polling(

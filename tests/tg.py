@@ -30,13 +30,11 @@ ALICE = User(id=1, first_name="Alice", is_bot=False)
 BOB = User(id=2, first_name="Bob", is_bot=False)
 
 
-def make_context() -> tuple[ContextTypes.DEFAULT_TYPE, AsyncMock]:
+def make_context(args: list[str] | None = None) -> tuple[ContextTypes.DEFAULT_TYPE, AsyncMock]:
     """Return a (context, bot) pair; the bot records outgoing calls."""
     bot = AsyncMock()
     bot.username = "blybot_bot"
-    context = cast(
-        "ContextTypes.DEFAULT_TYPE", SimpleNamespace(bot=bot, args=cast("list[str]", []))
-    )
+    context = cast("ContextTypes.DEFAULT_TYPE", SimpleNamespace(bot=bot, args=args or []))
     return context, bot
 
 

@@ -20,7 +20,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatType
 
 from blybot.domain.models import ConsentMode
-from blybot.domain.ports import WikiWriteError
+from blybot.domain.ports import IssueTrackerError, WikiWriteError
 from blybot.observability import Counters, log_event
 from blybot.services.publish import NothingToPublishError
 
@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from telegram.ext import ContextTypes
 
     from blybot.domain.models import Session
+    from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.publish import LogPublicationService
     from blybot.services.sessions import SessionRegistry
@@ -55,6 +56,12 @@ REPLY_FLUSHED: Final = "Fresh identity minted. "
 REPLY_NO_SESSION: Final = (
     "You have no active session. Your next message will mint a fresh pseudonym automatically."
 )
+REPLY_BUG_USAGE: Final = (
+    "Describe the problem after the command, e.g.: /bug the bot ignored my /flush"
+)
+REPLY_BUG_FILED: Final = "Filed anonymously: {url}"
+REPLY_BUG_DISABLED: Final = "Chat bug reports aren't enabled; please open an issue at {url}"
+REPLY_BUG_FAILED: Final = "Sorry, filing the issue failed — please report it at {url}"
 NEWCOMER_PROMPT: Final = "Welcome! Tap below for a private note on how I work."
 NEWCOMER_BUTTON: Final = "What is this bot?"
 HELP_PRIVATE: Final = (
@@ -63,6 +70,7 @@ HELP_PRIVATE: Final = (
     "/whoami — show the pseudonym you currently appear as\n"
     "/flush — discard it and mint a fresh, unlinkable one\n"
     "/privacy — what I collect and publish\n"
+    "/bug — file an anonymous bug report with my maintainer\n"
     "/help — this message\n\n"
     "In groups, reply to a message with /log to publish it anonymously."
 )
@@ -249,6 +257,9 @@ class PrivateHandlers:
     welcome_text: str
     dm_page_url: str
     maintainer: str
+    issues_url: str
+    feedback: FeedbackService | None
+    bug_limiter: SlidingWindowLimiter
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Deliver the welcome message (R5) — nothing else.
@@ -296,6 +307,35 @@ class PrivateHandlers:
         if chat is not None:
             text = HELP_PRIVATE + _help_footer(self.dm_page_url, self.maintainer)
             await context.bot.send_message(chat_id=chat.id, text=text)
+
+    async def on_bug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """File an anonymous bug report on the issue tracker (/bug, /issue)."""
+        chat = self._private_chat(update)
+        if chat is None:
+            return
+
+        async def reply(text: str) -> None:
+            await context.bot.send_message(chat_id=chat.id, text=text)
+
+        if self.feedback is None:
+            await reply(REPLY_BUG_DISABLED.format(url=self.issues_url))
+            return
+        description = " ".join(context.args or ()).strip()
+        if not description:
+            await reply(REPLY_BUG_USAGE)
+            return
+        if not self.bug_limiter.allow("bug", chat.id):
+            await reply(REPLY_THROTTLED)
+            return
+        try:
+            url = await self.feedback.report(description)
+        except IssueTrackerError:
+            log_event("bug_report", "error")
+            await reply(REPLY_BUG_FAILED.format(url=self.issues_url))
+            return
+        self.counters.increment("bugs_filed")
+        log_event("bug_report", "ok")
+        await reply(REPLY_BUG_FILED.format(url=url))
 
     async def on_privacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """State exactly what is ingested, published, and stored."""

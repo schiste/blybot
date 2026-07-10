@@ -22,6 +22,18 @@ class WikiWriteError(Exception):
     """
 
 
+class IssueTrackerError(Exception):
+    """Filing an issue with the tracker failed."""
+
+
+class IssueTracker(Protocol):
+    """Files anonymous bug reports with the project's issue tracker."""
+
+    async def open_issue(self, title: str, body: str) -> str:
+        """Create an issue; return its public URL."""
+        ...
+
+
 class WikiPublisher(Protocol):
     """Writes discussions to a wiki talk page (spec section 9).
 

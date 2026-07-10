@@ -108,6 +108,8 @@ def build_application(
     application.add_handler(CommandHandler("flush", private_handlers.on_flush))
     application.add_handler(CommandHandler("whoami", private_handlers.on_whoami))
     application.add_handler(CommandHandler("privacy", private_handlers.on_privacy))
+    application.add_handler(CommandHandler("bug", private_handlers.on_bug))
+    application.add_handler(CommandHandler("issue", private_handlers.on_bug))
     application.add_handler(
         CommandHandler("help", private_handlers.on_help, filters=filters.ChatType.PRIVATE)
     )

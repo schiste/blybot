@@ -123,6 +123,12 @@ def test_maintainer_defaults_to_empty_and_page_url_builds_wmf_urls() -> None:
     assert named.maintainer == "User:Schiste"
 
 
+def test_github_settings_default_to_public_repo_and_no_token() -> None:
+    config = load_config(dict(REQUIRED))
+    assert config.github_repo == "schiste/blybot"
+    assert config.github_token == ""
+
+
 def test_explicit_ttl_override_is_honored() -> None:
     config = load_config(dict(REQUIRED) | {"SESSION_TTL_MINUTES": "30"})
     assert config.session_ttl == timedelta(minutes=30)

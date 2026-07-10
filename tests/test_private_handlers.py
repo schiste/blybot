@@ -7,7 +7,10 @@ from datetime import timedelta
 from telegram import Update, User
 
 from blybot.adapters.telegram import handlers as h
+from blybot.domain.ports import IssueTrackerError
 from blybot.observability import Counters
+from blybot.services.feedback import FeedbackService
+from blybot.services.policy import SlidingWindowLimiter
 from tests import tg
 from tests.fakes import FailingPublisher, FakeClock, FakePublisher
 from tests.test_group_handlers import make_handlers as make_group_handlers
@@ -16,9 +19,29 @@ from tests.test_transcribe import make_service
 TTL = timedelta(minutes=45)
 
 
-def make_handlers(clock: FakeClock | None = None) -> tuple[h.PrivateHandlers, FakePublisher]:
+ISSUES_URL = "https://github.com/schiste/blybot/issues"
+
+
+class FakeTracker:
+    def __init__(self) -> None:
+        self.issues: list[tuple[str, str]] = []
+        self.fail = False
+
+    async def open_issue(self, title: str, body: str) -> str:
+        if self.fail:
+            raise IssueTrackerError
+        self.issues.append((title, body))
+        return f"{ISSUES_URL}/42"
+
+
+def make_handlers(
+    clock: FakeClock | None = None,
+    tracker: FakeTracker | None = None,
+    bug_limit: int = 100,
+) -> tuple[h.PrivateHandlers, FakePublisher]:
+    clock = clock or FakeClock()
     publisher = FakePublisher()
-    transcription = make_service(publisher, clock or FakeClock())
+    transcription = make_service(publisher, clock)
     handlers = h.PrivateHandlers(
         transcription=transcription,
         sessions=transcription.sessions,
@@ -26,6 +49,9 @@ def make_handlers(clock: FakeClock | None = None) -> tuple[h.PrivateHandlers, Fa
         welcome_text="Welcome to Blybot.",
         dm_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Discussions",
         maintainer="Test Maintainer",
+        issues_url=ISSUES_URL,
+        feedback=FeedbackService(tracker) if tracker else None,
+        bug_limiter=SlidingWindowLimiter(clock=clock, limit=bug_limit, window=timedelta(hours=1)),
     )
     return handlers, publisher
 
@@ -196,7 +222,8 @@ async def test_dm_without_text_is_ignored() -> None:
 
 
 async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() -> None:
-    transcription = make_service(FailingPublisher(), FakeClock())
+    clock = FakeClock()
+    transcription = make_service(FailingPublisher(), clock)
     handlers = h.PrivateHandlers(
         transcription=transcription,
         sessions=transcription.sessions,
@@ -204,6 +231,9 @@ async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() ->
         welcome_text="Welcome.",
         dm_page_url="https://example.org/wiki/D",
         maintainer="",
+        issues_url=ISSUES_URL,
+        feedback=None,
+        bug_limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(hours=1)),
     )
     context, bot = tg.make_context()
     await handlers.on_dm(dm("doomed"), context)
@@ -214,3 +244,55 @@ def test_help_footer_omits_the_maintainer_line_when_unset() -> None:
     footer = h._help_footer("https://example.org/wiki/P", "")
     assert "lands at https://example.org/wiki/P" in footer
     assert "maintained" not in footer
+
+
+async def test_bug_files_an_anonymous_issue_and_links_it() -> None:
+    tracker = FakeTracker()
+    handlers, _ = make_handlers(tracker=tracker)
+    context, bot = tg.make_context(args=["the", "bot", "broke"])
+    await handlers.on_bug(dm("/bug the bot broke"), context)
+
+    ((title, body),) = tracker.issues
+    assert title == "the bot broke"
+    assert "anonymously" in body
+    assert tg.sent_texts(bot) == [h.REPLY_BUG_FILED.format(url=f"{ISSUES_URL}/42")]
+
+
+async def test_bug_without_description_shows_usage() -> None:
+    handlers, _ = make_handlers(tracker=FakeTracker())
+    context, bot = tg.make_context()
+    await handlers.on_bug(dm("/bug"), context)
+    assert tg.sent_texts(bot) == [h.REPLY_BUG_USAGE]
+
+
+async def test_bug_when_unconfigured_points_at_the_tracker() -> None:
+    handlers, _ = make_handlers(tracker=None)
+    context, bot = tg.make_context(args=["broken"])
+    await handlers.on_bug(dm("/bug broken"), context)
+    assert tg.sent_texts(bot) == [h.REPLY_BUG_DISABLED.format(url=ISSUES_URL)]
+
+
+async def test_bug_reports_are_rate_limited() -> None:
+    tracker = FakeTracker()
+    handlers, _ = make_handlers(tracker=tracker, bug_limit=1)
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_bug(dm("/bug x"), context)
+    await handlers.on_bug(dm("/bug x"), context)
+    assert len(tracker.issues) == 1
+    assert tg.sent_texts(bot)[-1] == h.REPLY_THROTTLED
+
+
+async def test_bug_filing_failure_falls_back_to_the_tracker_url() -> None:
+    tracker = FakeTracker()
+    tracker.fail = True
+    handlers, _ = make_handlers(tracker=tracker)
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_bug(dm("/bug x"), context)
+    assert tg.sent_texts(bot) == [h.REPLY_BUG_FAILED.format(url=ISSUES_URL)]
+
+
+async def test_bug_outside_private_chat_is_ignored() -> None:
+    handlers, _ = make_handlers(tracker=FakeTracker())
+    context, bot = tg.make_context(args=["x"])
+    await handlers.on_bug(tg.command_update(tg.message(chat=tg.GROUP, text="/bug x")), context)
+    assert tg.sent_texts(bot) == []

@@ -66,6 +66,8 @@ class Config:
     group_greeting_text: str
     welcome_text: str
     maintainer: str
+    github_repo: str
+    github_token: str
     user_agent: str
 
     @property
@@ -123,6 +125,8 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         ),
         welcome_text=source.get("WELCOME_TEXT", DEFAULT_WELCOME),
         maintainer=source.get("MAINTAINER", ""),
+        github_repo=source.get("GITHUB_REPO", "schiste/blybot"),
+        github_token=source.get("GITHUB_TOKEN", ""),
         user_agent=source["USER_AGENT"],
     )
 

@@ -32,28 +32,34 @@ words, and the precise edit times in the wiki's public history. `/log` means
 
 ## Status
 
-Repository scaffolding and core domain logic (sanitizer, sessions,
-pseudonyms, publication use-case) with full test coverage. Transport wiring
-(Telegram long polling, MediaWiki client) lands in Phase 1 — see
-[docs/SPECIFICATION.md](docs/SPECIFICATION.md) for the full product spec and
-phasing.
+**Feature-complete for v1** (spec Phases 1–3): the group `/log` flow with
+confirmation and consent policy, greet-on-entry, DM transcription with
+per-session subpages and burst coalescing, the newcomer deep-link welcome,
+rate limiting, and a maxlag-aware MediaWiki publisher. What remains before
+going live is Phase 0 operations — BotFather registration (privacy mode ON),
+the on-wiki BotPassword, target pages, and the Toolforge outbound check —
+plus the deferred N1 consent-confirm flow. See
+[docs/SPECIFICATION.md](docs/SPECIFICATION.md) for the full product spec.
 
 ## Architecture
 
 ```
 src/blybot/
 ├── domain/       pure business logic — no I/O, no third-party imports
-│   ├── models.py       identifier-free value objects
+│   ├── models.py       identifier-free value objects, ConsentMode
 │   ├── ports.py        Protocols: WikiPublisher, Sanitizer, PseudonymFactory, Clock
 │   ├── sanitizer.py    wikitext neutralization (entity encoding)
 │   └── pseudonym.py    CSPRNG pseudonym minting
 ├── services/     use-cases, depend on domain ports only
 │   ├── publish.py      /log → sanitized append to the Meta log page
-│   └── sessions.py     volatile DM session registry (TTL, reset, sweep)
+│   ├── transcribe.py   DM transcription: per-session subpages, debounced writes
+│   ├── sessions.py     volatile DM session registry (TTL, peek, reset, sweep)
+│   └── policy.py       group allowlist + supergroup migration, /log throttle
 ├── adapters/     the only layer allowed to touch I/O libraries
-│   ├── telegram/       python-telegram-bot long polling (Phase 1)
-│   ├── mediawiki/      appendtext publisher, maxlag-aware (Phase 1)
+│   ├── telegram/       handlers (the anonymity boundary) + polling bootstrap
+│   ├── mediawiki/      async appendtext publisher: maxlag, backoff, assert=user
 │   └── system.py       wall clock
+├── observability.py    identifier-free event logging and counters
 ├── config.py     env-based configuration, validates without echoing secrets
 └── __main__.py   composition root
 ```
@@ -89,7 +95,21 @@ toolforge jobs run blybot --command ./run.sh --image python3.13 --continuous --m
 
 Configuration is read from the environment (template in
 [.env.example](.env.example)); credentials live in the tool home directory at
-`0600`, never in this repository.
+`0600`, never in this repository. `run.sh` refuses to start if the config
+file is not `chmod 600`.
+
+Pre-flight checklist (spec Phase 0) before the first launch:
+
+1. Confirm outbound HTTPS from the tool account to `api.telegram.org`
+   (decides long polling vs. the webhook fallback).
+2. Register the bot with BotFather and confirm **privacy mode is ON**.
+3. Create the on-wiki bot account, issue a least-privilege BotPassword,
+   and ideally request the bot flag.
+4. Create `LOG_TARGET_PAGE` and the `DM_TARGET_BASE` root, and confirm the
+   account can edit them (DM sessions create subpages under the base).
+5. For reliable newcomer detection (`chat_member` updates), make the bot a
+   group admin; without admin, greet-on-entry still works but silent link
+   joins may be missed.
 
 ## License
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from telegram import Message, Update, User
+from telegram import Chat, Message, Update, User
+from telegram.constants import ChatType
 
 from blybot.adapters.telegram import handlers as h
 from blybot.domain.models import ConsentMode, TimestampGranularity
@@ -91,11 +92,32 @@ async def test_log_in_unlisted_group_is_ignored_silently() -> None:
     assert tg.sent_texts(bot) == []
 
 
-async def test_log_outside_a_group_is_ignored() -> None:
+async def test_log_in_private_chat_explains_the_gesture() -> None:
+    """Silent ignore reads as breakage (proven in the field): explain instead."""
     handlers, publisher, _ = make_handlers()
     context, bot = tg.make_context()
     command = tg.message(chat=tg.PRIVATE, text="/log")
     await handlers.on_log(tg.command_update(command), context)
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == [h.REPLY_LOG_IS_GROUP_ONLY]
+
+
+async def test_log_in_a_channel_is_ignored_silently() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    channel = Chat(id=-100777, type=ChatType.CHANNEL)
+    command = tg.message(chat=channel, text="/log", from_user=None)
+    await handlers.on_log(tg.command_update(command), context)
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == []
+
+
+async def test_log_update_without_a_message_is_ignored() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_log(Update(update_id=5), context)
     assert isinstance(publisher, FakePublisher)
     assert publisher.wrote_nothing
     assert tg.sent_texts(bot) == []

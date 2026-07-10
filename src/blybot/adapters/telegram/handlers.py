@@ -35,6 +35,11 @@ if TYPE_CHECKING:
     from blybot.services.transcribe import DmTranscriptionService
 
 REPLY_USAGE: Final = "Reply to a text message with /log to publish it anonymously."
+REPLY_LOG_IS_GROUP_ONLY: Final = (
+    "/log works in groups: reply there to the message you want published. "
+    "Here in private you don't need it — everything you write to me "
+    "(except commands) is already transcribed anonymously. See /help."
+)
 REPLY_MEDIA_DECLINED: Final = (
     "That message has no text I can publish — media is not supported (yet)."
 )
@@ -122,7 +127,12 @@ class GroupHandlers:
         """Publish the replied-to message anonymously (R2)."""
         message = update.effective_message
         chat = update.effective_chat
-        if message is None or chat is None or chat.type not in _GROUP_TYPES:
+        if message is None or chat is None:
+            return
+        if chat.type not in _GROUP_TYPES:
+            if chat.type == ChatType.PRIVATE:
+                # Silence here reads as breakage; explain the gesture instead.
+                await context.bot.send_message(chat_id=chat.id, text=REPLY_LOG_IS_GROUP_ONLY)
             return
         if not self.groups.is_allowed(chat.id):
             log_event("log_command", "ignored")

@@ -17,6 +17,7 @@ from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, build_application, run_polling
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
+from blybot.services.binding import TokenBinding
 from blybot.services.sessions import SessionRegistry
 from tests.fakes import FakeClock, FakePublisher, SequentialPseudonyms
 from tests.test_group_handlers import make_handlers as make_group_handlers
@@ -50,6 +51,8 @@ def make_admin_handlers() -> AdminHandlers:
         directory=group_handlers.directory,
         counters=Counters(),
         page_url_for=group_handlers.page_url_for,
+        binding=TokenBinding(clock=FakeClock()),
+        vault=None,
     )
 
 
@@ -67,8 +70,8 @@ def test_build_registers_every_handler() -> None:
     handlers = application.handlers[0]
     kinds = [type(handler) for handler in handlers]
     # log, start, flush, whoami, privacy, bug, issue, help x2,
-    # setup, setpage, setconsent, settings, reset
-    assert kinds.count(CommandHandler) == 14
+    # setup, setpage, setconsent, setrepo, revoke, settings, reset
+    assert kinds.count(CommandHandler) == 16
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 2  # migration and DM text
 

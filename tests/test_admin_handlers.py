@@ -13,9 +13,10 @@ from telegram.ext import ContextTypes
 from blybot.adapters.telegram import admin as a
 from blybot.domain.models import ConsentMode
 from blybot.observability import Counters
+from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
 from tests import tg
-from tests.fakes import InMemoryProfiles
+from tests.fakes import FakeClock, InMemoryProfiles
 
 if TYPE_CHECKING:
     from unittest.mock import AsyncMock
@@ -25,9 +26,10 @@ def make_handlers(
     store: InMemoryProfiles | None = None,
     page_prefix: str = "Telegram logs/",
 ) -> a.AdminHandlers:
+    store = store if store is not None else InMemoryProfiles()
     return a.AdminHandlers(
         directory=ChannelDirectory(
-            store=store if store is not None else InMemoryProfiles(),
+            store=store,
             default_log_page="Next 25/Telegram logs",
             default_consent=ConsentMode.IMMEDIATE,
             default_repo="",
@@ -35,6 +37,8 @@ def make_handlers(
         ),
         counters=Counters(),
         page_url_for=lambda title: f"https://meta.wikimedia.org/wiki/{title.replace(' ', '_')}",
+        binding=TokenBinding(clock=FakeClock()),
+        vault=store,
     )
 
 
@@ -62,7 +66,15 @@ async def test_admin_check_is_performed_live() -> None:
 
 async def test_non_admins_are_refused_on_every_command() -> None:
     handlers = make_handlers()
-    for name in ("on_setup", "on_setpage", "on_setconsent", "on_settings", "on_reset"):
+    for name in (
+        "on_setup",
+        "on_setpage",
+        "on_setconsent",
+        "on_setrepo",
+        "on_revoke",
+        "on_settings",
+        "on_reset",
+    ):
         context, bot = admin_context(status=ChatMemberStatus.MEMBER)
         await getattr(handlers, name)(command("/x"), context)
         assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]
@@ -87,6 +99,8 @@ async def test_self_service_off_is_announced_to_admins() -> None:
         ),
         counters=Counters(),
         page_url_for=str,
+        binding=TokenBinding(clock=FakeClock()),
+        vault=None,
     )
     context, bot = admin_context()
     await handlers.on_setup(command("/setup"), context)
@@ -194,3 +208,55 @@ async def test_reset_reports_storage_outage() -> None:
     context, bot = admin_context()
     await handlers.on_reset(command("/reset"), context)
     assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_setrepo_binds_and_mints_a_deep_link() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    context, bot = admin_context(args=["wikimedia/mediawiki"])
+    await handlers.on_setrepo(command("/setrepo wikimedia/mediawiki"), context)
+
+    assert store.profiles[tg.GROUP.id].repo == "wikimedia/mediawiki"
+    (sent,) = tg.sent_texts(bot)
+    assert "https://t.me/blybot_bot?start=cfg_" in sent
+    assert "fine-grained" in sent
+
+
+async def test_setrepo_rejects_bad_formats() -> None:
+    handlers = make_handlers()
+    for bad in ([], ["not-a-repo"], ["a/b/c"], ["owner/"]):
+        context, bot = admin_context(args=bad)
+        await handlers.on_setrepo(command("/setrepo"), context)
+        assert tg.sent_texts(bot) == [a.REPLY_SETREPO_USAGE]
+
+
+async def test_setrepo_reports_storage_outage() -> None:
+    handlers = make_handlers(InMemoryProfiles(fail=True))
+    context, bot = admin_context(args=["x/y"])
+    await handlers.on_setrepo(command("/setrepo x/y"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_revoke_discards_the_token() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    await store.store_token(tg.GROUP.id, "ghp_x")
+    context, bot = admin_context()
+    await handlers.on_revoke(command("/revoke"), context)
+    assert store.tokens == {}
+    assert tg.sent_texts(bot) == [a.REPLY_PAT_REVOKED]
+
+
+async def test_revoke_reports_storage_outage() -> None:
+    handlers = make_handlers(InMemoryProfiles(fail=True))
+    context, bot = admin_context()
+    await handlers.on_revoke(command("/revoke"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_revoke_without_a_vault_reports_self_service_off() -> None:
+    handlers = make_handlers()
+    handlers.vault = None  # store present but no vault: defensive wiring
+    context, bot = admin_context()
+    await handlers.on_revoke(command("/revoke"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_SELF_SERVICE_OFF]

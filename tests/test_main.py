@@ -47,9 +47,9 @@ def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> No
     # One shared counters instance and one shared session registry.
     assert lifecycle.maintenance.counters is seen["group_handlers"].counters
     assert lifecycle.maintenance.sessions is seen["private_handlers"].sessions
-    # Shutdown releases the wiki client the services publish through.
+    # Shutdown releases the HTTP clients via the composed closure.
     assert isinstance(lifecycle.transcription.publisher, MetaWikiPublisher)
-    assert lifecycle.release == lifecycle.transcription.publisher.aclose
+    assert lifecycle.release.__name__ == "release_clients"
     # Group /log and DM transcription target the configured pages.
     assert isinstance(seen["admin_handlers"], AdminHandlers)
     directory = seen["group_handlers"].directory
@@ -58,7 +58,9 @@ def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> No
     assert lifecycle.transcription.target_page == REQUIRED["DM_TARGET_BASE"]
 
 
-def test_valid_encryption_key_enables_self_service(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_valid_encryption_key_enables_self_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
@@ -71,6 +73,7 @@ def test_valid_encryption_key_enables_self_service(monkeypatch: pytest.MonkeyPat
     assert isinstance(directory.store, ToolsDbStore)
     assert directory.page_prefix == "Telegram logs/"
     assert seen["lifecycle"].bootstrap is not None
+    await seen["lifecycle"].release()  # closes both HTTP clients cleanly
 
 
 def test_invalid_encryption_key_fails_fast(

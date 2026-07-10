@@ -125,6 +125,8 @@ def build_application(
         ("setup", admin_handlers.on_setup),
         ("setpage", admin_handlers.on_setpage),
         ("setconsent", admin_handlers.on_setconsent),
+        ("setrepo", admin_handlers.on_setrepo),
+        ("revoke", admin_handlers.on_revoke),
         ("settings", admin_handlers.on_settings),
         ("reset", admin_handlers.on_reset),
     ):

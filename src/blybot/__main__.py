@@ -10,6 +10,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+from blybot.adapters.github.gateway import GitHubRepoGateway
 from blybot.adapters.github.issues import GitHubIssueTracker
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
@@ -21,6 +22,7 @@ from blybot.config import ConfigurationError, load_config
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging
+from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
 from blybot.services.feedback import FeedbackService
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
@@ -113,6 +115,13 @@ def main() -> int:
         cleanup_delay_seconds=config.log_cleanup_seconds,
         reply_cleanup_delay_seconds=config.reply_cleanup_seconds,
     )
+    binding = TokenBinding(clock=clock)
+    gateway = GitHubRepoGateway(user_agent=config.user_agent)
+
+    async def release_clients() -> None:
+        await publisher.aclose()
+        await gateway.aclose()
+
     tracker = (
         GitHubIssueTracker(
             repo=config.github_repo,
@@ -134,12 +143,18 @@ def main() -> int:
         bug_limiter=SlidingWindowLimiter(
             clock=clock, limit=config.bug_throttle_per_hour, window=timedelta(hours=1)
         ),
+        binding=binding,
+        directory=directory,
+        gateway=gateway,
+        vault=store,
     )
 
     admin_handlers = AdminHandlers(
         directory=directory,
         counters=counters,
         page_url_for=config.page_url,
+        binding=binding,
+        vault=store,
     )
 
     run_polling(
@@ -150,7 +165,7 @@ def main() -> int:
         lifecycle=Lifecycle(
             maintenance=Maintenance(sessions=sessions, counters=counters),
             transcription=transcription,
-            release=publisher.aclose,
+            release=release_clients,
             bootstrap=store.bootstrap if store else None,
         ),
     )

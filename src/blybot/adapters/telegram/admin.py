@@ -8,6 +8,7 @@ only the ``/log`` flow's transient messages self-delete.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
@@ -25,6 +26,8 @@ if TYPE_CHECKING:
     from telegram import Bot, Chat, Update
     from telegram.ext import ContextTypes
 
+    from blybot.domain.ports import TokenVault
+    from blybot.services.binding import TokenBinding
     from blybot.services.directory import ChannelDirectory
 
 REPLY_NOT_ADMIN: Final = "Only this group's admins can configure me."
@@ -40,10 +43,19 @@ REPLY_SETPAGE_USAGE: Final = "Usage: /setpage {prefix}YourGroup"
 REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode}"
 REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
 REPLY_RESET: Final = "Forgotten. This group is back on the operator defaults."
+REPLY_SETREPO_USAGE: Final = "Usage: /setrepo owner/repository"
+REPLY_REPO_BOUND: Final = (
+    "Repo bound: {repo}. To enable /issue and /repo here, an admin must "
+    "give me a GitHub token privately — tap {link} (valid 10 minutes). "
+    "Use a fine-grained PAT restricted to {repo} with Issues read/write only."
+)
+REPLY_PAT_REVOKED: Final = "Token discarded. /issue and /repo are disabled for this group."
 SETUP_TEXT: Final = (
     "I'm configurable by this group's admins, right here:\n\n"
     "/setpage {prefix}YourGroup — where /log publishes\n"
     "/setconsent immediate|author_only — who may /log whose messages\n"
+    "/setrepo owner/repo — bind a GitHub repo (then /issue, /repo)\n"
+    "/revoke — discard this group's stored GitHub token\n"
     "/settings — current configuration\n"
     "/reset — forget everything and return to defaults\n\n"
     "Everything I publish is public and permanent; see /settings for "
@@ -78,6 +90,8 @@ class AdminHandlers:
     directory: ChannelDirectory
     counters: Counters
     page_url_for: Callable[[str], str]
+    binding: TokenBinding
+    vault: TokenVault | None
 
     async def on_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain the self-service commands to an admin."""
@@ -131,6 +145,43 @@ class AdminHandlers:
         await context.bot.send_message(
             chat_id=chat.id, text=REPLY_CONSENT_SET.format(mode=argument)
         )
+
+    async def on_setrepo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Bind this group to a GitHub repository and start the token flow."""
+        chat = await self._admin_chat(update, context)
+        if chat is None:
+            return
+        repo = ((context.args or [""])[0]).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            await context.bot.send_message(chat_id=chat.id, text=REPLY_SETREPO_USAGE)
+            return
+        try:
+            await self.directory.set_repo(chat.id, repo)
+        except StorageError:
+            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            return
+        log_event("profile_update", "ok")
+        nonce = self.binding.mint_link(chat.id)
+        link = f"https://t.me/{context.bot.username}?start=cfg_{nonce}"
+        await context.bot.send_message(
+            chat_id=chat.id, text=REPLY_REPO_BOUND.format(repo=repo, link=link)
+        )
+
+    async def on_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Discard this group's stored API token."""
+        chat = await self._admin_chat(update, context)
+        if chat is None:
+            return
+        if self.vault is None:
+            await context.bot.send_message(chat_id=chat.id, text=REPLY_SELF_SERVICE_OFF)
+            return
+        try:
+            await self.vault.delete_token(chat.id)
+        except StorageError:
+            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            return
+        log_event("token_revoked", "ok")
+        await context.bot.send_message(chat_id=chat.id, text=REPLY_PAT_REVOKED)
 
     async def on_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show this group's effective configuration."""

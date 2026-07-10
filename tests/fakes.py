@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import GroupProfile, Pseudonym
-from blybot.domain.ports import StorageError, WikiWriteError
+from blybot.domain.models import GroupProfile, Pseudonym, RepoSummary
+from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 
 
 @dataclass
@@ -120,6 +120,7 @@ class InMemoryProfiles:
     tokens: dict[int, str] = field(default_factory=dict)
     cursors: dict[int, str] = field(default_factory=dict)
     fail: bool = False
+    fail_token_writes: bool = False
 
     def _check(self) -> None:
         if self.fail:
@@ -160,6 +161,8 @@ class InMemoryProfiles:
 
     async def store_token(self, chat_id: int, token: str) -> None:
         self._check()
+        if self.fail_token_writes:
+            raise StorageError
         self.tokens[chat_id] = token
 
     async def fetch_token(self, chat_id: int) -> str | None:
@@ -169,3 +172,30 @@ class InMemoryProfiles:
     async def delete_token(self, chat_id: int) -> None:
         self._check()
         self.tokens.pop(chat_id, None)
+
+
+@dataclass
+class FakeRepoGateway:
+    """RepoGateway fake: configurable validation, recorded issues."""
+
+    valid_tokens: set[str] = field(default_factory=set)
+    issues: list[tuple[str, str, str, str]] = field(default_factory=list)
+    summaries: dict[str, RepoSummary] = field(default_factory=dict)
+    fail: bool = False
+
+    async def validate_token(self, repo: str, token: str) -> bool:
+        del repo
+        return token in self.valid_tokens
+
+    async def open_issue(self, repo: str, token: str, title: str, body: str) -> str:
+        if self.fail or token not in self.valid_tokens:
+            raise IssueTrackerError
+        self.issues.append((repo, token, title, body))
+        return f"https://github.com/{repo}/issues/{len(self.issues)}"
+
+    async def open_summary(self, repo: str, token: str) -> RepoSummary:
+        if self.fail or token not in self.valid_tokens:
+            raise IssueTrackerError
+        return self.summaries.get(
+            repo, RepoSummary(repo=repo, open_count=2, recent_titles=("A", "B"))
+        )

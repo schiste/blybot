@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from blybot.domain.models import Pseudonym
+from blybot.domain.models import GroupProfile, Pseudonym
 
 
 class WikiWriteError(Exception):
@@ -24,6 +24,62 @@ class WikiWriteError(Exception):
 
 class IssueTrackerError(Exception):
     """Filing an issue with the tracker failed."""
+
+
+class StorageError(Exception):
+    """The profile store is unreachable or misbehaving.
+
+    Defined in the domain so services and handlers can degrade
+    gracefully without importing the database adapter.
+    """
+
+
+class ProfileStore(Protocol):
+    """Persists per-group self-service profiles (spec 11: ToolsDB)."""
+
+    async def get(self, chat_id: int) -> GroupProfile | None:
+        """Return the group's profile, or ``None`` if it never configured one."""
+        ...
+
+    async def upsert(self, profile: GroupProfile) -> None:
+        """Create or update the profile (token and cursor are untouched)."""
+        ...
+
+    async def delete(self, chat_id: int) -> None:
+        """Forget everything about the group, including its token and cursor."""
+        ...
+
+    async def list_event_enabled(self) -> list[GroupProfile]:
+        """Return every profile with repo notifications switched on."""
+        ...
+
+    async def get_cursor(self, chat_id: int) -> str | None:
+        """Return the group's event-poll cursor (ETag), if any."""
+        ...
+
+    async def set_cursor(self, chat_id: int, cursor: str) -> None:
+        """Persist the group's event-poll cursor."""
+        ...
+
+
+class TokenVault(Protocol):
+    """Stores group-supplied API tokens, encrypted at rest.
+
+    Callers hand over and receive plaintext; encryption is the
+    adapter's responsibility and ciphertext never leaves it.
+    """
+
+    async def store_token(self, chat_id: int, token: str) -> None:
+        """Encrypt and persist the group's token."""
+        ...
+
+    async def fetch_token(self, chat_id: int) -> str | None:
+        """Decrypt and return the group's token, if one is stored."""
+        ...
+
+    async def delete_token(self, chat_id: int) -> None:
+        """Discard the group's token."""
+        ...
 
 
 class IssueTracker(Protocol):

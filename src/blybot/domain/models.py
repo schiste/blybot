@@ -24,6 +24,14 @@ class TimestampGranularity(Enum):
     MINUTE = "minute"
 
 
+class EventKind(Enum):
+    """Repository happenings a group may subscribe to (polled, never pushed)."""
+
+    RELEASES = "releases"
+    PRS = "prs"
+    ISSUES = "issues"
+
+
 class ConsentMode(Enum):
     """Policy for publishing another person's message via ``/log`` (spec 17-18).
 
@@ -35,6 +43,24 @@ class ConsentMode(Enum):
     IMMEDIATE = "immediate"
     AUTHOR_ONLY = "author_only"
     CONFIRM = "confirm"
+
+
+@dataclass(frozen=True, slots=True)
+class GroupProfile:
+    """Self-service configuration one group's admins chose from Telegram.
+
+    This is the only identifier the bot ever persists: the group *chat
+    id* (never a user id, name, or message). ``None`` fields fall back
+    to the operator's environment defaults at resolution time.
+    """
+
+    chat_id: int
+    log_page: str | None = None
+    repo: str | None = None
+    consent_mode: ConsentMode | None = None
+    events_enabled: bool = False
+    event_kinds: frozenset[EventKind] = frozenset()
+    has_token: bool = False
 
 
 @dataclass(frozen=True, slots=True)

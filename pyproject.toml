@@ -85,6 +85,7 @@ ignore = [
 "tests/**" = [
     "S101",    # asserts are the point of tests
     "PLR2004", # magic values are fine in assertions
+    "PLR0913", # test factories take many optional knobs
 ]
 
 [tool.ruff.lint.pydocstyle]

@@ -151,6 +151,10 @@ class GroupHandlers:
     # requested the publication. Requires the "Delete messages" admin
     # right; without it the cleanup is skipped silently.
     cleanup_delay_seconds: float = 5.0
+    # The bot's own /log replies (confirmation, hints) self-delete after
+    # this delay — long enough to read, then the group stays tidy.
+    # Deleting its own messages needs no admin right.
+    reply_cleanup_delay_seconds: float = 30.0
     _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
     async def on_log(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -167,10 +171,15 @@ class GroupHandlers:
         if not self.groups.is_allowed(chat.id):
             log_event("log_command", "ignored")
             return
-        await self._schedule_command_cleanup(context.bot, chat.id, message.message_id)
+        await self._schedule_cleanup(
+            context.bot, chat.id, message.message_id, self.cleanup_delay_seconds
+        )
 
         async def reply(text: str) -> None:
-            await context.bot.send_message(chat_id=chat.id, text=text)
+            sent = await context.bot.send_message(chat_id=chat.id, text=text)
+            await self._schedule_cleanup(
+                context.bot, chat.id, sent.message_id, self.reply_cleanup_delay_seconds
+            )
 
         target = message.reply_to_message
         if target is None:
@@ -231,16 +240,22 @@ class GroupHandlers:
         text = HELP_GROUP + _help_footer(self.log_page_url, self.maintainer)
         await context.bot.send_message(chat_id=chat.id, text=text)
 
-    async def _schedule_command_cleanup(self, bot: Bot, chat_id: int, message_id: int) -> None:
-        if self.cleanup_delay_seconds <= 0:
-            await self._delete_after(bot, chat_id, message_id)
+    async def _schedule_cleanup(
+        self, bot: Bot, chat_id: int, message_id: int, delay_seconds: float
+    ) -> None:
+        if delay_seconds <= 0:
+            await self._delete_after(bot, chat_id, message_id, delay_seconds)
             return
-        task = asyncio.get_running_loop().create_task(self._delete_after(bot, chat_id, message_id))
+        task = asyncio.get_running_loop().create_task(
+            self._delete_after(bot, chat_id, message_id, delay_seconds)
+        )
         self._cleanup_tasks.add(task)
         task.add_done_callback(self._cleanup_tasks.discard)
 
-    async def _delete_after(self, bot: Bot, chat_id: int, message_id: int) -> None:
-        await asyncio.sleep(self.cleanup_delay_seconds)
+    async def _delete_after(
+        self, bot: Bot, chat_id: int, message_id: int, delay_seconds: float
+    ) -> None:
+        await asyncio.sleep(delay_seconds)
         try:
             await bot.delete_message(chat_id=chat_id, message_id=message_id)
         except TelegramError:

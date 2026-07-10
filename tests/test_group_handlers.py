@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
 
 from telegram import Chat, Message, Update, User
 from telegram.constants import ChatType
@@ -31,6 +32,7 @@ def make_handlers(
     allowed: set[int] | None = None,
     limit: int = 100,
     cleanup_delay_seconds: float = 0,
+    reply_cleanup_delay_seconds: float = 0,
 ) -> tuple[h.GroupHandlers, FakePublisher | FailingPublisher, GroupPolicy]:
     publisher = publisher if publisher is not None else FakePublisher()
     policy = GroupPolicy(allowed=allowed if allowed is not None else set())
@@ -53,6 +55,7 @@ def make_handlers(
         log_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Log",
         maintainer="Test Maintainer",
         cleanup_delay_seconds=cleanup_delay_seconds,
+        reply_cleanup_delay_seconds=reply_cleanup_delay_seconds,
     )
     return handlers, publisher, policy
 
@@ -248,11 +251,11 @@ async def test_log_command_message_is_deleted_after_handling() -> None:
     """The command's deletion hides who requested the publication."""
     handlers, _, _ = make_handlers()
     context, bot = tg.make_context()
+    bot.send_message.return_value = SimpleNamespace(message_id=99)
     await handlers.on_log(log_command(tg.message(text="x")), context)
 
-    call = bot.delete_message.await_args
-    assert call is not None
-    assert call.kwargs == {"chat_id": tg.GROUP.id, "message_id": 10}
+    deleted = [call.kwargs["message_id"] for call in bot.delete_message.await_args_list]
+    assert deleted == [10, 99]  # the command, then the bot's own confirmation
 
 
 async def test_command_cleanup_without_delete_right_is_silent() -> None:
@@ -267,12 +270,12 @@ async def test_command_cleanup_without_delete_right_is_silent() -> None:
 
 
 async def test_command_cleanup_runs_as_a_background_task_when_delayed() -> None:
-    handlers, _, _ = make_handlers(cleanup_delay_seconds=0.01)
+    handlers, _, _ = make_handlers(cleanup_delay_seconds=0.01, reply_cleanup_delay_seconds=0.01)
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
 
-    assert bot.delete_message.await_count == 0  # not yet: delay pending
+    assert bot.delete_message.await_count == 0  # not yet: delays pending
     for task in list(handlers._cleanup_tasks):
         await task
-    assert bot.delete_message.await_count == 1
+    assert bot.delete_message.await_count == 2  # the command and the confirmation
     assert not handlers._cleanup_tasks  # done-callback pruned the registry

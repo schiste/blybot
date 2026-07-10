@@ -40,6 +40,16 @@ class TokenBinding:
         self._links[nonce] = (group_chat_id, self.clock.now())
         return nonce
 
+    def peek_link(self, nonce: str) -> int | None:
+        """Return the nonce's group without consuming it (admin pre-check)."""
+        entry = self._links.get(nonce)
+        if entry is None:
+            return None
+        group_chat_id, minted_at = entry
+        if self.clock.now() - minted_at > self.link_ttl:
+            return None
+        return group_chat_id
+
     def redeem_link(self, nonce: str) -> int | None:
         """Consume the nonce; return its group chat id if still fresh."""
         entry = self._links.pop(nonce, None)

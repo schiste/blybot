@@ -72,10 +72,15 @@ REPLY_BUG_USAGE: Final = (
 REPLY_BUG_FILED: Final = "Filed anonymously: {url}"
 REPLY_BUG_DISABLED: Final = "Chat bug reports aren't enabled; please open an issue at {url}"
 REPLY_BUG_FAILED: Final = "Sorry, filing the issue failed — please report it at {url}"
+REPLY_CONFIG_UNAVAILABLE: Final = (
+    "This group's configuration is temporarily unreachable, so I won't "
+    "publish right now — please try again shortly."
+)
 REPLY_ISSUE_USAGE: Final = "Describe the issue after the command: /issue something is broken"
 REPLY_ISSUE_UNBOUND: Final = (
     "No repository is bound to this group — an admin can bind one with /setrepo."
 )
+REPLY_ISSUE_DISABLED: Final = "Repository features aren't enabled on this deployment."
 REPLY_ISSUE_NO_PAT: Final = (
     "A repository is bound but its token step was never completed — an admin "
     "should run /setrepo again and follow the private link."
@@ -91,9 +96,9 @@ REPLY_LINK_NOT_ADMIN: Final = "Only an admin of that group can supply its token.
 REPLY_PAT_PROMPT: Final = (
     "Paste the GitHub token for {repo} as your next message here. Use a "
     "fine-grained PAT restricted to that repository with Issues read/write "
-    "only. I'll validate it, encrypt it, and store it — then DELETE YOUR "
-    "MESSAGE afterwards. This prompt expires in 5 minutes; while it's "
-    "active, nothing you send me is transcribed."
+    "only. I'll validate it, encrypt it, store it — and delete your message "
+    "from this chat immediately. This prompt expires in 5 minutes; while "
+    "it's active, nothing you send me is transcribed."
 )
 REPLY_PAT_NO_REPO: Final = "That group no longer has a repository bound; run /setrepo there first."
 REPLY_PAT_INVALID: Final = (
@@ -104,7 +109,7 @@ REPLY_PAT_STORE_FAILED: Final = (
     "Storing the token failed on my side — please paste it again in a moment."
 )
 REPLY_PAT_SAVED: Final = (
-    "Token validated and stored (encrypted). Now delete your message above. "
+    "Token validated, encrypted and stored; I've deleted your message. "
     "/issue and /repo are live in the group; /revoke there discards the token."
 )
 NEWCOMER_PROMPT: Final = "Welcome! Tap below for a private note on how I work."
@@ -122,8 +127,11 @@ HELP_PRIVATE: Final = (
 HELP_GROUP: Final = (
     "Reply to a message with /log to publish it anonymously to the Meta-wiki "
     "log. Message me privately for anonymous transcription — /help there for "
-    "details. /issue files a bug in this group's repo; /repo shows its "
-    "status. Group admins: /setup to configure me."
+    "details."
+)
+HELP_GROUP_SELF_SERVICE: Final = (
+    " /issue files a bug in this group's repo; /repo shows its status. "
+    "Group admins: /setup to configure me."
 )
 PRIVACY_TEXT: Final = (
     "What I ingest: only messages explicitly marked with /log in groups, and "
@@ -174,6 +182,17 @@ def _just_joined(change: ChatMemberUpdated) -> bool:
     )
 
 
+def _repo_error_reply(error: Exception) -> str:
+    """One place mapping repo-service failures to user-facing replies."""
+    if isinstance(error, NoRepoBoundError):
+        return REPLY_ISSUE_UNBOUND
+    if isinstance(error, NoTokenError):
+        return REPLY_ISSUE_NO_PAT
+    if isinstance(error, IssueTrackerError):
+        log_event("group_issue", "error")
+    return REPLY_ISSUE_FAILED
+
+
 def _help_footer(page_url: str, maintainer: str) -> str:
     """Publication link and maintainer mention appended to both /help texts."""
     footer = f"\n\nEverything I publish lands at {page_url}"
@@ -206,7 +225,9 @@ class GroupHandlers:
     reply_cleanup_delay_seconds: float = 15.0
     _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
-    async def on_log(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def on_log(  # noqa: PLR0911 -- one early return per decline reason
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Publish the replied-to message anonymously (R2)."""
         message = update.effective_message
         chat = update.effective_chat
@@ -235,6 +256,11 @@ class GroupHandlers:
             await reply(REPLY_USAGE)
             return
         settings = await self.directory.resolve(chat.id)
+        if settings.degraded:
+            # Fail closed: the group's consent policy and target page are
+            # unknown right now; publishing on defaults could violate both.
+            await reply(REPLY_CONFIG_UNAVAILABLE)
+            return
         if settings.consent_mode is ConsentMode.AUTHOR_ONLY and not _same_author(message, target):
             # N1 hook: ConsentMode.CONFIRM would branch here into a
             # DM-confirmation flow; configuration rejects it until built.
@@ -276,6 +302,11 @@ class GroupHandlers:
         if message is None or message.migrate_to_chat_id is None:
             return
         applied = self.groups.migrate(message.chat.id, message.migrate_to_chat_id)
+        try:
+            await self.directory.migrate(message.chat.id, message.migrate_to_chat_id)
+        except StorageError:
+            log_event("chat_migration", "error")
+            return
         log_event("chat_migration", "ok" if applied else "ignored")
 
     def _within_rate_limits(self, message: Message, chat_id: int) -> bool:
@@ -298,22 +329,15 @@ class GroupHandlers:
             await reply(REPLY_ISSUE_USAGE)
             return
         if self.repo_service is None:
-            await reply(REPLY_ISSUE_UNBOUND)
+            await reply(REPLY_ISSUE_DISABLED)
             return
         if not self.limiter.allow("issue", chat.id):
             await reply(REPLY_THROTTLED)
             return
         try:
             url = await self.repo_service.file_issue(chat.id, description)
-        except NoRepoBoundError:
-            await reply(REPLY_ISSUE_UNBOUND)
-        except NoTokenError:
-            await reply(REPLY_ISSUE_NO_PAT)
-        except StorageError:
-            await reply(REPLY_ISSUE_FAILED)
-        except IssueTrackerError:
-            log_event("group_issue", "error")
-            await reply(REPLY_ISSUE_FAILED)
+        except (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError) as error:
+            await reply(_repo_error_reply(error))
         else:
             self.counters.increment("group_issues_filed")
             log_event("group_issue", "ok")
@@ -329,16 +353,15 @@ class GroupHandlers:
             await context.bot.send_message(chat_id=chat.id, text=text)
 
         if self.repo_service is None:
-            await reply(REPLY_ISSUE_UNBOUND)
+            await reply(REPLY_ISSUE_DISABLED)
+            return
+        if not self.limiter.allow("repo", chat.id):
+            await reply(REPLY_THROTTLED)
             return
         try:
             summary = await self.repo_service.summary(chat.id)
-        except NoRepoBoundError:
-            await reply(REPLY_ISSUE_UNBOUND)
-        except NoTokenError:
-            await reply(REPLY_ISSUE_NO_PAT)
-        except (StorageError, IssueTrackerError):
-            await reply(REPLY_ISSUE_FAILED)
+        except (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError) as error:
+            await reply(_repo_error_reply(error))
         else:
             await reply(
                 REPLY_REPO_SUMMARY.format(
@@ -362,7 +385,10 @@ class GroupHandlers:
             return
         settings = await self.directory.resolve(chat.id)
         page_url = self.page_url_for(settings.log_page)
-        text = HELP_GROUP + _help_footer(page_url, self.maintainer)
+        text = HELP_GROUP
+        if self.directory.self_service_enabled:
+            text += HELP_GROUP_SELF_SERVICE
+        text += _help_footer(page_url, self.maintainer)
         await context.bot.send_message(chat_id=chat.id, text=text)
 
     async def _schedule_cleanup(
@@ -459,14 +485,19 @@ class PrivateHandlers:
         async def reply(text: str) -> None:
             await context.bot.send_message(chat_id=dm_chat_id, text=text)
 
-        group_chat_id = self.binding.redeem_link(nonce)
+        group_chat_id = self.binding.peek_link(nonce)
         message = update.effective_message
         user = message.from_user if message else None
         if group_chat_id is None:
             await reply(REPLY_LINK_EXPIRED)
             return
         if user is None or not await is_group_admin(context.bot, group_chat_id, user.id):
+            # Deliberately NOT consumed: a non-admin tapping the public
+            # link must not burn it for the real admin.
             await reply(REPLY_LINK_NOT_ADMIN)
+            return
+        if self.binding.redeem_link(nonce) is None:  # consumed in a race
+            await reply(REPLY_LINK_EXPIRED)
             return
         settings = await self.directory.resolve(group_chat_id)
         if not settings.repo:
@@ -557,6 +588,13 @@ class PrivateHandlers:
         # can transcribe it: a pasted secret must never reach the wiki.
         pending_group = self.binding.pending_group(chat.id)
         if pending_group is not None:
+            # Remove the pasted secret from the chat first — bots may
+            # delete messages in private chats, so don't rely on the
+            # admin remembering to.
+            try:
+                await context.bot.delete_message(chat_id=chat.id, message_id=message.message_id)
+            except TelegramError:
+                log_event("command_cleanup", "ignored")
             await self._accept_token(context, chat.id, pending_group, message.text)
             return
         is_new_session = self.sessions.peek(chat.id) is None

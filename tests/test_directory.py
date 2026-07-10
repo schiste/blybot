@@ -136,3 +136,16 @@ async def test_set_repo_stores_the_binding() -> None:
     directory = make_directory(InMemoryProfiles())
     await directory.set_repo(CHAT, "wikimedia/mediawiki")
     assert (await directory.resolve(CHAT)).repo == "wikimedia/mediawiki"
+
+
+async def test_migrate_is_a_noop_without_a_store() -> None:
+    directory = make_directory(store=None)
+    await directory.migrate(-1, -2)  # v1 mode: nothing to carry, no raise
+
+
+async def test_migrate_moves_the_profile() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    await directory.set_log_page(CHAT, "Telegram logs/Ours")
+    await directory.migrate(CHAT, -777)
+    assert (await directory.resolve(-777)).log_page == "Telegram logs/Ours"

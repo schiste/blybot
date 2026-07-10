@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from telegram import Update, User
 from telegram.constants import ChatMemberStatus
+from telegram.error import TelegramError
 
 from blybot.adapters.telegram import handlers as h
 from blybot.domain.models import ConsentMode
@@ -353,7 +354,7 @@ async def test_config_deep_link_arms_token_entry_for_admins() -> None:
 
     (sent,) = tg.sent_texts(bot)
     assert "wikimedia/mediawiki" in sent
-    assert "DELETE YOUR MESSAGE" in sent
+    assert "delete your message from this chat immediately" in sent
     assert handlers.binding.pending_group(tg.PRIVATE.id) == tg.GROUP.id
 
 
@@ -373,6 +374,8 @@ async def test_non_admins_cannot_redeem_a_link() -> None:
     await handlers.on_start(dm("/start"), context)
     assert tg.sent_texts(bot) == [h.REPLY_LINK_NOT_ADMIN]
     assert handlers.binding.pending_group(tg.PRIVATE.id) is None
+    # Griefing guard: the non-admin tap did NOT burn the admin's link.
+    assert handlers.binding.peek_link(nonce) == tg.GROUP.id
 
 
 async def test_link_without_a_bound_repo_instructs_setrepo() -> None:
@@ -400,6 +403,10 @@ async def test_pasted_token_is_stored_encrypted_and_never_transcribed() -> None:
     assert store.tokens[tg.GROUP.id] == "ghp_good"
     assert handlers.binding.pending_group(tg.PRIVATE.id) is None
     assert tg.sent_texts(bot) == [h.REPLY_PAT_SAVED]
+    # The bot removed the pasted secret from the chat itself.
+    delete = bot.delete_message.await_args
+    assert delete is not None
+    assert delete.kwargs["chat_id"] == tg.PRIVATE.id
 
 
 async def test_rejected_token_can_be_retried() -> None:
@@ -451,3 +458,26 @@ async def test_token_entry_without_gateway_aborts_defensively() -> None:
     assert tg.sent_texts(bot) == [h.REPLY_PAT_NO_REPO]
     assert handlers.binding.pending_group(tg.PRIVATE.id) is None
     assert publisher.wrote_nothing
+
+
+async def test_link_consumed_in_a_race_reads_as_expired() -> None:
+    handlers, _ = make_handlers()
+    await handlers.directory.set_repo(tg.GROUP.id, "x/y")
+    nonce = handlers.binding.mint_link(tg.GROUP.id)
+    handlers.binding.redeem_link = lambda _n: None  # type: ignore[method-assign, assignment]
+    context, bot = tg.make_context(args=[f"cfg_{nonce}"])
+    bot.get_chat_member.return_value = SimpleNamespace(status=ChatMemberStatus.ADMINISTRATOR)
+    await handlers.on_start(dm("/start"), context)
+    assert tg.sent_texts(bot) == [h.REPLY_LINK_EXPIRED]
+
+
+async def test_pat_message_deletion_failure_does_not_block_the_flow() -> None:
+    store = InMemoryProfiles()
+    gateway = FakeRepoGateway(valid_tokens={"ghp_good"})
+    handlers, _ = make_handlers(store=store, gateway=gateway)
+    await handlers.directory.set_repo(tg.GROUP.id, "x/y")
+    handlers.binding.open_entry(tg.PRIVATE.id, tg.GROUP.id)
+    context, bot = tg.make_context()
+    bot.delete_message.side_effect = TelegramError("gone")
+    await handlers.on_dm(dm("ghp_good"), context)
+    assert store.tokens[tg.GROUP.id] == "ghp_good"  # storage still succeeded

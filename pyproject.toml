@@ -93,6 +93,7 @@ ignore = [
     "PLR2004", # magic values are fine in assertions
     "PLR0913", # test factories take many optional knobs
     "PLR0911", # SQL/API fakes are dispatchers with one return per query
+    "PLR0912", # ...and grow one branch per query they interpret
 ]
 
 [tool.ruff.lint.pydocstyle]

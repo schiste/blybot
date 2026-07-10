@@ -58,3 +58,14 @@ def test_minting_prunes_stale_state() -> None:
     binding.mint_link(GROUP)  # triggers pruning
     assert stale not in binding._links
     assert DM not in binding._entries
+
+
+def test_peek_respects_ttl_and_unknown_nonces() -> None:
+    clock = FakeClock()
+    binding = make_binding(clock)
+    nonce = binding.mint_link(GROUP)
+    assert binding.peek_link(nonce) == GROUP
+    assert binding.peek_link(nonce) == GROUP  # peeking never consumes
+    assert binding.peek_link("bogus") is None
+    clock.advance(timedelta(minutes=11))
+    assert binding.peek_link(nonce) is None

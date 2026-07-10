@@ -55,7 +55,8 @@ ON DUPLICATE KEY UPDATE log_page = VALUES(log_page), repo = VALUES(repo),
 """
 Q_DELETE: Final = "DELETE FROM profiles WHERE chat_id = %s"
 Q_GET_CURSOR: Final = "SELECT event_cursor FROM profiles WHERE chat_id = %s"
-Q_SET_CURSOR: Final = "UPDATE profiles SET event_cursor = %s WHERE chat_id = %s"
+Q_SET_CURSOR: Final = "UPDATE profiles SET event_cursor = %s WHERE chat_id = %s AND repo = %s"
+Q_MIGRATE: Final = "UPDATE IGNORE profiles SET chat_id = %s WHERE chat_id = %s"
 Q_VAULT_READ: Final = "SELECT token_ciphertext FROM profiles WHERE chat_id = %s"
 Q_VAULT_WRITE: Final = """
 INSERT INTO profiles (chat_id, token_ciphertext) VALUES (%s, %s)
@@ -153,9 +154,13 @@ class ToolsDbStore:
         rows = await self._run(Q_GET_CURSOR, (chat_id,))
         return rows[0][0] if rows and rows[0][0] else None
 
-    async def set_cursor(self, chat_id: int, cursor: str) -> None:
-        """Persist the group's event-poll cursor."""
-        await self._run(Q_SET_CURSOR, (cursor, chat_id))
+    async def set_cursor(self, chat_id: int, cursor: str, repo: str) -> None:
+        """Persist the cursor iff the group is still bound to ``repo``."""
+        await self._run(Q_SET_CURSOR, (cursor, chat_id, repo))
+
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        """Re-key a profile after a group→supergroup upgrade."""
+        await self._run(Q_MIGRATE, (new_chat_id, old_chat_id))
 
     async def store_token(self, chat_id: int, token: str) -> None:
         """Encrypt and persist the group's token."""

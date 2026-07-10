@@ -11,7 +11,16 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "blybot"
 
-THIRD_PARTY_IO = ("telegram", "mwclient", "pywikibot", "httpx", "requests", "aiohttp")
+THIRD_PARTY_IO = (
+    "telegram",
+    "mwclient",
+    "pywikibot",
+    "httpx",
+    "requests",
+    "aiohttp",
+    "pymysql",
+    "cryptography",
+)
 
 
 def imports_of(path: Path) -> set[str]:

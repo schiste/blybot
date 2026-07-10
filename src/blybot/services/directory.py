@@ -51,6 +51,7 @@ class ChannelSettings:
     events_enabled: bool
     event_kinds: frozenset[EventKind]
     customized: bool  # whether a stored profile contributed anything
+    degraded: bool = False  # storage was unreachable: these are fallbacks
 
 
 @dataclass(eq=False)
@@ -75,11 +76,12 @@ class ChannelDirectory:
         store already logged the failure, and publishing must not stop.
         """
         profile: GroupProfile | None = None
+        degraded = False
         if self.store is not None:
             try:
                 profile = await self.store.get(chat_id)
             except StorageError:
-                profile = None
+                degraded = True
         if profile is None:
             return ChannelSettings(
                 log_page=self.default_log_page,
@@ -89,6 +91,7 @@ class ChannelDirectory:
                 events_enabled=False,
                 event_kinds=frozenset(),
                 customized=False,
+                degraded=degraded,
             )
         return ChannelSettings(
             log_page=profile.log_page or self.default_log_page,
@@ -125,6 +128,11 @@ class ChannelDirectory:
     async def set_events(self, chat_id: int, *, enabled: bool, kinds: frozenset[EventKind]) -> None:
         """Configure the chat's repository-event notifications."""
         await self._update(chat_id, events_enabled=enabled, event_kinds=kinds)
+
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        """Carry the profile across a group→supergroup chat-id change."""
+        if self.store is not None:
+            await self.store.migrate(old_chat_id, new_chat_id)
 
     async def reset(self, chat_id: int) -> None:
         """Forget the chat's profile entirely (token and cursor included)."""

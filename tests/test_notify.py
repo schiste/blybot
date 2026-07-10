@@ -5,6 +5,7 @@ from __future__ import annotations
 from blybot.domain.models import EventKind, GroupProfile, RepoEvent
 from blybot.observability import Counters
 from blybot.services.notify import RepoNotifier
+from blybot.services.policy import GroupPolicy
 from tests.fakes import FakeRepoGateway, InMemoryProfiles
 
 RELEASE = RepoEvent(kind=EventKind.RELEASES, title="Release 1.0", url="https://x/r/1")
@@ -12,8 +13,18 @@ MERGE = RepoEvent(kind=EventKind.PRS, title="Merged: fix", url="https://x/pr/2")
 ISSUE = RepoEvent(kind=EventKind.ISSUES, title="New issue: bug", url="https://x/i/3")
 
 
-def make_notifier(store: InMemoryProfiles, gateway: FakeRepoGateway) -> RepoNotifier:
-    return RepoNotifier(store=store, vault=store, gateway=gateway, counters=Counters())
+def make_notifier(
+    store: InMemoryProfiles,
+    gateway: FakeRepoGateway,
+    allowed: set[int] | None = None,
+) -> RepoNotifier:
+    return RepoNotifier(
+        store=store,
+        vault=store,
+        gateway=gateway,
+        groups=GroupPolicy(allowed=allowed if allowed is not None else set()),
+        counters=Counters(),
+    )
 
 
 async def enable(
@@ -33,7 +44,7 @@ async def test_digest_carries_only_subscribed_kinds_and_advances_cursor() -> Non
     store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
     gateway.events = [RELEASE, MERGE, ISSUE]
     await enable(store)
-    await store.set_cursor(-1, "etag|1")
+    await store.set_cursor(-1, "etag|1", "x/y")
     notifier = make_notifier(store, gateway)
 
     ((chat_id, digest),) = await notifier.collect()
@@ -68,7 +79,7 @@ async def test_one_broken_group_never_blocks_the_others() -> None:
     gateway.events = [RELEASE]
     await enable(store, chat_id=-1, token="ghp_bad")  # noqa: S106 -- rejected fixture
     await enable(store, chat_id=-2)
-    await store.set_cursor(-2, "etag|1")
+    await store.set_cursor(-2, "etag|1", "x/y")
     notifier = make_notifier(store, gateway)
 
     ((chat_id, _),) = await notifier.collect()
@@ -86,7 +97,7 @@ async def test_fan_out_is_capped_and_logged() -> None:
     gateway.events = [RELEASE]
     for chat_id in range(-5, 0):
         await enable(store, chat_id=chat_id)
-        await store.set_cursor(chat_id, "etag|1")
+        await store.set_cursor(chat_id, "etag|1", "x/y")
     notifier = make_notifier(store, gateway)
     notifier.max_groups_per_tick = 2
     assert len(await notifier.collect()) == 2
@@ -96,7 +107,7 @@ async def test_digest_truncates_beyond_five_lines() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
     gateway.events = [RELEASE] * 7
     await enable(store, kinds=frozenset({EventKind.RELEASES}))
-    await store.set_cursor(-1, "etag|1")
+    await store.set_cursor(-1, "etag|1", "x/y")
     notifier = make_notifier(store, gateway)
     ((_, digest),) = await notifier.collect()
     assert digest.count("Release 1.0") == 5
@@ -108,7 +119,17 @@ async def test_unchanged_cursor_is_not_rewritten() -> None:
     gateway.events = []
     gateway.next_cursor = "etag|9"
     await enable(store)
-    await store.set_cursor(-1, "etag|9")  # already at head
+    await store.set_cursor(-1, "etag|9", "x/y")  # already at head
     notifier = make_notifier(store, gateway)
     assert await notifier.collect() == []
     assert store.cursors[-1] == "etag|9"
+
+
+async def test_digests_never_go_to_unlisted_groups() -> None:
+    """The operator allowlist gates pushes, not just commands."""
+    store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
+    gateway.events = [RELEASE]
+    await enable(store, chat_id=-1)
+    await store.set_cursor(-1, "etag|1", "x/y")
+    notifier = make_notifier(store, gateway, allowed={-999})
+    assert await notifier.collect() == []

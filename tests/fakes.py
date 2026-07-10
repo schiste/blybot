@@ -156,9 +156,22 @@ class InMemoryProfiles:
         self._check()
         return self.cursors.get(chat_id)
 
-    async def set_cursor(self, chat_id: int, cursor: str) -> None:
+    async def set_cursor(self, chat_id: int, cursor: str, repo: str = "") -> None:
         self._check()
+        profile = self.profiles.get(chat_id)
+        if repo and (profile is None or profile.repo != repo):
+            return  # repo guard: stale in-flight cursor writes are dropped
         self.cursors[chat_id] = cursor
+
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        self._check()
+        if old_chat_id in self.profiles:
+            profile = self.profiles.pop(old_chat_id)
+            self.profiles[new_chat_id] = replace(profile, chat_id=new_chat_id)
+        if old_chat_id in self.tokens:
+            self.tokens[new_chat_id] = self.tokens.pop(old_chat_id)
+        if old_chat_id in self.cursors:
+            self.cursors[new_chat_id] = self.cursors.pop(old_chat_id)
 
     async def store_token(self, chat_id: int, token: str) -> None:
         self._check()

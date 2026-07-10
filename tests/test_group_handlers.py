@@ -387,11 +387,11 @@ async def test_issue_without_binding_or_token_explains_what_is_missing() -> None
     assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
 
 
-async def test_issue_in_v1_mode_points_at_setup() -> None:
+async def test_issue_in_v1_mode_says_disabled() -> None:
     handlers, _, _ = make_handlers(with_repo_service=False)
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_DISABLED]
 
 
 async def test_issue_is_rate_limited() -> None:
@@ -451,7 +451,7 @@ async def test_repo_without_binding_or_service_explains() -> None:
     handlers, _, _ = make_handlers(with_repo_service=False)
     context, bot = tg.make_context()
     await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
+    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_DISABLED]
 
 
 async def test_repo_reports_missing_token_and_failures() -> None:
@@ -478,3 +478,55 @@ async def test_issue_and_repo_ignore_unlisted_groups_and_private_chats() -> None
     private = tg.command_update(tg.message(chat=tg.PRIVATE, text="/repo"))
     await handlers.on_repo(private, context)
     assert tg.sent_texts(bot) == []
+
+
+async def test_log_fails_closed_when_configuration_is_unreachable() -> None:
+    """A DB outage must not degrade a group's consent policy or page."""
+    store = InMemoryProfiles()
+    handlers, publisher, _ = make_handlers(store=store)
+    store.fail = True
+    context, bot = tg.make_context()
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert h.REPLY_CONFIG_UNAVAILABLE in tg.sent_texts(bot)
+
+
+async def test_repo_is_rate_limited_too() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway()
+    handlers, _, _ = make_handlers(store=store, gateway=gateway, limit=1)
+    await bind_repo(handlers, store, gateway)
+    for _ in range(2):
+        context, bot = tg.make_context()
+        await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_THROTTLED]
+
+
+async def test_group_help_hides_self_service_when_disabled() -> None:
+    handlers, _, _ = make_handlers()
+    handlers.directory.store = None  # v1 deployment
+    context, bot = tg.make_context()
+    await handlers.on_help(tg.command_update(tg.message(text="/help")), context)
+    (sent,) = tg.sent_texts(bot)
+    assert "/setup" not in sent
+    assert "/issue" not in sent
+
+
+async def test_migration_carries_the_stored_profile() -> None:
+    store = InMemoryProfiles()
+    handlers, _, policy = make_handlers(allowed={tg.GROUP.id}, store=store)
+    await handlers.directory.set_log_page(tg.GROUP.id, "Telegram logs/Ours")
+    context, _ = tg.make_context()
+    service_message = tg.message(text=None, migrate_to_chat_id=-100999)
+    await handlers.on_migration(tg.command_update(service_message), context)
+    assert policy.is_allowed(-100999)
+    assert (await handlers.directory.resolve(-100999)).log_page == "Telegram logs/Ours"
+
+
+async def test_migration_storage_failure_is_logged_not_raised() -> None:
+    store = InMemoryProfiles()
+    handlers, _, _ = make_handlers(store=store)
+    store.fail = True
+    context, _ = tg.make_context()
+    service_message = tg.message(text=None, migrate_to_chat_id=-100999)
+    await handlers.on_migration(tg.command_update(service_message), context)  # no raise

@@ -24,9 +24,9 @@ from blybot.adapters.telegram.app import (
 )
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
-from blybot.observability import Counters as _Counters  # noqa: F401
 from blybot.services.binding import TokenBinding
 from blybot.services.notify import RepoNotifier
+from blybot.services.policy import GroupPolicy
 from blybot.services.sessions import SessionRegistry
 from tests.fakes import (
     FakeClock,
@@ -64,6 +64,7 @@ def make_admin_handlers() -> AdminHandlers:
     group_handlers, _, _ = make_group_handlers()
     return AdminHandlers(
         directory=group_handlers.directory,
+        groups=GroupPolicy(allowed=set()),
         counters=Counters(),
         page_url_for=group_handlers.page_url_for,
         binding=TokenBinding(clock=FakeClock()),
@@ -200,7 +201,11 @@ async def test_run_forever_ticks_until_cancelled() -> None:
 async def test_repo_notify_loop_delivers_digests_and_survives_send_failures() -> None:
     store = InMemoryProfiles()
     notifier = RepoNotifier(
-        store=store, vault=store, gateway=FakeRepoGateway(), counters=Counters()
+        store=store,
+        vault=store,
+        gateway=FakeRepoGateway(),
+        groups=GroupPolicy(allowed=set()),
+        counters=Counters(),
     )
 
     sent: list[tuple[int, str]] = []
@@ -230,7 +235,11 @@ async def test_post_init_starts_the_notify_task_when_configured() -> None:
     lifecycle.maintenance.interval_seconds = 3600
     lifecycle.poll_interval_seconds = 3600
     lifecycle.notifier = RepoNotifier(
-        store=store, vault=store, gateway=FakeRepoGateway(), counters=Counters()
+        store=store,
+        vault=store,
+        gateway=FakeRepoGateway(),
+        groups=GroupPolicy(allowed=set()),
+        counters=Counters(),
     )
     app = cast("_App", SimpleNamespace(bot=SimpleNamespace()))
     await lifecycle.post_init(app)
@@ -238,3 +247,30 @@ async def test_post_init_starts_the_notify_task_when_configured() -> None:
     await lifecycle.post_shutdown(app)
     await asyncio.sleep(0)
     assert lifecycle._notify_task.cancelled()
+
+
+async def test_notify_loop_survives_a_crashing_collect() -> None:
+    """One bad poll cycle must never kill the loop for good."""
+    store = InMemoryProfiles()
+    notifier = RepoNotifier(
+        store=store,
+        vault=store,
+        gateway=FakeRepoGateway(),
+        groups=GroupPolicy(allowed=set()),
+        counters=Counters(),
+    )
+    calls = {"n": 0}
+
+    async def exploding_collect() -> list[tuple[int, str]]:
+        calls["n"] += 1
+        msg = "schema drift"
+        raise RuntimeError(msg)
+
+    notifier.collect = exploding_collect  # type: ignore[method-assign]
+    task = asyncio.ensure_future(repo_notify_loop(cast("Any", None), notifier, 0))
+    for _ in range(30):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls["n"] >= 2  # it kept polling after the crash

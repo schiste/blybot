@@ -15,6 +15,7 @@ from blybot.adapters.toolsdb.store import (
     Q_GET,
     Q_GET_CURSOR,
     Q_LIST_EVENT_ENABLED,
+    Q_MIGRATE,
     Q_SET_CURSOR,
     Q_UPSERT,
     Q_VAULT_CLEAR,
@@ -96,8 +97,14 @@ class FakeToolsDb:
             (chat_id,) = params
             return [(self.tables[chat_id]["cursor"],)] if chat_id in self.tables else []
         if query == Q_SET_CURSOR:
-            cursor, chat_id = params
-            self._row(chat_id)["cursor"] = cursor
+            cursor, chat_id, repo = params
+            if chat_id in self.tables and self.tables[chat_id]["repo"] == repo:
+                self.tables[chat_id]["cursor"] = cursor
+            return []
+        if query == Q_MIGRATE:
+            new_id, old_id = params
+            if old_id in self.tables and new_id not in self.tables:
+                self.tables[new_id] = self.tables.pop(old_id)
             return []
         if query == Q_VAULT_WRITE:
             chat_id, ciphertext = params
@@ -167,7 +174,7 @@ async def test_cursor_roundtrip_and_default() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
     assert await store.get_cursor(-100500) is None
-    await store.set_cursor(-100500, 'W/"etag123"')
+    await store.set_cursor(-100500, 'W/"etag123"', PROFILE.repo or "")
     assert await store.get_cursor(-100500) == 'W/"etag123"'
 
 
@@ -186,8 +193,9 @@ async def test_tokens_are_encrypted_at_rest_and_roundtrip() -> None:
 
 async def test_upsert_preserves_token_and_cursor() -> None:
     store, _ = make_store()
+    await store.upsert(PROFILE)  # the row must carry the repo the cursor is for
     await store.store_token(-100500, "ghp_secret")
-    await store.set_cursor(-100500, "etag")
+    await store.set_cursor(-100500, "etag", "schiste/blybot")
     await store.upsert(PROFILE)
     assert await store.fetch_token(-100500) == "ghp_secret"
     assert await store.get_cursor(-100500) == "etag"
@@ -273,3 +281,21 @@ def test_pymysql_runner_connects_with_cnf_credentials(
     explicit = PymysqlRunner(host="h", database="custom__db", cnf_path=cnf)
     explicit.run("SELECT 1", ())
     assert seen["database"] == "custom__db"
+
+
+async def test_cursor_writes_are_repo_guarded() -> None:
+    """An in-flight cursor for the OLD binding never lands on a new one."""
+    store, _ = make_store()
+    await store.upsert(PROFILE)
+    await store.set_cursor(-100500, "stale", "some/other")  # repo mismatch
+    assert await store.get_cursor(-100500) is None
+
+
+async def test_migrate_rekeys_the_profile() -> None:
+    store, _ = make_store()
+    await store.upsert(PROFILE)
+    await store.migrate(-100500, -200600)
+    assert await store.get(-100500) is None
+    migrated = await store.get(-200600)
+    assert migrated is not None
+    assert migrated.repo == PROFILE.repo

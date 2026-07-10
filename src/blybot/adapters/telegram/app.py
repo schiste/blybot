@@ -13,6 +13,7 @@ DM buffers so debounced content is not lost on a graceful restart.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Final
 
@@ -103,10 +104,13 @@ class Lifecycle:
     async def post_shutdown(self, app: _App) -> None:
         """Stop maintenance, flush pending DM buffers, release the wiki client."""
         del app
-        if self._maintenance_task is not None:
-            self._maintenance_task.cancel()
-        if self._notify_task is not None:
-            self._notify_task.cancel()
+        for task in (self._maintenance_task, self._notify_task):
+            if task is not None:
+                task.cancel()
+        for task in (self._maintenance_task, self._notify_task):
+            if task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
         await self.transcription.flush_all()
         await self.release()
         log_event("shutdown", "ok")
@@ -116,7 +120,12 @@ async def repo_notify_loop(bot: Bot, notifier: RepoNotifier, interval_seconds: f
     """Poll bound repositories and deliver digests until cancelled."""
     while True:
         await asyncio.sleep(interval_seconds)
-        for chat_id, digest in await notifier.collect():
+        try:
+            digests = await notifier.collect()
+        except Exception:
+            log_event("repo_poll", "error")
+            continue
+        for chat_id, digest in digests:
             try:
                 await bot.send_message(chat_id=chat_id, text=digest)
             except TelegramError:

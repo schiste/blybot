@@ -15,6 +15,7 @@ from blybot.domain.models import ConsentMode, EventKind
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
+from blybot.services.policy import GroupPolicy
 from tests import tg
 from tests.fakes import FakeClock, InMemoryProfiles
 
@@ -28,6 +29,7 @@ def make_handlers(
 ) -> a.AdminHandlers:
     store = store if store is not None else InMemoryProfiles()
     return a.AdminHandlers(
+        groups=GroupPolicy(allowed=set()),
         directory=ChannelDirectory(
             store=store,
             default_log_page="Next 25/Telegram logs",
@@ -89,8 +91,9 @@ async def test_admin_commands_outside_groups_are_ignored() -> None:
     assert tg.sent_texts(bot) == []
 
 
-async def test_self_service_off_is_announced_to_admins() -> None:
+async def test_v1_deployments_stay_silent_and_skip_the_api_call() -> None:
     handlers = a.AdminHandlers(
+        groups=GroupPolicy(allowed=set()),
         directory=ChannelDirectory(
             store=None,
             default_log_page="P",
@@ -105,7 +108,17 @@ async def test_self_service_off_is_announced_to_admins() -> None:
     )
     context, bot = admin_context()
     await handlers.on_setup(command("/setup"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_SELF_SERVICE_OFF]
+    assert tg.sent_texts(bot) == []
+    bot.get_chat_member.assert_not_awaited()  # no amplification on v1
+
+
+async def test_unlisted_groups_cannot_configure_anything() -> None:
+    handlers = make_handlers()
+    handlers.groups.allowed = {-42}  # this test group is not on the list
+    context, bot = admin_context(args=["Telegram", "logs/X"])
+    await handlers.on_setpage(command("/setpage Telegram logs/X"), context)
+    assert tg.sent_texts(bot) == []
+    bot.get_chat_member.assert_not_awaited()
 
 
 async def test_setup_lists_the_commands() -> None:
@@ -225,7 +238,7 @@ async def test_setrepo_binds_and_mints_a_deep_link() -> None:
 
 async def test_setrepo_rejects_bad_formats() -> None:
     handlers = make_handlers()
-    for bad in ([], ["not-a-repo"], ["a/b/c"], ["owner/"]):
+    for bad in ([], ["not-a-repo"], ["a/b/c"], ["owner/"], ["owner/.."], ["../x"]):
         context, bot = admin_context(args=bad)
         await handlers.on_setrepo(command("/setrepo"), context)
         assert tg.sent_texts(bot) == [a.REPLY_SETREPO_USAGE]
@@ -300,3 +313,23 @@ async def test_events_rejects_junk_and_reports_outages() -> None:
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)
     assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_setrepo_discards_any_previous_token() -> None:
+    """A token consented for repo A must never be replayed against repo B."""
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    await store.store_token(tg.GROUP.id, "ghp_for_old_repo")
+    context, _ = admin_context(args=["new/repo"])
+    await handlers.on_setrepo(command("/setrepo new/repo"), context)
+    assert store.tokens == {}
+
+
+async def test_setrepo_without_a_vault_still_binds() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    handlers.vault = None
+    context, bot = admin_context(args=["x/y"])
+    await handlers.on_setrepo(command("/setrepo x/y"), context)
+    assert store.profiles[tg.GROUP.id].repo == "x/y"
+    assert "cfg_" in tg.sent_texts(bot)[0]

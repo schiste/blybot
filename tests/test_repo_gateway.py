@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import httpx
@@ -216,4 +217,63 @@ async def test_events_failures_raise() -> None:
     gateway = make_gateway(Down())
     with pytest.raises(IssueTrackerError, match="500"):
         await gateway.events_since("x/y", "tok", None)
+    await gateway.aclose()
+
+
+async def test_malformed_event_payloads_degrade_to_a_poll_error() -> None:
+    class Weird(EventsApi):
+        def handler(self, request: httpx.Request) -> httpx.Response:
+            del request
+            return httpx.Response(200, json=[{"no_id": True}], headers={"ETag": "x"})
+
+    gateway = make_gateway(Weird())
+    with pytest.raises(IssueTrackerError, match="malformed"):
+        await gateway.events_since("x/y", "tok", "e|1")
+    await gateway.aclose()
+
+
+async def test_event_titles_are_clipped() -> None:
+    class Longs(EventsApi):
+        def handler(self, request: httpx.Request) -> httpx.Response:
+            del request
+            events = [
+                {
+                    "id": "99",
+                    "type": "IssuesEvent",
+                    "payload": {
+                        "action": "opened",
+                        "issue": {"title": "x" * 500, "html_url": "https://x"},
+                    },
+                }
+            ]
+            return httpx.Response(200, json=events, headers={"ETag": "x"})
+
+    gateway = make_gateway(Longs())
+    events, _ = await gateway.events_since("x/y", "tok", "e|1")
+    assert len(events[0].title) <= 132
+    assert events[0].title.endswith("…")
+    await gateway.aclose()
+
+
+async def test_full_page_of_fresh_events_logs_a_possible_gap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Busy(EventsApi):
+        def handler(self, request: httpx.Request) -> httpx.Response:
+            del request
+            events = [
+                {
+                    "id": str(100 + n),
+                    "type": "IssuesEvent",
+                    "payload": {"action": "opened", "issue": {"title": "t", "html_url": "u"}},
+                }
+                for n in range(30)
+            ]
+            return httpx.Response(200, json=events, headers={"ETag": "x"})
+
+    gateway = make_gateway(Busy())
+    with caplog.at_level(logging.INFO, logger="blybot"):
+        events, _ = await gateway.events_since("x/y", "tok", "e|1")
+    assert len(events) == 30
+    assert any("repo_events" in message for message in caplog.messages)
     await gateway.aclose()

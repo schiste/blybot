@@ -18,6 +18,7 @@ from blybot.observability import Counters, log_event
 if TYPE_CHECKING:
     from blybot.domain.models import GroupProfile, RepoEvent
     from blybot.domain.ports import ProfileStore, RepoGateway, TokenVault
+    from blybot.services.policy import GroupPolicy
 
 _DIGEST_LINES: Final = 5
 
@@ -29,6 +30,7 @@ class RepoNotifier:
     store: ProfileStore
     vault: TokenVault
     gateway: RepoGateway
+    groups: GroupPolicy
     counters: Counters
     max_groups_per_tick: int = 200
 
@@ -43,6 +45,8 @@ class RepoNotifier:
             profiles = profiles[: self.max_groups_per_tick]
         digests: list[tuple[int, str]] = []
         for profile in profiles:
+            if not self.groups.is_allowed(profile.chat_id):
+                continue  # never push into groups the operator excluded
             digest = await self._digest_for(profile)
             if digest is not None:
                 digests.append((profile.chat_id, digest))
@@ -58,7 +62,7 @@ class RepoNotifier:
             cursor = await self.store.get_cursor(profile.chat_id)
             events, new_cursor = await self.gateway.events_since(profile.repo, token, cursor)
             if new_cursor and new_cursor != cursor:
-                await self.store.set_cursor(profile.chat_id, new_cursor)
+                await self.store.set_cursor(profile.chat_id, new_cursor, profile.repo)
         except (StorageError, IssueTrackerError):
             log_event("repo_poll", "error")
             return None

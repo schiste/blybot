@@ -14,12 +14,15 @@ import httpx
 
 from blybot.domain.models import EventKind, RepoEvent, RepoSummary
 from blybot.domain.ports import IssueTrackerError
+from blybot.observability import log_event
 
 _API: Final = "https://api.github.com"
 _OK: Final = 200
 _CREATED: Final = 201
 _NOT_MODIFIED: Final = 304
 _RECENT: Final = 3
+_EVENTS_PAGE: Final = 30
+_TITLE_CAP: Final = 120
 
 
 class GitHubRepoGateway:
@@ -105,7 +108,7 @@ class GitHubRepoGateway:
             response = await self._client.get(
                 f"{_API}/repos/{repo}/events",
                 headers=headers,
-                params={"per_page": 30},
+                params={"per_page": _EVENTS_PAGE},
             )
         except httpx.HTTPError as error:
             msg = "could not reach GitHub"
@@ -115,13 +118,21 @@ class GitHubRepoGateway:
         if response.status_code != _OK:
             msg = f"event poll failed: HTTP {response.status_code}"
             raise IssueTrackerError(msg)
-        raw_events = response.json()
-        new_etag = response.headers.get("ETag", "")
-        newest_id = max((int(item["id"]) for item in raw_events), default=last_id)
-        if cursor is None:  # baseline: never replay history
-            return [], _join_cursor(new_etag, newest_id)
-        fresh = [item for item in raw_events if int(item["id"]) > last_id]
-        events = [event for item in reversed(fresh) if (event := _reduce(item)) is not None]
+        try:
+            raw_events = response.json()
+            new_etag = response.headers.get("ETag", "")
+            newest_id = max((int(item["id"]) for item in raw_events), default=last_id)
+            if cursor is None:  # baseline: never replay history
+                return [], _join_cursor(new_etag, newest_id)
+            fresh = [item for item in raw_events if int(item["id"]) > last_id]
+            events = [event for item in reversed(fresh) if (event := _reduce(item)) is not None]
+        except (KeyError, ValueError, TypeError, AttributeError) as error:
+            # One malformed payload must degrade this poll, not kill it.
+            msg = "malformed events payload"
+            raise IssueTrackerError(msg) from error
+        if len(fresh) == len(raw_events) >= _EVENTS_PAGE:
+            # Every fetched event was new: more may exist beyond page 1.
+            log_event("repo_events", "ignored")
         return events, _join_cursor(new_etag, newest_id)
 
     async def aclose(self) -> None:
@@ -144,6 +155,10 @@ def _join_cursor(etag: str, last_id: int) -> str:
     return f"{etag}|{last_id}"
 
 
+def _clip(title: str) -> str:
+    return title[:_TITLE_CAP] + ("…" if len(title) > _TITLE_CAP else "")
+
+
 def _reduce(item: dict[str, Any]) -> RepoEvent | None:
     """Map a raw GitHub event to a publishable RepoEvent, or None."""
     kind = item.get("type")
@@ -152,7 +167,7 @@ def _reduce(item: dict[str, Any]) -> RepoEvent | None:
         release = payload.get("release", {})
         return RepoEvent(
             kind=EventKind.RELEASES,
-            title=f"Release {release.get('name') or release.get('tag_name', '?')}",
+            title=_clip(f"Release {release.get('name') or release.get('tag_name', '?')}"),
             url=str(release.get("html_url", "")),
         )
     if kind == "PullRequestEvent" and payload.get("action") == "closed":
@@ -161,14 +176,14 @@ def _reduce(item: dict[str, Any]) -> RepoEvent | None:
             return None
         return RepoEvent(
             kind=EventKind.PRS,
-            title=f"Merged: {pull.get('title', '?')}",
+            title=_clip(f"Merged: {pull.get('title', '?')}"),
             url=str(pull.get("html_url", "")),
         )
     if kind == "IssuesEvent" and payload.get("action") == "opened":
         issue = payload.get("issue", {})
         return RepoEvent(
             kind=EventKind.ISSUES,
-            title=f"New issue: {issue.get('title', '?')}",
+            title=_clip(f"New issue: {issue.get('title', '?')}"),
             url=str(issue.get("html_url", "")),
         )
     return None

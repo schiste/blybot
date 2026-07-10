@@ -28,7 +28,7 @@ def test_missing_configuration_exits_2_without_echoing_values(
     assert "TELEGRAM_BOT_TOKEN" in err
 
 
-def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key, value)
     seen: dict[str, Any] = {}
@@ -55,7 +55,9 @@ def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> No
     directory = seen["group_handlers"].directory
     assert seen["admin_handlers"].directory is directory  # one directory, shared
     assert directory.default_log_page == REQUIRED["LOG_TARGET_PAGE"]
+    assert directory.default_repo == ""  # never the operator's own /bug repo
     assert lifecycle.transcription.target_page == REQUIRED["DM_TARGET_BASE"]
+    await lifecycle.release()  # v1 mode: no /bug tracker client to close
 
 
 async def test_valid_encryption_key_enables_self_service(
@@ -65,6 +67,7 @@ async def test_valid_encryption_key_enables_self_service(
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("WIKI_PAGE_PREFIX", "Telegram logs/")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_dummy")  # builds the /bug tracker too
     seen: dict[str, Any] = {}
     monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
 

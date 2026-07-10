@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from blybot.domain.ports import TokenVault
     from blybot.services.binding import TokenBinding
     from blybot.services.directory import ChannelDirectory
+    from blybot.services.policy import GroupPolicy
 
 REPLY_NOT_ADMIN: Final = "Only this group's admins can configure me."
 REPLY_SELF_SERVICE_OFF: Final = (
@@ -45,9 +46,10 @@ REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
 REPLY_RESET: Final = "Forgotten. This group is back on the operator defaults."
 REPLY_SETREPO_USAGE: Final = "Usage: /setrepo owner/repository"
 REPLY_REPO_BOUND: Final = (
-    "Repo bound: {repo}. To enable /issue and /repo here, an admin must "
-    "give me a GitHub token privately — tap {link} (valid 10 minutes). "
-    "Use a fine-grained PAT restricted to {repo} with Issues read/write only."
+    "Repo bound: {repo} (any previously stored token was discarded). To "
+    "enable /issue and /repo here, an admin must give me a GitHub token "
+    "privately — tap {link} (valid 10 minutes). Use a fine-grained PAT "
+    "restricted to {repo} with Issues read/write only."
 )
 REPLY_PAT_REVOKED: Final = "Token discarded. /issue and /repo are disabled for this group."
 REPLY_EVENTS_USAGE: Final = "Usage: /events on | off | <kinds> — kinds from: releases, prs, issues"
@@ -92,6 +94,7 @@ class AdminHandlers:
     """Handlers for the group configuration commands."""
 
     directory: ChannelDirectory
+    groups: GroupPolicy
     counters: Counters
     page_url_for: Callable[[str], str]
     binding: TokenBinding
@@ -156,11 +159,15 @@ class AdminHandlers:
         if chat is None:
             return
         repo = ((context.args or [""])[0]).strip()
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or ".." in repo:
             await context.bot.send_message(chat_id=chat.id, text=REPLY_SETREPO_USAGE)
             return
         try:
             await self.directory.set_repo(chat.id, repo)
+            if self.vault is not None:
+                # A token consented for the previous repo must never be
+                # replayed against the new one.
+                await self.vault.delete_token(chat.id)
         except StorageError:
             await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
             return
@@ -246,12 +253,16 @@ class AdminHandlers:
         message = update.effective_message
         if chat is None or message is None or chat.type not in _GROUP_TYPES:
             return None
+        if not self.groups.is_allowed(chat.id):
+            return None  # unlisted groups get silence, same as /log
+        if not self.directory.self_service_enabled:
+            # v1 deployment: stay silent (and skip the getChatMember
+            # round-trip) — group /help doesn't advertise these commands.
+            log_event("admin_command", "ignored")
+            return None
         user = message.from_user
         if user is None or not await is_group_admin(context.bot, chat.id, user.id):
             await context.bot.send_message(chat_id=chat.id, text=REPLY_NOT_ADMIN)
-            return None
-        if not self.directory.self_service_enabled:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_SELF_SERVICE_OFF)
             return None
         return chat
 

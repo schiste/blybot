@@ -57,8 +57,16 @@ class ProfileStore(Protocol):
         """Return the group's event-poll cursor (ETag), if any."""
         ...
 
-    async def set_cursor(self, chat_id: int, cursor: str) -> None:
-        """Persist the group's event-poll cursor."""
+    async def set_cursor(self, chat_id: int, cursor: str, repo: str) -> None:
+        """Persist the cursor iff the group is still bound to ``repo``.
+
+        The repo guard keeps an in-flight poll from stamping a stale
+        cursor onto a profile that was reset/rebound meanwhile.
+        """
+        ...
+
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        """Re-key a profile after a group→supergroup upgrade."""
         ...
 
 

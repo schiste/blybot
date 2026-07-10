@@ -91,12 +91,17 @@ def main() -> int:
     async def release_clients() -> None:
         await publisher.aclose()
         await gateway.aclose()
+        if tracker is not None:
+            await tracker.aclose()
 
+    group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
     directory = ChannelDirectory(
         store=store,
         default_log_page=config.log_target_page,
         default_consent=config.consent_mode,
-        default_repo=config.github_repo,
+        # Deliberately NOT config.github_repo: that is the bot's own /bug
+        # tracker, not a repo any group consented to bind.
+        default_repo="",
         page_prefix=config.wiki_page_prefix,
     )
     group_handlers = GroupHandlers(
@@ -109,7 +114,7 @@ def main() -> int:
             edit_summary=config.edit_summary,
             timestamp_granularity=config.timestamp_granularity,
         ),
-        groups=GroupPolicy(allowed=set(config.allowed_group_ids)),
+        groups=group_policy,
         limiter=SlidingWindowLimiter(
             clock=clock,
             limit=config.log_throttle_per_minute,
@@ -156,6 +161,7 @@ def main() -> int:
 
     admin_handlers = AdminHandlers(
         directory=directory,
+        groups=group_policy,
         counters=counters,
         page_url_for=config.page_url,
         binding=binding,
@@ -173,7 +179,13 @@ def main() -> int:
             release=release_clients,
             bootstrap=store.bootstrap if store else None,
             notifier=(
-                RepoNotifier(store=store, vault=store, gateway=gateway, counters=counters)
+                RepoNotifier(
+                    store=store,
+                    vault=store,
+                    gateway=gateway,
+                    groups=group_policy,
+                    counters=counters,
+                )
                 if store
                 else None
             ),

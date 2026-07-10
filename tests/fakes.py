@@ -89,6 +89,19 @@ class FakeClock:
 
 
 @dataclass
+class ScriptedPseudonyms:
+    """Returns a fixed sequence of pseudonym values, then repeats the last."""
+
+    values: list[str] = field(default_factory=list)
+    _position: int = 0
+
+    def mint(self) -> Pseudonym:
+        value = self.values[min(self._position, len(self.values) - 1)]
+        self._position += 1
+        return Pseudonym(value)
+
+
+@dataclass
 class SequentialPseudonyms:
     """Deterministic pseudonym factory: Anon-1, Anon-2, ..."""
 

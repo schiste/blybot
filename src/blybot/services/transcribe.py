@@ -110,8 +110,12 @@ class DmTranscriptionService:
                 log_event("dm_flush", "error")
 
     def page_for(self, session: Session) -> str:
-        """Return the page (with section anchor) this session's discussion lands on."""
-        return f"{self.target_page}#{session.anchor}"
+        """Return the page (with section anchor) this session's discussion lands on.
+
+        MediaWiki turns spaces into underscores in heading anchors; the
+        pseudonym charset (tested) contains nothing else needing escape.
+        """
+        return f"{self.target_page}#{session.anchor.replace(' ', '_')}"
 
     async def _flush_later(self, chat_id: int) -> None:
         await asyncio.sleep(self.debounce_seconds)

@@ -76,10 +76,6 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 - **N1 consent-confirm flow:** the `CONSENT_MODE=confirm` hook exists (see
   `_parse_consent_mode` in `config.py` and the marked branch in
   `GroupHandlers.on_log`) but the DM-confirmation flow itself is unbuilt.
-- **Pseudonym format:** the current `Guest-<hex>` format works but a
-  human-friendly format would read better on Meta — see the TODO in
-  `src/blybot/domain/pseudonym.py`. Keep `mint()` input-free and
-  CSPRNG-backed; tests enforce both.
 - **OAuth (owner-only consumer)** as the P1 upgrade over BotPassword in
   `adapters/mediawiki/publisher.py`.
 - Anything labeled `good first issue`.

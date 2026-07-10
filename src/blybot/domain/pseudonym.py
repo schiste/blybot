@@ -6,31 +6,99 @@ Hard requirements, enforced by tests:
 * the mint takes **no input**: a pseudonym must not be derived from a
   Telegram user ID or any other user attribute, so reversal or
   cross-session linkage is impossible even for the operator.
+
+Format: ``<first name> <surname> from <location>``, all drawn from
+fantasy / science-fiction classics — a readable byline for a talk page
+("as Trillian Baggins from Gallifrey said above..."). The combined
+namespace is 20x20x20 = 8,000; :class:`~blybot.services.sessions.
+SessionRegistry` refuses to mint a pseudonym that another *live*
+session is using, so the only effect of a repeat across history is a
+duplicated section heading on the archive page.
 """
 
 from __future__ import annotations
 
 import secrets
+from typing import Final
 
 from blybot.domain.models import Pseudonym
 
+FIRST_NAMES: Final = (
+    "Arwen",
+    "Leia",
+    "Frodo",
+    "Paul",
+    "Hermione",
+    "Ender",
+    "Ripley",
+    "Trillian",
+    "Geralt",
+    "Lyra",
+    "Kvothe",
+    "Hari",
+    "Essun",
+    "Binti",
+    "Hiro",
+    "Cordelia",
+    "Luke",
+    "Daenerys",
+    "Morpheus",
+    "Zaphod",
+)
+
+SURNAMES: Final = (
+    "Skywalker",
+    "Baggins",
+    "Atreides",
+    "Granger",
+    "Stark",
+    "Targaryen",
+    "Solo",
+    "Kenobi",
+    "Seldon",
+    "Vimes",
+    "Weasley",
+    "Took",
+    "Wiggin",
+    "Everdeen",
+    "Vorkosigan",
+    "Dent",
+    "Beeblebrox",
+    "Snow",
+    "Mormont",
+    "Strange",
+)
+
+LOCATIONS: Final = (
+    "Arrakis",
+    "Mordor",
+    "Rivendell",
+    "Hogwarts",
+    "Winterfell",
+    "Trantor",
+    "Gallifrey",
+    "Tatooine",
+    "Narnia",
+    "Ankh-Morpork",
+    "Coruscant",
+    "Vulcan",
+    "Gondor",
+    "Camelot",
+    "Avalon",
+    "Solaris",
+    "Hyperion",
+    "Terminus",
+    "Caladan",
+    "Lankhmar",
+)
+
 
 class RandomPseudonymFactory:
-    """Default :class:`blybot.domain.ports.PseudonymFactory` implementation.
-
-    The current format is ``Guest-<6 hex chars>`` (e.g. ``Guest-a3f01c``),
-    which gives ~16.7 million combinations per prefix.
-
-    TODO(design): the pseudonym *format* is a product decision, not a
-    security one — any format is fine as long as ``mint()`` stays
-    input-free and CSPRNG-backed. A human-friendly alternative
-    (e.g. ``Amber-Heron-42`` from small word lists) reads better as a
-    discussion byline on Meta and is easier for participants to refer to
-    ("as Amber-Heron said above..."), at the cost of a smaller namespace
-    per session-day. See CONTRIBUTING.md for the invariants any
-    implementation must keep.
-    """
+    """Default :class:`blybot.domain.ports.PseudonymFactory` implementation."""
 
     def mint(self) -> Pseudonym:
         """Return a fresh pseudonym, independent of all previous mints."""
-        return Pseudonym(f"Guest-{secrets.token_hex(3)}")
+        return Pseudonym(
+            f"{secrets.choice(FIRST_NAMES)} {secrets.choice(SURNAMES)} "
+            f"from {secrets.choice(LOCATIONS)}"
+        )

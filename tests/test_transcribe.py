@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from blybot.domain.models import Pseudonym, Session
 from blybot.domain.ports import WikiWriteError
 from blybot.services.sessions import SessionRegistry
 from blybot.services.transcribe import DmTranscriptionService
@@ -182,3 +183,13 @@ async def test_flush_of_an_unknown_chat_is_a_quiet_noop() -> None:
     service = make_service(publisher, FakeClock())
     await service._flush(chat_id=999)
     assert publisher.wrote_nothing
+
+
+def test_page_for_converts_spaces_to_wiki_anchor_underscores() -> None:
+    service = make_service(FakePublisher(), FakeClock())
+    session = Session(
+        pseudonym=Pseudonym("Trillian Baggins from Gallifrey"),
+        anchor="Trillian Baggins from Gallifrey",
+        last_seen=datetime(2026, 7, 10, tzinfo=UTC),
+    )
+    assert service.page_for(session) == f"{PAGE}#Trillian_Baggins_from_Gallifrey"

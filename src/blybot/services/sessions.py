@@ -10,12 +10,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import Session
 
 if TYPE_CHECKING:
     from blybot.domain.ports import Clock, PseudonymFactory
+
+_MINT_ATTEMPTS: Final = 32
 
 
 @dataclass
@@ -71,7 +73,17 @@ class SessionRegistry:
         return len(expired)
 
     def _mint(self, chat_id: int) -> Session:
+        # Re-draw when a pseudonym is already held by any known session
+        # (live or its own predecessor): two concurrent discussions must
+        # never share a section heading, and a reset must actually
+        # change identity. Bounded so a tiny factory namespace degrades
+        # to a repeat rather than an infinite loop.
+        taken = {session.anchor for session in self._sessions.values()}
         pseudonym = self.pseudonyms.mint()
+        for _ in range(_MINT_ATTEMPTS - 1):
+            if pseudonym.value not in taken:
+                break
+            pseudonym = self.pseudonyms.mint()
         session = Session(
             pseudonym=pseudonym,
             anchor=pseudonym.value,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from blybot.services.sessions import SessionRegistry
-from tests.fakes import FakeClock, SequentialPseudonyms
+from tests.fakes import FakeClock, ScriptedPseudonyms, SequentialPseudonyms
 
 TTL = timedelta(minutes=45)
 
@@ -99,3 +99,34 @@ def test_sweep_drops_only_expired_sessions() -> None:
     kept = registry.touch(chat_id=222)
     assert fresh.pseudonym.value == "Anon-3"
     assert kept.pseudonym.value == "Anon-2"
+
+
+def test_minting_avoids_pseudonyms_of_other_known_sessions() -> None:
+    """Two concurrent discussions must never share a section heading."""
+    clock = FakeClock()
+    registry = SessionRegistry(
+        pseudonyms=ScriptedPseudonyms(values=["Same", "Same", "Other"]), clock=clock, ttl=TTL
+    )
+    first = registry.touch(chat_id=1)
+    second = registry.touch(chat_id=2)  # first draw collides, re-draws
+    assert first.anchor == "Same"
+    assert second.anchor == "Other"
+
+
+def test_reset_never_returns_the_current_identity() -> None:
+    registry = SessionRegistry(
+        pseudonyms=ScriptedPseudonyms(values=["Same", "Same", "Fresh"]),
+        clock=FakeClock(),
+        ttl=TTL,
+    )
+    registry.touch(chat_id=1)
+    assert registry.reset(chat_id=1).anchor == "Fresh"
+
+
+def test_exhausted_redraw_budget_degrades_to_a_repeat() -> None:
+    """A pathologically tiny namespace repeats rather than looping forever."""
+    registry = SessionRegistry(
+        pseudonyms=ScriptedPseudonyms(values=["Only"]), clock=FakeClock(), ttl=TTL
+    )
+    registry.touch(chat_id=1)
+    assert registry.touch(chat_id=2).anchor == "Only"

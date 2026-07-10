@@ -65,12 +65,22 @@ class Config:
     log_throttle_per_minute: int
     group_greeting_text: str
     welcome_text: str
+    maintainer: str
     user_agent: str
 
     @property
     def edit_summary(self) -> str:
         """Generic, non-identifying edit summary (spec R8)."""
         return f"Log entry via {self.bot_name}"
+
+    def page_url(self, title: str) -> str:
+        """Return the human-facing URL of a wiki page.
+
+        Derived from the API endpoint; assumes the standard WMF layout
+        (``.../w/api.php`` alongside ``.../wiki/<title>``).
+        """
+        base = self.wiki_api_url.rsplit("/w/api.php", 1)[0]
+        return f"{base}/wiki/{title.replace(' ', '_')}"
 
 
 def load_config(env: dict[str, str] | None = None) -> Config:
@@ -112,6 +122,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
             "GROUP_GREETING_TEXT", DEFAULT_GROUP_GREETING.format(bot_name=bot_name)
         ),
         welcome_text=source.get("WELCOME_TEXT", DEFAULT_WELCOME),
+        maintainer=source.get("MAINTAINER", ""),
         user_agent=source["USER_AGENT"],
     )
 

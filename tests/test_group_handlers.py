@@ -41,6 +41,8 @@ def make_handlers(
         counters=Counters(),
         group_greeting_text="Hello, I am Blybot.",
         log_page=LOG_PAGE,
+        log_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Log",
+        maintainer="Test Maintainer",
     )
     return handlers, publisher, policy
 
@@ -220,6 +222,8 @@ async def test_group_help_explains_the_log_gesture() -> None:
     await handlers.on_help(tg.command_update(tg.message(text="/help")), context)
     (sent,) = tg.sent_texts(bot)
     assert "/log" in sent
+    assert "https://meta.wikimedia.org/wiki/Meta_talk:Community/Log" in sent
+    assert "maintained by Test Maintainer" in sent
 
 
 async def test_group_help_stays_silent_in_unlisted_groups_and_dms() -> None:

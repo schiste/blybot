@@ -24,6 +24,8 @@ def make_handlers(clock: FakeClock | None = None) -> tuple[h.PrivateHandlers, Fa
         sessions=transcription.sessions,
         counters=Counters(),
         welcome_text="Welcome to Blybot.",
+        dm_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Discussions",
+        maintainer="Test Maintainer",
     )
     return handlers, publisher
 
@@ -81,6 +83,8 @@ async def test_private_help_lists_the_commands() -> None:
     (sent,) = tg.sent_texts(bot)
     for command in ("/whoami", "/flush", "/privacy", "/log"):
         assert command in sent
+    assert "https://meta.wikimedia.org/wiki/Meta_talk:Community/Discussions" in sent
+    assert "maintained by Test Maintainer" in sent
 
 
 async def test_privacy_statement_covers_the_guarantees() -> None:
@@ -195,7 +199,15 @@ async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() ->
         sessions=transcription.sessions,
         counters=Counters(),
         welcome_text="Welcome.",
+        dm_page_url="https://example.org/wiki/D",
+        maintainer="",
     )
     context, bot = tg.make_context()
     await handlers.on_dm(dm("doomed"), context)
     assert tg.sent_texts(bot) == [h.REPLY_WIKI_ERROR]
+
+
+def test_help_footer_omits_the_maintainer_line_when_unset() -> None:
+    footer = h._help_footer("https://example.org/wiki/P", "")
+    assert "lands at https://example.org/wiki/P" in footer
+    assert "maintained" not in footer

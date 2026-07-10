@@ -74,12 +74,16 @@ def main() -> int:
         counters=counters,
         group_greeting_text=config.group_greeting_text,
         log_page=config.log_target_page,
+        log_page_url=config.page_url(config.log_target_page),
+        maintainer=config.maintainer,
     )
     private_handlers = PrivateHandlers(
         transcription=transcription,
         sessions=sessions,
         counters=counters,
         welcome_text=config.welcome_text,
+        dm_page_url=config.page_url(config.dm_target_base),
+        maintainer=config.maintainer,
     )
 
     run_polling(

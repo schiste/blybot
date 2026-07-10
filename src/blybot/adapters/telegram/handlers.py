@@ -111,6 +111,14 @@ def _just_joined(change: ChatMemberUpdated) -> bool:
     )
 
 
+def _help_footer(page_url: str, maintainer: str) -> str:
+    """Publication link and maintainer mention appended to both /help texts."""
+    footer = f"\n\nEverything I publish lands at {page_url}"
+    if maintainer:
+        footer += f"\nThis bot is maintained by {maintainer}"
+    return footer
+
+
 @dataclass(eq=False)
 class GroupHandlers:
     """Handlers for the group ``/log`` flow, greeting, and migration."""
@@ -122,6 +130,8 @@ class GroupHandlers:
     counters: Counters
     group_greeting_text: str
     log_page: str
+    log_page_url: str
+    maintainer: str
 
     async def on_log(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Publish the replied-to message anonymously (R2)."""
@@ -197,7 +207,8 @@ class GroupHandlers:
         chat = update.effective_chat
         if chat is None or chat.type not in _GROUP_TYPES or not self.groups.is_allowed(chat.id):
             return
-        await context.bot.send_message(chat_id=chat.id, text=HELP_GROUP)
+        text = HELP_GROUP + _help_footer(self.log_page_url, self.maintainer)
+        await context.bot.send_message(chat_id=chat.id, text=text)
 
     async def on_newcomer(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Offer newcomers a private welcome via a deep-link button (R5).
@@ -231,6 +242,8 @@ class PrivateHandlers:
     sessions: SessionRegistry
     counters: Counters
     welcome_text: str
+    dm_page_url: str
+    maintainer: str
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Deliver the welcome message (R5) — nothing else.
@@ -276,7 +289,8 @@ class PrivateHandlers:
         """List the private-chat commands and what transcription means."""
         chat = self._private_chat(update)
         if chat is not None:
-            await context.bot.send_message(chat_id=chat.id, text=HELP_PRIVATE)
+            text = HELP_PRIVATE + _help_footer(self.dm_page_url, self.maintainer)
+            await context.bot.send_message(chat_id=chat.id, text=text)
 
     async def on_privacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """State exactly what is ingested, published, and stored."""

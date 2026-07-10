@@ -106,6 +106,18 @@ def test_unknown_consent_mode_is_rejected() -> None:
         load_config(dict(REQUIRED) | {"CONSENT_MODE": "ask-nicely"})
 
 
+def test_maintainer_defaults_to_empty_and_page_url_builds_wmf_urls() -> None:
+    config = load_config(dict(REQUIRED))
+    assert config.maintainer == ""
+    assert (
+        config.page_url("Talk:Next 25/Telegram logs")
+        == "https://meta.wikimedia.org/wiki/Talk:Next_25/Telegram_logs"
+    )
+
+    named = load_config(dict(REQUIRED) | {"MAINTAINER": "User:Schiste"})
+    assert named.maintainer == "User:Schiste"
+
+
 def test_explicit_ttl_override_is_honored() -> None:
     config = load_config(dict(REQUIRED) | {"SESSION_TTL_MINUTES": "30"})
     assert config.session_ttl == timedelta(minutes=30)

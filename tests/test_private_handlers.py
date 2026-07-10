@@ -94,6 +94,9 @@ async def test_privacy_statement_covers_the_guarantees() -> None:
     (sent,) = tg.sent_texts(bot)
     assert "pseudonym" in sent
     assert "permanently" in sent
+    assert "Toolforge" in sent
+    assert "https://github.com/schiste/blybot" in sent
+    assert "AGPL" in sent
 
 
 async def test_private_commands_outside_private_chats_are_ignored() -> None:
@@ -119,7 +122,7 @@ async def test_dm_is_transcribed_under_the_session_pseudonym() -> None:
     (page, heading, text, _) = publisher.started[0]
     assert page == "Meta talk:Community/Discussions"
     assert heading == "Anon-1"
-    assert text == ": [sanitized]hello there"
+    assert text == ": [sanitized]hello there --Anon-1"
 
 
 async def test_first_dm_announces_the_identity_then_stays_quiet() -> None:

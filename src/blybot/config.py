@@ -64,6 +64,10 @@ class Config:
     consent_mode: ConsentMode
     newcomer_welcome_enabled: bool
     log_throttle_per_minute: int
+    bug_throttle_per_hour: int
+    wiki_max_retries: int
+    log_cleanup_seconds: float
+    reply_cleanup_seconds: float
     group_greeting_text: str
     welcome_text: str
     maintainer: str
@@ -122,6 +126,10 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         consent_mode=_parse_consent_mode(source.get("CONSENT_MODE", "immediate")),
         newcomer_welcome_enabled=_parse_newcomer_welcome(source.get("NEWCOMER_WELCOME", "prompt")),
         log_throttle_per_minute=_parse_positive_int(source, "LOG_THROTTLE_PER_MINUTE", 6),
+        bug_throttle_per_hour=_parse_positive_int(source, "BUG_THROTTLE_PER_HOUR", 3),
+        wiki_max_retries=_parse_positive_int(source, "WIKI_MAX_RETRIES", 5),
+        log_cleanup_seconds=_parse_cleanup_seconds(source, "LOG_CLEANUP_SECONDS", 5),
+        reply_cleanup_seconds=_parse_cleanup_seconds(source, "REPLY_CLEANUP_SECONDS", 15),
         group_greeting_text=source.get(
             "GROUP_GREETING_TEXT", DEFAULT_GROUP_GREETING.format(bot_name=bot_name)
         ),
@@ -163,6 +171,28 @@ def _parse_group_ids(raw: str) -> frozenset[int]:
     except ValueError as exc:
         msg = "ALLOWED_GROUP_IDS must be a comma-separated list of integers"
         raise ConfigurationError(msg) from exc
+
+
+def _parse_cleanup_seconds(
+    source: dict[str, str] | os._Environ[str], key: str, default: int
+) -> float:
+    """Message-cleanup delays: seconds, or 0 to keep messages forever.
+
+    Returns -1.0 for "disabled" so downstream code cannot confuse it
+    with "delete immediately".
+    """
+    raw = source.get(key)
+    if raw is None or not raw.strip():
+        return float(default)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        msg = f"{key} must be an integer number of seconds (0 disables deletion)"
+        raise ConfigurationError(msg) from exc
+    if value < 0:
+        msg = f"{key} must not be negative (0 disables deletion)"
+        raise ConfigurationError(msg)
+    return float(value) if value else -1.0
 
 
 def _parse_positive_int(source: dict[str, str] | os._Environ[str], key: str, default: int) -> int:

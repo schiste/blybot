@@ -202,6 +202,15 @@ Loaded from the tool home directory (env or a `0600`-permission file), not the r
 | `CONSENT_MODE` | `immediate`, `confirm`, or `author_only` (the open decision) | `immediate` |
 | `WELCOME_TEXT` / `GROUP_GREETING_TEXT` | Message copy | provided |
 | `USER_AGENT` | WMF-compliant UA string | (required) |
+| `BOT_NAME` | Bot name used in greeting and edit summaries | `Blybot` |
+| `MAINTAINER` | Shown in `/help` as the operator | empty (omitted) |
+| `NEWCOMER_WELCOME` | `prompt` (R5 deep-link line on joins) or `off` | `prompt` |
+| `LOG_THROTTLE_PER_MINUTE` | N4 cap on `/log` per group and user | 6 |
+| `BUG_THROTTLE_PER_HOUR` | Cap on `/bug` reports per chat | 3 |
+| `WIKI_MAX_RETRIES` | Bounded attempts per wiki write | 5 |
+| `LOG_CLEANUP_SECONDS` | Delay before deleting the `/log` command (0 = keep) | 5 |
+| `REPLY_CLEANUP_SECONDS` | Delay before the bot deletes its own `/log` replies (0 = keep) | 15 |
+| `GITHUB_REPO` / `GITHUB_TOKEN` | `/bug` issue filing (token optional; absent = degrade to link) | `schiste/blybot` / empty |
 
 ---
 

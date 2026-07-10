@@ -244,7 +244,9 @@ class GroupHandlers:
     async def _schedule_cleanup(
         self, bot: Bot, chat_id: int, message_id: int, delay_seconds: float
     ) -> None:
-        if delay_seconds <= 0:
+        if delay_seconds < 0:  # cleanup disabled by configuration
+            return
+        if delay_seconds == 0:
             await self._delete_after(bot, chat_id, message_id, delay_seconds)
             return
         task = asyncio.get_running_loop().create_task(

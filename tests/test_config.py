@@ -131,6 +131,26 @@ def test_newcomer_welcome_defaults_on_and_can_be_switched_off() -> None:
         load_config(dict(REQUIRED) | {"NEWCOMER_WELCOME": "sometimes"})
 
 
+def test_cleanup_and_throttle_defaults() -> None:
+    config = load_config(dict(REQUIRED))
+    assert config.log_cleanup_seconds == 5.0
+    assert config.reply_cleanup_seconds == 15.0
+    assert config.bug_throttle_per_hour == 3
+    assert config.wiki_max_retries == 5
+
+
+def test_cleanup_zero_means_disabled_not_immediate() -> None:
+    config = load_config(dict(REQUIRED) | {"LOG_CLEANUP_SECONDS": "0"})
+    assert config.log_cleanup_seconds == -1.0  # sentinel: never delete
+
+
+def test_cleanup_rejects_negatives_and_junk() -> None:
+    with pytest.raises(ConfigurationError, match="REPLY_CLEANUP_SECONDS"):
+        load_config(dict(REQUIRED) | {"REPLY_CLEANUP_SECONDS": "-3"})
+    with pytest.raises(ConfigurationError, match="LOG_CLEANUP_SECONDS"):
+        load_config(dict(REQUIRED) | {"LOG_CLEANUP_SECONDS": "soon"})
+
+
 def test_github_settings_default_to_public_repo_and_no_token() -> None:
     config = load_config(dict(REQUIRED))
     assert config.github_repo == "schiste/blybot"

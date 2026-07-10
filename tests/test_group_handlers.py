@@ -286,3 +286,10 @@ async def test_command_cleanup_runs_as_a_background_task_when_delayed() -> None:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
     assert not handlers._cleanup_tasks  # done-callback pruned the registry
+
+
+async def test_cleanup_can_be_disabled_entirely() -> None:
+    handlers, _, _ = make_handlers(cleanup_delay_seconds=-1, reply_cleanup_delay_seconds=-1)
+    context, bot = tg.make_context()
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+    bot.delete_message.assert_not_awaited()

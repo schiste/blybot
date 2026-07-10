@@ -42,6 +42,7 @@ def main() -> int:
         username=config.wiki_username,
         botpassword=config.wiki_botpassword,
         user_agent=config.user_agent,
+        max_attempts=config.wiki_max_retries,
         counters=counters,
     )
     pseudonyms = RandomPseudonymFactory()
@@ -81,6 +82,8 @@ def main() -> int:
         log_page_url=config.page_url(config.log_target_page),
         maintainer=config.maintainer,
         newcomer_welcome_enabled=config.newcomer_welcome_enabled,
+        cleanup_delay_seconds=config.log_cleanup_seconds,
+        reply_cleanup_delay_seconds=config.reply_cleanup_seconds,
     )
     tracker = (
         GitHubIssueTracker(
@@ -100,7 +103,9 @@ def main() -> int:
         maintainer=config.maintainer,
         issues_url=f"https://github.com/{config.github_repo}/issues",
         feedback=FeedbackService(tracker) if tracker else None,
-        bug_limiter=SlidingWindowLimiter(clock=clock, limit=3, window=timedelta(hours=1)),
+        bug_limiter=SlidingWindowLimiter(
+            clock=clock, limit=config.bug_throttle_per_hour, window=timedelta(hours=1)
+        ),
     )
 
     run_polling(

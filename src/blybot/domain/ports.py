@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from blybot.domain.models import GroupProfile, Pseudonym
+from blybot.domain.models import GroupProfile, Pseudonym, RepoSummary
 
 
 class WikiWriteError(Exception):
@@ -79,6 +79,22 @@ class TokenVault(Protocol):
 
     async def delete_token(self, chat_id: int) -> None:
         """Discard the group's token."""
+        ...
+
+
+class RepoGateway(Protocol):
+    """Talks to a group-bound repository with the group's own token."""
+
+    async def validate_token(self, repo: str, token: str) -> bool:
+        """Whether the token can see the repo and write its issues."""
+        ...
+
+    async def open_issue(self, repo: str, token: str, title: str, body: str) -> str:
+        """Create an issue in the bound repo; return its public URL."""
+        ...
+
+    async def open_summary(self, repo: str, token: str) -> RepoSummary:
+        """Return a small open-items summary of the bound repo."""
         ...
 
 

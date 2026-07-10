@@ -64,6 +64,15 @@ class GroupProfile:
 
 
 @dataclass(frozen=True, slots=True)
+class RepoSummary:
+    """A glance at a bound repository for the group's /repo command."""
+
+    repo: str
+    open_count: int
+    recent_titles: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class Pseudonym:
     """A per-session anonymous handle, minted from a CSPRNG (spec R6, section 10)."""
 

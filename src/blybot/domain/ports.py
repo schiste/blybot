@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from blybot.domain.models import GroupProfile, Pseudonym, RepoEvent, RepoSummary
+from blybot.domain.models import GroupProfile, Pseudonym, RepoEvent, RepoSummary, Resource
 
 
 class WikiWriteError(Exception):
@@ -113,6 +113,17 @@ class RepoGateway(Protocol):
         A ``None`` cursor is a baseline poll: it returns no events and
         a cursor at the current head, so binding a repo never replays
         its history into the chat.
+        """
+        ...
+
+    async def poll_resource(
+        self, repo: str, token: str, resource: Resource, cursor: str | None
+    ) -> tuple[list[RepoEvent], str]:
+        """Return enriched events from one resource stream, plus a new cursor.
+
+        The cursor is an ISO-8601 ``updated_at`` watermark. A falsy
+        cursor baselines: the watermark advances to the newest item but
+        no events are emitted, so enabling a rule never replays history.
         """
         ...
 

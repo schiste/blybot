@@ -110,14 +110,9 @@ def format_event(event: RepoEvent) -> str:
 _EVENT_LABELS: Final = {
     EventType.ISSUE_OPENED: "Issue opened",
     EventType.ISSUE_CLOSED: "Issue closed",
-    EventType.ISSUE_REOPENED: "Issue reopened",
-    EventType.ISSUE_LABELED: "Issue labeled",
-    EventType.ISSUE_ASSIGNED: "Issue assigned",
-    EventType.ISSUE_MILESTONED: "Issue milestoned",
     EventType.PR_OPENED: "PR opened",
     EventType.PR_CLOSED: "PR closed",
     EventType.PR_MERGED: "PR merged",
-    EventType.PR_READY: "PR ready for review",
     EventType.COMMENT: "Comment",
     EventType.RELEASE: "Release",
 }

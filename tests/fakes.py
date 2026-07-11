@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import GroupProfile, Pseudonym, RepoEvent, RepoSummary
+from blybot.domain.models import GroupProfile, Pseudonym, RepoEvent, RepoSummary, Resource
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 
 
@@ -233,3 +233,15 @@ class FakeRepoGateway:
         if cursor is None:
             return [], "etag|1"
         return list(self.events), self.next_cursor
+
+    async def poll_resource(
+        self, repo: str, token: str, resource: Resource, cursor: str | None
+    ) -> tuple[list[RepoEvent], str]:
+        del repo
+        if self.fail or token not in self.valid_tokens:
+            raise IssueTrackerError
+        next_cursor = f"{resource.value}|next"
+        if cursor is None:  # baseline: advance the cursor, emit nothing
+            return [], next_cursor
+        wanted = [event for event in self.events if event.event_type.resource is resource]
+        return wanted, next_cursor

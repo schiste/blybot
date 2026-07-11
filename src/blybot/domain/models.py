@@ -46,19 +46,23 @@ class EventType(Enum):
     """A specific repository happening a rule can trigger on.
 
     ``value`` is the user-facing ``family.action`` token; ``resource``
-    is the stream the poller reads to observe it.
+    is the stream the poller reads to observe it. Every member here is
+    reliably detectable from a resource's REST list endpoint by
+    comparing item timestamps against the poll watermark.
+
+    Fine-grained issue actions (reopened, labeled, assigned,
+    milestoned) and ``pr.ready`` are deliberately absent: they are only
+    reliably observable via the issue-events *timeline* API, a heavier
+    per-resource source planned as a later enrichment (see the rules
+    plan's deferred list). Their conditions are still expressible as
+    *filters* — e.g. ``issue.opened label:bug`` — on the triggers below.
     """
 
     ISSUE_OPENED = ("issue.opened", Resource.ISSUES)
     ISSUE_CLOSED = ("issue.closed", Resource.ISSUES)
-    ISSUE_REOPENED = ("issue.reopened", Resource.ISSUES)
-    ISSUE_LABELED = ("issue.labeled", Resource.ISSUES)
-    ISSUE_ASSIGNED = ("issue.assigned", Resource.ISSUES)
-    ISSUE_MILESTONED = ("issue.milestoned", Resource.ISSUES)
     PR_OPENED = ("pr.opened", Resource.PULLS)
     PR_CLOSED = ("pr.closed", Resource.PULLS)
     PR_MERGED = ("pr.merged", Resource.PULLS)
-    PR_READY = ("pr.ready", Resource.PULLS)
     COMMENT = ("comment", Resource.ISSUE_COMMENTS)
     RELEASE = ("release", Resource.RELEASES)
 

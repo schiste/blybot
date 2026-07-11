@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import DeliveryMode
-from blybot.domain.ports import IssueTrackerError, StorageError
+from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 from blybot.services.rules import format_event, resources_for
 
@@ -54,21 +54,24 @@ class RepoNotifier:
         for profile in profiles:
             if not self.groups.is_allowed(profile.chat_id):
                 continue  # never push into groups the operator excluded
-            messages.extend(await self._for_scope(profile))
+            try:
+                messages.extend(await self._for_scope(profile))
+            except Exception:
+                # Per-scope isolation boundary: a broken repo, missing
+                # token, storage hiccup, or even a bad stored regex in one
+                # scope's rules must not abort the whole tick (docstring
+                # contract). Deliberately broad.
+                log_event("repo_poll", "error")
         return messages
 
     async def _for_scope(self, profile: GroupProfile) -> list[tuple[int, int, str]]:
         if not profile.repo or not profile.rules:
             return []
         repo = profile.repo
-        try:
-            token = await self.vault.fetch_token(profile.chat_id, profile.thread_id)
-            if not token:
-                return []
-            events = await self._poll(profile, repo, token)
-        except (StorageError, IssueTrackerError):
-            log_event("repo_poll", "error")
+        token = await self.vault.fetch_token(profile.chat_id, profile.thread_id)
+        if not token:
             return []
+        events = await self._poll(profile, repo, token)
         return self._deliver(profile, repo, events)
 
     async def _poll(self, profile: GroupProfile, repo: str, token: str) -> list[RepoEvent]:

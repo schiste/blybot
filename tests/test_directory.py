@@ -132,6 +132,22 @@ async def test_remove_and_clear_on_an_empty_scope_are_no_ops() -> None:
     assert await directory.clear_rules(CHAT, 0) == 0
 
 
+async def test_enable_events_seeds_atomically_and_does_not_reseed() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    await directory.set_repo(CHAT, 0, "org/repo")
+    seed = (parse_rule("pr.merged digest"), parse_rule("release digest"))
+
+    assert await directory.enable_events(CHAT, 0, seed) is True  # seeded
+    profile = store.profiles[CHAT, 0]
+    assert profile.events_enabled
+    assert profile.rules == seed
+
+    # Enabling again keeps the (possibly edited) rules — never reseeds.
+    assert await directory.enable_events(CHAT, 0, seed) is False
+    assert store.profiles[CHAT, 0].rules == seed
+
+
 async def test_add_rule_appends_and_preserves_other_fields() -> None:
     store = InMemoryProfiles()
     directory = make_directory(store)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from blybot.domain.models import EventType, GroupProfile, RepoEvent, Resource, Rule
+from blybot.domain.models import EventType, GroupProfile, RepoEvent, Resource, Rule, RuleFilter
 from blybot.observability import Counters
 from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy
@@ -117,6 +117,24 @@ async def test_one_broken_scope_never_blocks_the_others() -> None:
     await enable(store, chat_id=-2)
     ((chat_id, _thread, _text),) = await make_notifier(store, gateway).collect()
     assert chat_id == -2
+
+
+async def test_a_bad_stored_regex_in_one_scope_never_blocks_the_others() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
+    gateway.events = [RELEASE]
+    # A corrupt/hand-edited stored rule with an invalid regex (bypasses the
+    # parser). Matching it raises re.error deep inside _deliver.
+    bad = Rule(
+        rule_id="bad",
+        trigger=EventType.RELEASE,
+        filter=RuleFilter(title_match="[", title_is_regex=True),
+    )
+    await store.upsert(GroupProfile(chat_id=-1, repo="x/y", events_enabled=True, rules=(bad,)))
+    await store.store_token(-1, 0, "ghp_ok")
+    await store.set_cursors(-1, 0, {r.value: "seed" for r in Resource}, "x/y")
+    await enable(store, chat_id=-2, specs=("release digest",))  # healthy scope
+    ((chat_id, _thread, _text),) = await make_notifier(store, gateway).collect()
+    assert chat_id == -2  # the broken scope was isolated, the healthy one delivered
 
 
 async def test_storage_outage_yields_nothing() -> None:

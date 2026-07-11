@@ -288,13 +288,10 @@ class AdminHandlers:
             # A topic that only inherits the group repo can't get its own
             # notifications — the notifier polls per bound-repo row.
             return REPLY_EVENTS_NEED_REPO
-        await self.directory.set_events(chat_id, thread_id, enabled=True)
+        seed = tuple(parse_rule(spec) for spec in DEFAULT_RULES)
+        seeded = await self.directory.enable_events(chat_id, thread_id, seed)
         log_event("profile_update", "ok")
-        if own.rules:
-            return REPLY_EVENTS_SET.format(state="on")
-        for spec in DEFAULT_RULES:
-            await self.directory.add_rule(chat_id, thread_id, parse_rule(spec))
-        return REPLY_EVENTS_SEEDED
+        return REPLY_EVENTS_SEEDED if seeded else REPLY_EVENTS_SET.format(state="on")
 
     async def on_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or clear this (group, topic)'s composable event rules."""

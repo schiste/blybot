@@ -143,6 +143,22 @@ class ChannelDirectory:
         """Switch this (group, topic)'s rule-driven notifications on or off."""
         await self._update(chat_id, thread_id, events_enabled=enabled)
 
+    async def enable_events(
+        self, chat_id: int, thread_id: int, seed_rules: tuple[Rule, ...]
+    ) -> bool:
+        """Enable notifications, seeding ``seed_rules`` iff none exist yet.
+
+        Enabling and seeding are one atomic upsert, so a storage failure
+        can never strand a scope events-enabled with a half-written
+        default ruleset. Returns whether the seed rules were applied.
+        """
+        store = self._require_store()
+        current = await self._profile(store, chat_id, thread_id)
+        seeded = not current.rules
+        rules = seed_rules if seeded else current.rules
+        await store.upsert(replace(current, events_enabled=True, rules=rules))
+        return seeded
+
     async def add_rule(self, chat_id: int, thread_id: int, rule: Rule) -> tuple[Rule, ...]:
         """Append a composable event rule to this (group, topic).
 

@@ -66,6 +66,7 @@ def test_draft_and_assignee_and_milestone() -> None:
     assert RuleFilter(draft=False).matches(event())
     assert not RuleFilter(draft=True).matches(event())
     assert RuleFilter(assignee="maintainer").matches(event())
+    assert RuleFilter(assignee="Maintainer").matches(event())  # case-insensitive both sides
     assert not RuleFilter(assignee="someone").matches(event())
     assert RuleFilter(milestone="V2").matches(event())  # case-insensitive
     assert not RuleFilter(milestone="v3").matches(event())

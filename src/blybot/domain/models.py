@@ -159,7 +159,10 @@ class RuleFilter:
             and (not self.base or self.base == event.base_branch)
             and self._title_ok(event)
             and (self.draft is None or self.draft == event.draft)
-            and (not self.assignee or self.assignee in {a.casefold() for a in event.assignees})
+            and (
+                not self.assignee
+                or self.assignee.casefold() in {a.casefold() for a in event.assignees}
+            )
             and (not self.milestone or self.milestone.casefold() == event.milestone.casefold())
         )
 

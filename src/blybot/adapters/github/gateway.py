@@ -9,12 +9,15 @@ never cached here.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
 from blybot.domain.models import EventType, RepoEvent, RepoSummary, Resource
 from blybot.domain.ports import IssueTrackerError
+from blybot.observability import log_event
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,6 +27,7 @@ _OK: Final = 200
 _CREATED: Final = 201
 _RECENT: Final = 3
 _PER_PAGE: Final = 50
+_PAGE_CAP: Final = 10  # at most 500 items/resource/poll for `since`-less streams
 _TITLE_CAP: Final = 120
 
 
@@ -98,34 +102,80 @@ class GitHubRepoGateway:
         """Return enriched events from one resource stream, plus a new cursor.
 
         The cursor is an ISO-8601 ``updated_at`` watermark. A falsy
-        cursor baselines: it advances the watermark to the newest item
-        seen but emits nothing, so enabling a rule never replays
-        history. Each item yields zero or more events (e.g. a PR both
-        opened and merged in one window fires both); an event fires only
-        when its own transition timestamp is newer than the watermark.
+        cursor baselines: it stamps the watermark at the server's current
+        time and emits nothing, so enabling a rule never replays history
+        yet the first event *after* enabling still fires (even on a
+        stream that was empty at enable time). Each item yields zero or
+        more events (a PR both opened and merged in one window fires
+        both); an event fires only when its own transition timestamp is
+        newer than the watermark.
+
+        Streams without a ``since`` parameter (pulls, releases) are
+        paginated up to :data:`_PAGE_CAP`; a saturated fetch is logged as
+        a possible gap rather than silently dropping events.
         """
         spec = _SPECS[resource]
         watermark = cursor or ""
+        items, server_now, saturated = await self._fetch_pages(repo, token, spec, watermark)
+        if not watermark:  # baseline: stamp "now", never replay history
+            return [], server_now
         try:
-            response = await self._client.get(
-                f"{_API}/repos/{repo}/{spec.path}",
-                headers=_auth(token),
-                params=spec.params(watermark),
-            )
-        except httpx.HTTPError as error:
-            msg = "could not reach GitHub"
-            raise IssueTrackerError(msg) from error
-        if response.status_code != _OK:
-            msg = f"{resource.value} poll failed: HTTP {response.status_code}"
-            raise IssueTrackerError(msg)
-        try:
-            fired, new_watermark = _collect(spec, response.json(), watermark)
+            fired, new_watermark = _collect(spec, items, watermark)
         except (KeyError, ValueError, TypeError, AttributeError) as error:
             # One malformed item must degrade this poll, not kill it.
             msg = f"malformed {resource.value} payload"
             raise IssueTrackerError(msg) from error
+        if saturated:
+            log_event("repo_poll", "ignored", pages=_PAGE_CAP)
         fired.sort(key=lambda pair: pair[0])  # oldest transition first
         return [event for _, event in fired], new_watermark
+
+    async def _fetch_pages(
+        self, repo: str, token: str, spec: _ResourceSpec, watermark: str
+    ) -> tuple[list[dict[str, Any]], str, bool]:
+        """Fetch pages until drained or capped; return (items, server_now, saturated).
+
+        Stops early on a short page, or — for a stream ordered by its own
+        watermark (pulls) — once a page ends at or before the watermark.
+        ``saturated`` means the page cap was hit with full pages, i.e. a
+        possible gap.
+        """
+        items: list[dict[str, Any]] = []
+        server_now = watermark
+        saturated = False
+        for page in range(1, _PAGE_CAP + 1):
+            try:
+                response = await self._client.get(
+                    f"{_API}/repos/{repo}/{spec.path}",
+                    headers=_auth(token),
+                    params={**spec.params(watermark), "page": page},
+                )
+            except httpx.HTTPError as error:
+                msg = "could not reach GitHub"
+                raise IssueTrackerError(msg) from error
+            if response.status_code != _OK:
+                msg = f"{spec.path} poll failed: HTTP {response.status_code}"
+                raise IssueTrackerError(msg)
+            if page == 1:
+                server_now = _server_time(response) or watermark
+            try:
+                batch = response.json()
+                items.extend(batch)
+                short = len(batch) < _PER_PAGE
+                past = bool(
+                    spec.self_ordered
+                    and watermark
+                    and batch
+                    and spec.watermark(batch[-1]) <= watermark
+                )
+            except (KeyError, ValueError, TypeError, AttributeError) as error:
+                msg = f"malformed {spec.path} payload"
+                raise IssueTrackerError(msg) from error
+            if short or past:
+                break
+        else:
+            saturated = True
+        return items, server_now, saturated
 
     async def aclose(self) -> None:
         """Release the underlying HTTP client."""
@@ -140,6 +190,22 @@ def _clip(title: str) -> str:
     return title[:_TITLE_CAP] + ("…" if len(title) > _TITLE_CAP else "")
 
 
+def _server_time(response: httpx.Response) -> str:
+    """The response ``Date`` header as an ISO-8601 UTC ``Z`` string, or ``""``.
+
+    Used as the baseline watermark so the first event after enabling
+    fires even when the stream was empty at enable time.
+    """
+    raw = response.headers.get("Date")
+    if not raw:
+        return ""
+    try:
+        moment = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return ""
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 @dataclass(frozen=True, slots=True)
 class _ResourceSpec:
     """How to fetch and normalize one GitHub resource stream."""
@@ -150,6 +216,9 @@ class _ResourceSpec:
     watermark: Callable[[dict[str, Any]], str]
     # (transition timestamp, event) pairs an item yields.
     events: Callable[[dict[str, Any]], list[tuple[str, RepoEvent]]]
+    # Whether the stream is server-ordered by its own watermark field
+    # (desc), so pagination can stop once a page ends at/under it.
+    self_ordered: bool = False
 
 
 def _collect(
@@ -157,16 +226,13 @@ def _collect(
 ) -> tuple[list[tuple[str, RepoEvent]], str]:
     """Advance the watermark over ``items`` and gather events past it.
 
-    A falsy incoming watermark is a baseline: the watermark still moves
-    to the newest item, but no events are emitted (no history replay).
+    Called only for a non-baseline poll (a truthy ``watermark``); the
+    baseline is handled by the caller so no history is replayed.
     """
     new_watermark = watermark
     fired: list[tuple[str, RepoEvent]] = []
     for item in items:
-        mark = spec.watermark(item)
-        new_watermark = max(new_watermark, mark)
-        if not watermark:
-            continue  # baseline poll
+        new_watermark = max(new_watermark, spec.watermark(item))
         fired.extend((ts, event) for ts, event in spec.events(item) if ts > watermark)
     return fired, new_watermark
 
@@ -289,10 +355,11 @@ _SPECS: Final = {
         events=lambda item: [] if item.get("pull_request") else _issue_events(item),
     ),
     Resource.PULLS: _ResourceSpec(
-        path="pulls",  # /pulls has no `since` param
+        path="pulls",  # /pulls has no `since` param; paginate, ordered by updated desc
         params=_recent_page,
         watermark=lambda item: str(item.get("updated_at") or ""),
         events=_pull_events,
+        self_ordered=True,
     ),
     Resource.ISSUE_COMMENTS: _ResourceSpec(
         path="issues/comments",

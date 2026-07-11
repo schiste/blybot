@@ -31,24 +31,32 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
    **Group Privacy is enabled** (`/mybots` → Bot Settings) — R1 depends
    on it. Recommended `/setcommands`:
 
+   Each description is tagged with where the command is used —
+   `[group]`, `[private]`, or `[both]`:
+
    ```
-   log - Reply to a message with this to publish it anonymously
-   help - How the bot works and which commands exist
-   flush - Discard your pseudonym and get a fresh, unlinkable one
-   whoami - Show which pseudonym you currently appear as
-   privacy - What the bot collects, publishes, and stores
-   bug - File an anonymous bug report with the maintainer
-   issue - File an anonymous issue in this group's bound repo
-   repo - Show the bound repository's open items
-   setup - (admins) how to configure the bot for this group
-   setpage - (admins) where /log publishes (under <path>/Telegram logs)
-   setconsent - (admins) who may /log whose messages
-   setrepo - (admins) bind a GitHub repository
-   events - (admins) repo digests on/off/kinds
-   settings - (admins) current group configuration
-   revoke - (admins) discard this group's stored token
-   reset - (admins) forget this group's configuration
+   log - [group] Reply to a message with this to publish it anonymously
+   help - [both] How the bot works and which commands exist
+   flush - [private] Discard your pseudonym and get a fresh, unlinkable one
+   whoami - [private] Show which pseudonym you currently appear as
+   privacy - [private] What the bot collects, publishes, and stores
+   bug - [private] File an anonymous bug report with the maintainer
+   issue - [both] Private: bug to maintainer; group: file in the bound repo
+   repo - [group] Show the bound repository's open items
+   setup - [group] (admins) how to configure the bot for this group
+   setpage - [group] (admins) where /log publishes (under <path>/Telegram logs)
+   setconsent - [group] (admins) who may /log whose messages
+   setrepo - [group] (admins) bind a GitHub repository
+   events - [group] (admins) repo digests on/off/kinds
+   settings - [group] (admins) current group configuration
+   revoke - [group] (admins) discard this group's stored token
+   reset - [group] (admins) forget this group's configuration
    ```
+
+   Telegram also supports true per-scope command menus (`setMyCommands`
+   with a scope) if you'd rather admins only see group commands in
+   groups and DM commands in private; the tags above are the simpler
+   single-list approach.
 
 2. **Wiki** — target page(s) for `LOG_TARGET_PAGE` / `DM_TARGET_BASE`
    (may be the same page). The on-wiki account and BotPassword can be

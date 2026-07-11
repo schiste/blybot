@@ -17,8 +17,8 @@ def make_binding(clock: FakeClock) -> TokenBinding:
 
 def test_links_are_one_time() -> None:
     binding = make_binding(FakeClock())
-    nonce = binding.mint_link(GROUP)
-    assert binding.redeem_link(nonce) == GROUP
+    nonce = binding.mint_link(GROUP, 0)
+    assert binding.redeem_link(nonce) == (GROUP, 0)
     assert binding.redeem_link(nonce) is None  # consumed
     assert binding.redeem_link("bogus") is None
 
@@ -26,36 +26,36 @@ def test_links_are_one_time() -> None:
 def test_links_expire() -> None:
     clock = FakeClock()
     binding = make_binding(clock)
-    nonce = binding.mint_link(GROUP)
+    nonce = binding.mint_link(GROUP, 0)
     clock.advance(timedelta(minutes=11))
     assert binding.redeem_link(nonce) is None
 
 
 def test_entries_peek_until_closed() -> None:
     binding = make_binding(FakeClock())
-    binding.open_entry(DM, GROUP)
-    assert binding.pending_group(DM) == GROUP
-    assert binding.pending_group(DM) == GROUP  # peeking does not consume
+    binding.open_entry(DM, GROUP, 0)
+    assert binding.pending_target(DM) == (GROUP, 0)
+    assert binding.pending_target(DM) == (GROUP, 0)  # peeking does not consume
     binding.close_entry(DM)
-    assert binding.pending_group(DM) is None
+    assert binding.pending_target(DM) is None
     binding.close_entry(DM)  # idempotent
 
 
 def test_entries_expire() -> None:
     clock = FakeClock()
     binding = make_binding(clock)
-    binding.open_entry(DM, GROUP)
+    binding.open_entry(DM, GROUP, 0)
     clock.advance(timedelta(minutes=6))
-    assert binding.pending_group(DM) is None
+    assert binding.pending_target(DM) is None
 
 
 def test_minting_prunes_stale_state() -> None:
     clock = FakeClock()
     binding = make_binding(clock)
-    stale = binding.mint_link(GROUP)
-    binding.open_entry(DM, GROUP)
+    stale = binding.mint_link(GROUP, 0)
+    binding.open_entry(DM, GROUP, 0)
     clock.advance(timedelta(hours=1))
-    binding.mint_link(GROUP)  # triggers pruning
+    binding.mint_link(GROUP, 0)  # triggers pruning
     assert stale not in binding._links
     assert DM not in binding._entries
 
@@ -63,9 +63,9 @@ def test_minting_prunes_stale_state() -> None:
 def test_peek_respects_ttl_and_unknown_nonces() -> None:
     clock = FakeClock()
     binding = make_binding(clock)
-    nonce = binding.mint_link(GROUP)
-    assert binding.peek_link(nonce) == GROUP
-    assert binding.peek_link(nonce) == GROUP  # peeking never consumes
+    nonce = binding.mint_link(GROUP, 0)
+    assert binding.peek_link(nonce) == (GROUP, 0)
+    assert binding.peek_link(nonce) == (GROUP, 0)  # peeking never consumes
     assert binding.peek_link("bogus") is None
     clock.advance(timedelta(minutes=11))
     assert binding.peek_link(nonce) is None

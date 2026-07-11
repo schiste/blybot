@@ -33,13 +33,13 @@ class FakeToolsDb:
     """Interprets the store's exact query constants against a dict."""
 
     def __init__(self) -> None:
-        self.tables: dict[int, dict[str, Any]] = {}
+        self.tables: dict[tuple[int, int], dict[str, Any]] = {}
         self.fail = False
         self.schema_created = False
 
-    def _row(self, chat_id: int) -> dict[str, Any]:
+    def _row(self, key: tuple[int, int]) -> dict[str, Any]:
         return self.tables.setdefault(
-            chat_id,
+            key,
             {
                 "log_page": None,
                 "repo": None,
@@ -51,10 +51,12 @@ class FakeToolsDb:
             },
         )
 
-    def _as_profile_row(self, chat_id: int) -> tuple[Any, ...]:
-        row = self.tables[chat_id]
+    def _as_profile_row(self, key: tuple[int, int]) -> tuple[Any, ...]:
+        chat_id, thread_id = key
+        row = self.tables[key]
         return (
             chat_id,
+            thread_id,
             row["log_page"],
             row["repo"],
             row["consent_mode"],
@@ -71,8 +73,8 @@ class FakeToolsDb:
             self.schema_created = True
             return []
         if query == Q_UPSERT:
-            chat_id, log_page, repo, consent, events_enabled, kinds = params
-            row = self._row(chat_id)
+            chat_id, thread_id, log_page, repo, consent, events_enabled, kinds = params
+            row = self._row((chat_id, thread_id))
             row.update(
                 log_page=log_page,
                 repo=repo,
@@ -82,41 +84,42 @@ class FakeToolsDb:
             )
             return []
         if query == Q_GET:
-            (chat_id,) = params
-            return [self._as_profile_row(chat_id)] if chat_id in self.tables else []
+            key = (params[0], params[1])
+            return [self._as_profile_row(key)] if key in self.tables else []
         if query == Q_LIST_EVENT_ENABLED:
             return [
-                self._as_profile_row(chat_id)
-                for chat_id, row in self.tables.items()
+                self._as_profile_row(key)
+                for key, row in self.tables.items()
                 if row["events_enabled"]
             ]
         if query == Q_DELETE:
-            self.tables.pop(params[0], None)
+            self.tables.pop((params[0], params[1]), None)
             return []
         if query == Q_GET_CURSOR:
-            (chat_id,) = params
-            return [(self.tables[chat_id]["cursor"],)] if chat_id in self.tables else []
+            key = (params[0], params[1])
+            return [(self.tables[key]["cursor"],)] if key in self.tables else []
         if query == Q_SET_CURSOR:
-            cursor, chat_id, repo = params
-            if chat_id in self.tables and self.tables[chat_id]["repo"] == repo:
-                self.tables[chat_id]["cursor"] = cursor
+            cursor, chat_id, thread_id, repo = params
+            key = (chat_id, thread_id)
+            if key in self.tables and self.tables[key]["repo"] == repo:
+                self.tables[key]["cursor"] = cursor
             return []
         if query == Q_MIGRATE:
             new_id, old_id = params
-            if old_id in self.tables and new_id not in self.tables:
-                self.tables[new_id] = self.tables.pop(old_id)
+            for chat_id, thread_id in [k for k in self.tables if k[0] == old_id]:
+                self.tables[new_id, thread_id] = self.tables.pop((chat_id, thread_id))
             return []
         if query == Q_VAULT_WRITE:
-            chat_id, ciphertext = params
-            self._row(chat_id)["token"] = bytes(ciphertext)
+            chat_id, thread_id, ciphertext = params
+            self._row((chat_id, thread_id))["token"] = bytes(ciphertext)
             return []
         if query == Q_VAULT_READ:
-            (chat_id,) = params
-            return [(self.tables[chat_id]["token"],)] if chat_id in self.tables else []
+            key = (params[0], params[1])
+            return [(self.tables[key]["token"],)] if key in self.tables else []
         if query == Q_VAULT_CLEAR:
-            (chat_id,) = params
-            if chat_id in self.tables:
-                self.tables[chat_id]["token"] = None
+            key = (params[0], params[1])
+            if key in self.tables:
+                self.tables[key]["token"] = None
             return []
         pytest.fail(f"unexpected query: {query}")
 
@@ -145,20 +148,20 @@ async def test_bootstrap_creates_the_schema() -> None:
 async def test_profile_roundtrip() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    loaded = await store.get(-100500)
+    loaded = await store.get(-100500, 0)
     assert loaded == PROFILE
 
 
 async def test_missing_profile_reads_as_none() -> None:
     store, _ = make_store()
-    assert await store.get(-1) is None
+    assert await store.get(-1, 0) is None
 
 
 async def test_delete_forgets_the_group() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    await store.delete(-100500)
-    assert await store.get(-100500) is None
+    await store.delete(-100500, 0)
+    assert await store.get(-100500, 0) is None
 
 
 async def test_list_event_enabled_filters() -> None:
@@ -173,20 +176,20 @@ async def test_list_event_enabled_filters() -> None:
 async def test_cursor_roundtrip_and_default() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    assert await store.get_cursor(-100500) is None
-    await store.set_cursor(-100500, 'W/"etag123"', PROFILE.repo or "")
-    assert await store.get_cursor(-100500) == 'W/"etag123"'
+    assert await store.get_cursor(-100500, 0) is None
+    await store.set_cursor(-100500, 0, 'W/"etag123"', PROFILE.repo or "")
+    assert await store.get_cursor(-100500, 0) == 'W/"etag123"'
 
 
 async def test_tokens_are_encrypted_at_rest_and_roundtrip() -> None:
     store, fake = make_store()
-    await store.store_token(-100500, "ghp_secret")
+    await store.store_token(-100500, 0, "ghp_secret")
 
-    stored = fake.tables[-100500]["token"]
+    stored = fake.tables[-100500, 0]["token"]
     assert b"ghp_secret" not in stored  # ciphertext only in the database
-    assert await store.fetch_token(-100500) == "ghp_secret"
+    assert await store.fetch_token(-100500, 0) == "ghp_secret"
 
-    profile = await store.get(-100500)
+    profile = await store.get(-100500, 0)
     assert profile is not None
     assert profile.has_token
 
@@ -194,27 +197,27 @@ async def test_tokens_are_encrypted_at_rest_and_roundtrip() -> None:
 async def test_upsert_preserves_token_and_cursor() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)  # the row must carry the repo the cursor is for
-    await store.store_token(-100500, "ghp_secret")
-    await store.set_cursor(-100500, "etag", "schiste/blybot")
+    await store.store_token(-100500, 0, "ghp_secret")
+    await store.set_cursor(-100500, 0, "etag", "schiste/blybot")
     await store.upsert(PROFILE)
-    assert await store.fetch_token(-100500) == "ghp_secret"
-    assert await store.get_cursor(-100500) == "etag"
+    assert await store.fetch_token(-100500, 0) == "ghp_secret"
+    assert await store.get_cursor(-100500, 0) == "etag"
 
 
 async def test_token_absent_reads_as_none() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    assert await store.fetch_token(-100500) is None
-    assert await store.fetch_token(-999) is None
+    assert await store.fetch_token(-100500, 0) is None
+    assert await store.fetch_token(-999, 0) is None
 
 
 async def test_delete_token_only_clears_the_token() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    await store.store_token(-100500, "ghp_secret")
-    await store.delete_token(-100500)
-    assert await store.fetch_token(-100500) is None
-    assert await store.get(-100500) == PROFILE
+    await store.store_token(-100500, 0, "ghp_secret")
+    await store.delete_token(-100500, 0)
+    assert await store.fetch_token(-100500, 0) is None
+    assert await store.get(-100500, 0) == PROFILE
 
 
 async def test_rotated_key_reads_as_no_token_and_logs(
@@ -222,10 +225,10 @@ async def test_rotated_key_reads_as_no_token_and_logs(
 ) -> None:
     fake = FakeToolsDb()
     old = ToolsDbStore(runner=fake, fernet_key=Fernet.generate_key().decode())
-    await old.store_token(-1, "ghp_secret")
+    await old.store_token(-1, 0, "ghp_secret")
     rotated = ToolsDbStore(runner=fake, fernet_key=Fernet.generate_key().decode())
     with caplog.at_level(logging.INFO, logger="blybot"):
-        assert await rotated.fetch_token(-1) is None
+        assert await rotated.fetch_token(-1, 0) is None
     assert any("token_vault" in message for message in caplog.messages)
 
 
@@ -233,7 +236,7 @@ async def test_database_failure_raises_storage_error() -> None:
     store, fake = make_store()
     fake.fail = True
     with pytest.raises(StorageError):
-        await store.get(-1)
+        await store.get(-1, 0)
 
 
 def test_pymysql_runner_connects_with_cnf_credentials(
@@ -287,15 +290,15 @@ async def test_cursor_writes_are_repo_guarded() -> None:
     """An in-flight cursor for the OLD binding never lands on a new one."""
     store, _ = make_store()
     await store.upsert(PROFILE)
-    await store.set_cursor(-100500, "stale", "some/other")  # repo mismatch
-    assert await store.get_cursor(-100500) is None
+    await store.set_cursor(-100500, 0, "stale", "some/other")  # repo mismatch
+    assert await store.get_cursor(-100500, 0) is None
 
 
 async def test_migrate_rekeys_the_profile() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
     await store.migrate(-100500, -200600)
-    assert await store.get(-100500) is None
-    migrated = await store.get(-200600)
+    assert await store.get(-100500, 0) is None
+    migrated = await store.get(-200600, 0)
     assert migrated is not None
     assert migrated.repo == PROFILE.repo

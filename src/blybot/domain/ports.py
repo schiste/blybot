@@ -37,28 +37,28 @@ class StorageError(Exception):
 class ProfileStore(Protocol):
     """Persists per-group self-service profiles (spec 11: ToolsDB)."""
 
-    async def get(self, chat_id: int) -> GroupProfile | None:
-        """Return the group's profile, or ``None`` if it never configured one."""
+    async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
+        """Return the (group, topic) profile, or ``None`` if unconfigured."""
         ...
 
     async def upsert(self, profile: GroupProfile) -> None:
         """Create or update the profile (token and cursor are untouched)."""
         ...
 
-    async def delete(self, chat_id: int) -> None:
-        """Forget everything about the group, including its token and cursor."""
+    async def delete(self, chat_id: int, thread_id: int) -> None:
+        """Forget everything about the (group, topic), token and cursor included."""
         ...
 
     async def list_event_enabled(self) -> list[GroupProfile]:
         """Return every profile with repo notifications switched on."""
         ...
 
-    async def get_cursor(self, chat_id: int) -> str | None:
-        """Return the group's event-poll cursor (ETag), if any."""
+    async def get_cursor(self, chat_id: int, thread_id: int) -> str | None:
+        """Return the (group, topic) event-poll cursor (ETag), if any."""
         ...
 
-    async def set_cursor(self, chat_id: int, cursor: str, repo: str) -> None:
-        """Persist the cursor iff the group is still bound to ``repo``.
+    async def set_cursor(self, chat_id: int, thread_id: int, cursor: str, repo: str) -> None:
+        """Persist the cursor iff the profile is still bound to ``repo``.
 
         The repo guard keeps an in-flight poll from stamping a stale
         cursor onto a profile that was reset/rebound meanwhile.
@@ -66,7 +66,7 @@ class ProfileStore(Protocol):
         ...
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
-        """Re-key a profile after a group→supergroup upgrade."""
+        """Re-key every topic of a group after a group→supergroup upgrade."""
         ...
 
 
@@ -77,16 +77,16 @@ class TokenVault(Protocol):
     adapter's responsibility and ciphertext never leaves it.
     """
 
-    async def store_token(self, chat_id: int, token: str) -> None:
-        """Encrypt and persist the group's token."""
+    async def store_token(self, chat_id: int, thread_id: int, token: str) -> None:
+        """Encrypt and persist the (group, topic) token."""
         ...
 
-    async def fetch_token(self, chat_id: int) -> str | None:
-        """Decrypt and return the group's token, if one is stored."""
+    async def fetch_token(self, chat_id: int, thread_id: int) -> str | None:
+        """Decrypt and return the (group, topic) token, if one is stored."""
         ...
 
-    async def delete_token(self, chat_id: int) -> None:
-        """Discard the group's token."""
+    async def delete_token(self, chat_id: int, thread_id: int) -> None:
+        """Discard the (group, topic) token."""
         ...
 
 

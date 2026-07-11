@@ -28,7 +28,8 @@ if TYPE_CHECKING:
 
 SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS profiles (
-    chat_id BIGINT NOT NULL PRIMARY KEY,
+    chat_id BIGINT NOT NULL,
+    thread_id BIGINT NOT NULL DEFAULT 0,
     log_page VARCHAR(255) NULL,
     repo VARCHAR(140) NULL,
     consent_mode VARCHAR(16) NULL,
@@ -36,7 +37,8 @@ CREATE TABLE IF NOT EXISTS profiles (
     event_kinds VARCHAR(64) NOT NULL DEFAULT '',
     token_ciphertext BLOB NULL,
     event_cursor VARCHAR(128) NULL,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (chat_id, thread_id)
 )
 """
 
@@ -121,9 +123,9 @@ class ToolsDbStore:
         """Create the schema if absent (additive DDL is the migration story)."""
         await self._run(SCHEMA, ())
 
-    async def get(self, chat_id: int) -> GroupProfile | None:
-        """Return the group's profile, or ``None`` if it never configured one."""
-        rows = await self._run(Q_GET, (chat_id,))
+    async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
+        """Return the (group, topic) profile, or ``None`` if unconfigured."""
+        rows = await self._run(Q_GET, (chat_id, thread_id))
         return _profile_from_row(rows[0]) if rows else None
 
     async def upsert(self, profile: GroupProfile) -> None:
@@ -132,6 +134,7 @@ class ToolsDbStore:
             Q_UPSERT,
             (
                 profile.chat_id,
+                profile.thread_id,
                 profile.log_page,
                 profile.repo,
                 profile.consent_mode.value if profile.consent_mode else None,
@@ -140,41 +143,41 @@ class ToolsDbStore:
             ),
         )
 
-    async def delete(self, chat_id: int) -> None:
-        """Forget everything about the group, including its token and cursor."""
-        await self._run(Q_DELETE, (chat_id,))
+    async def delete(self, chat_id: int, thread_id: int) -> None:
+        """Forget everything about the (group, topic), token and cursor included."""
+        await self._run(Q_DELETE, (chat_id, thread_id))
 
     async def list_event_enabled(self) -> list[GroupProfile]:
         """Return every profile with repo notifications switched on."""
         rows = await self._run(Q_LIST_EVENT_ENABLED, ())
         return [_profile_from_row(row) for row in rows]
 
-    async def get_cursor(self, chat_id: int) -> str | None:
-        """Return the group's event-poll cursor (ETag), if any."""
-        rows = await self._run(Q_GET_CURSOR, (chat_id,))
+    async def get_cursor(self, chat_id: int, thread_id: int) -> str | None:
+        """Return the (group, topic) event-poll cursor (ETag), if any."""
+        rows = await self._run(Q_GET_CURSOR, (chat_id, thread_id))
         return rows[0][0] if rows and rows[0][0] else None
 
-    async def set_cursor(self, chat_id: int, cursor: str, repo: str) -> None:
-        """Persist the cursor iff the group is still bound to ``repo``."""
-        await self._run(Q_SET_CURSOR, (cursor, chat_id, repo))
+    async def set_cursor(self, chat_id: int, thread_id: int, cursor: str, repo: str) -> None:
+        """Persist the cursor iff the profile is still bound to ``repo``."""
+        await self._run(Q_SET_CURSOR, (cursor, chat_id, thread_id, repo))
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
         """Re-key a profile after a group→supergroup upgrade."""
         await self._run(Q_MIGRATE, (new_chat_id, old_chat_id))
 
-    async def store_token(self, chat_id: int, token: str) -> None:
-        """Encrypt and persist the group's token."""
+    async def store_token(self, chat_id: int, thread_id: int, token: str) -> None:
+        """Encrypt and persist the (group, topic) token."""
         ciphertext = self._fernet.encrypt(token.encode())
-        await self._run(Q_VAULT_WRITE, (chat_id, ciphertext))
+        await self._run(Q_VAULT_WRITE, (chat_id, thread_id, ciphertext))
 
-    async def fetch_token(self, chat_id: int) -> str | None:
-        """Decrypt and return the group's token, if one is stored.
+    async def fetch_token(self, chat_id: int, thread_id: int) -> str | None:
+        """Decrypt and return the (group, topic) token, if one is stored.
 
         An undecryptable ciphertext (rotated key) reads as "no token"
-        and is logged — the group simply re-binds — rather than
+        and is logged — the profile simply re-binds — rather than
         crashing every feature that consults the vault.
         """
-        rows = await self._run(Q_VAULT_READ, (chat_id,))
+        rows = await self._run(Q_VAULT_READ, (chat_id, thread_id))
         if not rows or rows[0][0] is None:
             return None
         try:
@@ -183,9 +186,9 @@ class ToolsDbStore:
             log_event("token_vault", "error")
             return None
 
-    async def delete_token(self, chat_id: int) -> None:
-        """Discard the group's token."""
-        await self._run(Q_VAULT_CLEAR, (chat_id,))
+    async def delete_token(self, chat_id: int, thread_id: int) -> None:
+        """Discard the (group, topic) token."""
+        await self._run(Q_VAULT_CLEAR, (chat_id, thread_id))
 
     async def _run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         try:
@@ -197,9 +200,10 @@ class ToolsDbStore:
 
 
 def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
-    (chat_id, log_page, repo, consent, events_enabled, event_kinds, has_token) = row
+    (chat_id, thread_id, log_page, repo, consent, events_enabled, event_kinds, has_token) = row
     return GroupProfile(
         chat_id=int(chat_id),
+        thread_id=int(thread_id),
         log_page=log_page,
         repo=repo,
         consent_mode=ConsentMode(consent) if consent else None,

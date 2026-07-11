@@ -114,11 +114,11 @@ class SequentialPseudonyms:
 
 @dataclass
 class InMemoryProfiles:
-    """ProfileStore + TokenVault over plain dicts, with a failure switch."""
+    """ProfileStore + TokenVault keyed by (chat_id, thread_id)."""
 
-    profiles: dict[int, GroupProfile] = field(default_factory=dict)
-    tokens: dict[int, str] = field(default_factory=dict)
-    cursors: dict[int, str] = field(default_factory=dict)
+    profiles: dict[tuple[int, int], GroupProfile] = field(default_factory=dict)
+    tokens: dict[tuple[int, int], str] = field(default_factory=dict)
+    cursors: dict[tuple[int, int], str] = field(default_factory=dict)
     fail: bool = False
     fail_token_writes: bool = False
     fail_token_reads: bool = False
@@ -127,67 +127,70 @@ class InMemoryProfiles:
         if self.fail:
             raise StorageError
 
-    async def get(self, chat_id: int) -> GroupProfile | None:
+    async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
         self._check()
-        profile = self.profiles.get(chat_id)
+        key = (chat_id, thread_id)
+        profile = self.profiles.get(key)
         if profile is None:
             return None
-        return replace(profile, has_token=chat_id in self.tokens)
+        return replace(profile, has_token=key in self.tokens)
 
     async def upsert(self, profile: GroupProfile) -> None:
         self._check()
-        self.profiles[profile.chat_id] = profile
+        self.profiles[profile.chat_id, profile.thread_id] = profile
 
-    async def delete(self, chat_id: int) -> None:
+    async def delete(self, chat_id: int, thread_id: int) -> None:
         self._check()
-        self.profiles.pop(chat_id, None)
-        self.tokens.pop(chat_id, None)
-        self.cursors.pop(chat_id, None)
+        key = (chat_id, thread_id)
+        self.profiles.pop(key, None)
+        self.tokens.pop(key, None)
+        self.cursors.pop(key, None)
 
     async def list_event_enabled(self) -> list[GroupProfile]:
         self._check()
         return [
-            replace(profile, has_token=chat_id in self.tokens)
-            for chat_id, profile in self.profiles.items()
+            replace(profile, has_token=key in self.tokens)
+            for key, profile in self.profiles.items()
             if profile.events_enabled
         ]
 
-    async def get_cursor(self, chat_id: int) -> str | None:
+    async def get_cursor(self, chat_id: int, thread_id: int) -> str | None:
         self._check()
-        return self.cursors.get(chat_id)
+        return self.cursors.get((chat_id, thread_id))
 
-    async def set_cursor(self, chat_id: int, cursor: str, repo: str = "") -> None:
+    async def set_cursor(self, chat_id: int, thread_id: int, cursor: str, repo: str = "") -> None:
         self._check()
-        profile = self.profiles.get(chat_id)
+        key = (chat_id, thread_id)
+        profile = self.profiles.get(key)
         if repo and (profile is None or profile.repo != repo):
             return  # repo guard: stale in-flight cursor writes are dropped
-        self.cursors[chat_id] = cursor
+        self.cursors[key] = cursor
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
         self._check()
-        if old_chat_id in self.profiles:
-            profile = self.profiles.pop(old_chat_id)
-            self.profiles[new_chat_id] = replace(profile, chat_id=new_chat_id)
-        if old_chat_id in self.tokens:
-            self.tokens[new_chat_id] = self.tokens.pop(old_chat_id)
-        if old_chat_id in self.cursors:
-            self.cursors[new_chat_id] = self.cursors.pop(old_chat_id)
+        for mapping in (self.profiles, self.tokens, self.cursors):
+            for chat_id, thread_id in list(mapping):
+                if chat_id == old_chat_id:
+                    value = mapping.pop((chat_id, thread_id))
+                    if isinstance(value, GroupProfile):
+                        value = replace(value, chat_id=new_chat_id)
+                    mapping[new_chat_id, thread_id] = value  # type: ignore[assignment]
 
-    async def store_token(self, chat_id: int, token: str) -> None:
+    async def store_token(self, chat_id: int, thread_id: int, token: str) -> None:
         self._check()
         if self.fail_token_writes:
             raise StorageError
-        self.tokens[chat_id] = token
+        self.tokens[chat_id, thread_id] = token
 
-    async def fetch_token(self, chat_id: int) -> str | None:
+    async def fetch_token(self, chat_id: int, thread_id: int) -> str | None:
         self._check()
         if self.fail_token_reads:
             raise StorageError
-        return self.tokens.get(chat_id)
+        return self.tokens.get((chat_id, thread_id))
 
-    async def delete_token(self, chat_id: int) -> None:
+    async def delete_token(self, chat_id: int, thread_id: int) -> None:
         self._check()
-        self.tokens.pop(chat_id, None)
+        self.tokens.pop((chat_id, thread_id), None)
 
 
 @dataclass

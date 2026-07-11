@@ -136,10 +136,11 @@ async def test_setpage_stores_and_links_the_page() -> None:
     context, bot = admin_context(args=["WikiProject", "Ours"])
     await handlers.on_setpage(command("/setpage WikiProject Ours"), context)
 
-    assert store.profiles[tg.GROUP.id].log_page == "WikiProject Ours/Telegram logs"
+    assert store.profiles[tg.GROUP.id, 0].log_page == "WikiProject Ours/Telegram logs"
     (sent,) = tg.sent_texts(bot)
     assert sent == a.REPLY_PAGE_SET.format(
-        url="https://meta.wikimedia.org/wiki/WikiProject_Ours/Telegram_logs"
+        url="https://meta.wikimedia.org/wiki/WikiProject_Ours/Telegram_logs",
+        scope="the group default",
     )
 
 
@@ -176,7 +177,7 @@ async def test_setconsent_stores_the_policy() -> None:
     handlers = make_handlers(store)
     context, bot = admin_context(args=["author_only"])
     await handlers.on_setconsent(command("/setconsent author_only"), context)
-    assert store.profiles[tg.GROUP.id].consent_mode is ConsentMode.AUTHOR_ONLY
+    assert store.profiles[tg.GROUP.id, 0].consent_mode is ConsentMode.AUTHOR_ONLY
     assert tg.sent_texts(bot) == [a.REPLY_CONSENT_SET.format(mode="author_only")]
 
 
@@ -202,7 +203,7 @@ async def test_settings_shows_defaults_then_customization() -> None:
     assert "(all defaults)" in tg.sent_texts(bot)[0]
     assert "Next_25/Telegram_logs" in tg.sent_texts(bot)[0]
 
-    await handlers.directory.set_log_page(tg.GROUP.id, "WikiProject Ours")
+    await handlers.directory.set_log_page(tg.GROUP.id, 0, "WikiProject Ours")
     await handlers.on_settings(command("/settings"), context)
     latest = tg.sent_texts(bot)[-1]
     assert "(all defaults)" not in latest
@@ -213,10 +214,10 @@ async def test_reset_returns_the_group_to_defaults() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
     context, bot = admin_context()
-    await handlers.directory.set_log_page(tg.GROUP.id, "WikiProject Ours")
+    await handlers.directory.set_log_page(tg.GROUP.id, 0, "WikiProject Ours")
     await handlers.on_reset(command("/reset"), context)
     assert store.profiles == {}
-    assert tg.sent_texts(bot)[-1] == a.REPLY_RESET
+    assert tg.sent_texts(bot)[-1] == a.REPLY_RESET.format(scope="the group default")
 
 
 async def test_reset_reports_storage_outage() -> None:
@@ -232,7 +233,7 @@ async def test_setrepo_binds_and_mints_a_deep_link() -> None:
     context, bot = admin_context(args=["wikimedia/mediawiki"])
     await handlers.on_setrepo(command("/setrepo wikimedia/mediawiki"), context)
 
-    assert store.profiles[tg.GROUP.id].repo == "wikimedia/mediawiki"
+    assert store.profiles[tg.GROUP.id, 0].repo == "wikimedia/mediawiki"
     (sent,) = tg.sent_texts(bot)
     assert "https://t.me/blybot_bot?start=cfg_" in sent
     assert "fine-grained" in sent
@@ -256,7 +257,7 @@ async def test_setrepo_reports_storage_outage() -> None:
 async def test_revoke_discards_the_token() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    await store.store_token(tg.GROUP.id, "ghp_x")
+    await store.store_token(tg.GROUP.id, 0, "ghp_x")
     context, bot = admin_context()
     await handlers.on_revoke(command("/revoke"), context)
     assert store.tokens == {}
@@ -283,7 +284,7 @@ async def test_events_on_uses_default_kinds() -> None:
     handlers = make_handlers(store)
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)
-    profile = store.profiles[tg.GROUP.id]
+    profile = store.profiles[tg.GROUP.id, 0]
     assert profile.events_enabled
     assert profile.event_kinds == a.DEFAULT_EVENT_KINDS
     assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SET.format(state="prs, releases")]
@@ -294,13 +295,13 @@ async def test_events_accepts_explicit_kinds_and_off() -> None:
     handlers = make_handlers(store)
     context, _ = admin_context(args=["releases,issues"])
     await handlers.on_events(command("/events releases,issues"), context)
-    assert store.profiles[tg.GROUP.id].event_kinds == frozenset(
+    assert store.profiles[tg.GROUP.id, 0].event_kinds == frozenset(
         {EventKind.RELEASES, EventKind.ISSUES}
     )
 
     context, bot = admin_context(args=["off"])
     await handlers.on_events(command("/events off"), context)
-    assert not store.profiles[tg.GROUP.id].events_enabled
+    assert not store.profiles[tg.GROUP.id, 0].events_enabled
     assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SET.format(state="off")]
 
 
@@ -321,7 +322,7 @@ async def test_setrepo_discards_any_previous_token() -> None:
     """A token consented for repo A must never be replayed against repo B."""
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    await store.store_token(tg.GROUP.id, "ghp_for_old_repo")
+    await store.store_token(tg.GROUP.id, 0, "ghp_for_old_repo")
     context, _ = admin_context(args=["new/repo"])
     await handlers.on_setrepo(command("/setrepo new/repo"), context)
     assert store.tokens == {}
@@ -333,5 +334,5 @@ async def test_setrepo_without_a_vault_still_binds() -> None:
     handlers.vault = None
     context, bot = admin_context(args=["x/y"])
     await handlers.on_setrepo(command("/setrepo x/y"), context)
-    assert store.profiles[tg.GROUP.id].repo == "x/y"
+    assert store.profiles[tg.GROUP.id, 0].repo == "x/y"
     assert "cfg_" in tg.sent_texts(bot)[0]

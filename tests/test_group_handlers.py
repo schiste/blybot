@@ -335,7 +335,7 @@ async def test_consent_policy_is_resolved_per_group() -> None:
 
 async def test_log_publishes_to_the_group_configured_page() -> None:
     handlers, publisher, _ = make_handlers()
-    await handlers.directory.set_log_page(tg.GROUP.id, "WikiProject Ours")
+    await handlers.directory.set_log_page(tg.GROUP.id, 0, "WikiProject Ours")
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
 
@@ -347,8 +347,8 @@ async def test_log_publishes_to_the_group_configured_page() -> None:
 async def bind_repo(
     handlers: h.GroupHandlers, store: InMemoryProfiles, gateway: FakeRepoGateway
 ) -> None:
-    await handlers.directory.set_repo(tg.GROUP.id, "wikimedia/mediawiki")
-    await store.store_token(tg.GROUP.id, "ghp_group")
+    await handlers.directory.set_repo(tg.GROUP.id, 0, "wikimedia/mediawiki")
+    await store.store_token(tg.GROUP.id, 0, "ghp_group")
     gateway.valid_tokens.add("ghp_group")
 
 
@@ -381,7 +381,7 @@ async def test_issue_without_binding_or_token_explains_what_is_missing() -> None
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
     assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
 
-    await handlers.directory.set_repo(tg.GROUP.id, "x/y")  # bound, but no token
+    await handlers.directory.set_repo(tg.GROUP.id, 0, "x/y")  # bound, but no token
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
     assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
@@ -457,12 +457,12 @@ async def test_repo_without_binding_or_service_explains() -> None:
 async def test_repo_reports_missing_token_and_failures() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway()
     handlers, _, _ = make_handlers(store=store, gateway=gateway)
-    await handlers.directory.set_repo(tg.GROUP.id, "x/y")
+    await handlers.directory.set_repo(tg.GROUP.id, 0, "x/y")
     context, bot = tg.make_context()
     await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
     assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
 
-    await store.store_token(tg.GROUP.id, "ghp_group")
+    await store.store_token(tg.GROUP.id, 0, "ghp_group")
     gateway.valid_tokens.add("ghp_group")
     gateway.fail = True
     context, bot = tg.make_context()
@@ -515,7 +515,7 @@ async def test_group_help_hides_self_service_when_disabled() -> None:
 async def test_migration_carries_the_stored_profile() -> None:
     store = InMemoryProfiles()
     handlers, _, policy = make_handlers(allowed={tg.GROUP.id}, store=store)
-    await handlers.directory.set_log_page(tg.GROUP.id, "WikiProject Ours")
+    await handlers.directory.set_log_page(tg.GROUP.id, 0, "WikiProject Ours")
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)

@@ -36,7 +36,7 @@ REPLY_SELF_SERVICE_OFF: Final = (
     "Self-service configuration isn't enabled on this deployment; ask the operator."
 )
 REPLY_STORAGE_DOWN: Final = "Configuration is temporarily unavailable — please try again later."
-REPLY_PAGE_SET: Final = "Done. This group's /log now publishes to {url}"
+REPLY_PAGE_SET: Final = "Done. /log for {scope} now publishes to {url}"
 REPLY_PAGE_REFUSED: Final = (
     "That page path isn't valid — give a plain project or user page, "
     'e.g. /setpage WikiProject Foo (I add the "/{suffix}" leaf myself).'
@@ -46,13 +46,13 @@ REPLY_SETPAGE_USAGE: Final = (
 )
 REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode}"
 REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
-REPLY_RESET: Final = "Forgotten. This group is back on the operator defaults."
+REPLY_RESET: Final = "Forgotten. {scope} is back on the inherited defaults."
 REPLY_SETREPO_USAGE: Final = "Usage: /setrepo owner/repository"
 REPLY_REPO_BOUND: Final = (
-    "Repo bound: {repo} (any previously stored token was discarded). To "
-    "enable /issue and /repo here, an admin must give me a GitHub token "
-    "privately — tap {link} (valid 10 minutes). Use a fine-grained PAT "
-    "restricted to {repo} with Issues read/write only."
+    "Repo bound for {scope}: {repo} (any previously stored token was "
+    "discarded). To enable /issue and /repo here, an admin must give me a "
+    "GitHub token privately — tap {link} (valid 10 minutes). Use a "
+    "fine-grained PAT restricted to {repo} with Issues read/write only."
 )
 REPLY_PAT_REVOKED: Final = "Token discarded. /issue and /repo are disabled for this group."
 REPLY_EVENTS_USAGE: Final = "Usage: /events on | off | <kinds> — kinds from: releases, prs, issues"
@@ -60,6 +60,7 @@ REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
 DEFAULT_EVENT_KINDS: Final = frozenset({EventKind.RELEASES, EventKind.PRS})
 SETUP_TEXT: Final = (
     "I'm configurable by this group's admins, right here:\n\n"
+    "(run a command IN a topic to set that topic; in General for the group)\n\n"
     "/setpage <page path> — where /log publishes (under <path>/{suffix})\n"
     "/setconsent immediate|author_only — who may /log whose messages\n"
     "/setrepo owner/repo — bind a GitHub repo (then /issue, /repo)\n"
@@ -71,7 +72,7 @@ SETUP_TEXT: Final = (
     "where it currently lands."
 )
 SETTINGS_TEMPLATE: Final = (
-    "Current configuration{customized}:\n"
+    "Configuration for {scope}{customized}:\n"
     "- /log publishes to: {log_page}\n"
     "- consent policy: {consent}\n"
     "- GitHub repo: {repo}\n"
@@ -92,6 +93,16 @@ async def is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     return member.status in _ADMIN_STATUSES
 
 
+def _thread_of(update: Update) -> int:
+    """The forum topic the command was sent in; 0 for General/non-forum."""
+    message = update.effective_message
+    return (message.message_thread_id or 0) if message else 0
+
+
+def _scope(thread_id: int) -> str:
+    return "this topic" if thread_id else "the group default"
+
+
 @dataclass(eq=False)
 class AdminHandlers:
     """Handlers for the group configuration commands."""
@@ -105,125 +116,136 @@ class AdminHandlers:
 
     async def on_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain the self-service commands to an admin."""
-        chat = await self._admin_chat(update, context)
-        if chat is not None:
+        resolved = await self._admin_chat(update, context)
+        if resolved is not None:
+            chat, thread_id = resolved
             text = SETUP_TEXT.format(suffix=self.directory.page_suffix or "<disabled>")
-            await context.bot.send_message(chat_id=chat.id, text=text)
+            await self._reply(context, chat.id, thread_id, text)
 
     async def on_setpage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Point this group's /log at a page under the allowed prefix."""
-        chat = await self._admin_chat(update, context)
-        if chat is None:
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
             return
+        chat, thread_id = resolved
         title = " ".join(context.args or ()).strip()
         if not title:
             usage = REPLY_SETPAGE_USAGE.format(suffix=self.directory.page_suffix)
-            await context.bot.send_message(chat_id=chat.id, text=usage)
+            await self._reply(context, chat.id, thread_id, usage)
             return
         try:
-            normalized = await self.directory.set_log_page(chat.id, title)
+            normalized = await self.directory.set_log_page(chat.id, thread_id, title)
         except PageNotAllowedError:
             refused = REPLY_PAGE_REFUSED.format(suffix=self.directory.page_suffix)
-            await context.bot.send_message(chat_id=chat.id, text=refused)
+            await self._reply(context, chat.id, thread_id, refused)
             return
         except SelfServiceUnavailableError:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_SELF_SERVICE_OFF)
+            await self._reply(context, chat.id, thread_id, REPLY_SELF_SERVICE_OFF)
             return
         except StorageError:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
             return
         self.counters.increment("profiles_configured")
         log_event("profile_update", "ok")
-        confirmation = REPLY_PAGE_SET.format(url=self.page_url_for(normalized))
-        await context.bot.send_message(chat_id=chat.id, text=confirmation)
+        confirmation = REPLY_PAGE_SET.format(
+            url=self.page_url_for(normalized), scope=_scope(thread_id)
+        )
+        await self._reply(context, chat.id, thread_id, confirmation)
 
     async def on_setconsent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Set this group's consent policy for /log."""
-        chat = await self._admin_chat(update, context)
-        if chat is None:
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
             return
+        chat, thread_id = resolved
         argument = (context.args or [""])[0]
         if argument not in {ConsentMode.IMMEDIATE.value, ConsentMode.AUTHOR_ONLY.value}:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_CONSENT_USAGE)
+            await self._reply(context, chat.id, thread_id, REPLY_CONSENT_USAGE)
             return
         try:
             await self.directory.set_consent(chat.id, ConsentMode(argument))
         except StorageError:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("profile_update", "ok")
-        await context.bot.send_message(
-            chat_id=chat.id, text=REPLY_CONSENT_SET.format(mode=argument)
-        )
+        await self._reply(context, chat.id, thread_id, REPLY_CONSENT_SET.format(mode=argument))
 
     async def on_setrepo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Bind this group to a GitHub repository and start the token flow."""
-        chat = await self._admin_chat(update, context)
-        if chat is None:
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
             return
+        chat, thread_id = resolved
         repo = ((context.args or [""])[0]).strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or ".." in repo:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_SETREPO_USAGE)
+            await self._reply(context, chat.id, thread_id, REPLY_SETREPO_USAGE)
             return
         try:
-            await self.directory.set_repo(chat.id, repo)
+            await self.directory.set_repo(chat.id, thread_id, repo)
             if self.vault is not None:
                 # A token consented for the previous repo must never be
                 # replayed against the new one.
-                await self.vault.delete_token(chat.id)
+                await self.vault.delete_token(chat.id, thread_id)
         except StorageError:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("profile_update", "ok")
-        nonce = self.binding.mint_link(chat.id)
+        nonce = self.binding.mint_link(chat.id, thread_id)
         link = f"https://t.me/{context.bot.username}?start=cfg_{nonce}"
-        await context.bot.send_message(
-            chat_id=chat.id, text=REPLY_REPO_BOUND.format(repo=repo, link=link)
+        await self._reply(
+            context,
+            chat.id,
+            thread_id,
+            REPLY_REPO_BOUND.format(repo=repo, link=link, scope=_scope(thread_id)),
         )
 
     async def on_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Discard this group's stored API token."""
-        chat = await self._admin_chat(update, context)
-        if chat is None:
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
             return
+        chat, thread_id = resolved
         if self.vault is None:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_SELF_SERVICE_OFF)
+            await self._reply(context, chat.id, thread_id, REPLY_SELF_SERVICE_OFF)
             return
         try:
-            await self.vault.delete_token(chat.id)
+            await self.vault.delete_token(chat.id, thread_id)
         except StorageError:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("token_revoked", "ok")
-        await context.bot.send_message(chat_id=chat.id, text=REPLY_PAT_REVOKED)
+        await self._reply(context, chat.id, thread_id, REPLY_PAT_REVOKED)
 
     async def on_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch this group's repo-notification digests on, off, or by kind."""
-        chat = await self._admin_chat(update, context)
-        if chat is None:
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
             return
+        chat, thread_id = resolved
         arguments = [word for arg in (context.args or ()) for word in arg.split(",") if word]
         parsed = _parse_events(arguments)
         if parsed is None:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_EVENTS_USAGE)
+            await self._reply(context, chat.id, thread_id, REPLY_EVENTS_USAGE)
             return
         enabled, kinds = parsed
         try:
-            await self.directory.set_events(chat.id, enabled=enabled, kinds=kinds)
+            await self.directory.set_events(chat.id, thread_id, enabled=enabled, kinds=kinds)
         except StorageError:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("profile_update", "ok")
         state = ", ".join(sorted(kind.value for kind in kinds)) if enabled else "off"
-        await context.bot.send_message(chat_id=chat.id, text=REPLY_EVENTS_SET.format(state=state))
+        await self._reply(context, chat.id, thread_id, REPLY_EVENTS_SET.format(state=state))
 
     async def on_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show this group's effective configuration."""
-        chat = await self._admin_chat(update, context)
-        if chat is None:
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
             return
-        settings = await self.directory.resolve(chat.id)
+        chat, thread_id = resolved
+        settings = await self.directory.resolve(chat.id, thread_id)
         text = SETTINGS_TEMPLATE.format(
+            scope=_scope(thread_id),
             customized="" if settings.customized else " (all defaults)",
             log_page=self.page_url_for(settings.log_page),
             consent=settings.consent_mode.value,
@@ -235,23 +257,34 @@ class AdminHandlers:
                 else "off"
             ),
         )
-        await context.bot.send_message(chat_id=chat.id, text=text)
+        await self._reply(context, chat.id, thread_id, text)
 
     async def on_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Forget this group's profile entirely."""
-        chat = await self._admin_chat(update, context)
-        if chat is None:
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
             return
+        chat, thread_id = resolved
         try:
-            await self.directory.reset(chat.id)
+            await self.directory.reset(chat.id, thread_id)
         except StorageError:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_STORAGE_DOWN)
+            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("profile_reset", "ok")
-        await context.bot.send_message(chat_id=chat.id, text=REPLY_RESET)
+        await self._reply(context, chat.id, thread_id, REPLY_RESET.format(scope=_scope(thread_id)))
 
-    async def _admin_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> Chat | None:
-        """Return the group chat when the sender is one of its admins."""
+    @staticmethod
+    async def _reply(
+        context: ContextTypes.DEFAULT_TYPE, chat_id: int, thread_id: int, text: str
+    ) -> None:
+        await context.bot.send_message(
+            chat_id=chat_id, text=text, message_thread_id=thread_id or None
+        )
+
+    async def _admin_chat(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> tuple[Chat, int] | None:
+        """Return (group chat, topic) when the sender is one of its admins."""
         chat = update.effective_chat
         message = update.effective_message
         if chat is None or message is None or chat.type not in _GROUP_TYPES:
@@ -263,11 +296,12 @@ class AdminHandlers:
             # round-trip) — group /help doesn't advertise these commands.
             log_event("admin_command", "ignored")
             return None
+        thread_id = _thread_of(update)
         user = message.from_user
         if user is None or not await is_group_admin(context.bot, chat.id, user.id):
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_NOT_ADMIN)
+            await self._reply(context, chat.id, thread_id, REPLY_NOT_ADMIN)
             return None
-        return chat
+        return chat, thread_id
 
 
 def _parse_events(arguments: list[str]) -> tuple[bool, frozenset[EventKind]] | None:

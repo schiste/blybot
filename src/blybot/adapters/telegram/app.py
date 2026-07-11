@@ -125,9 +125,11 @@ async def repo_notify_loop(bot: Bot, notifier: RepoNotifier, interval_seconds: f
         except Exception:
             log_event("repo_poll", "error")
             continue
-        for chat_id, digest in digests:
+        for chat_id, thread_id, digest in digests:
             try:
-                await bot.send_message(chat_id=chat_id, text=digest)
+                await bot.send_message(
+                    chat_id=chat_id, text=digest, message_thread_id=thread_id or None
+                )
             except TelegramError:
                 # Kicked from the group, muted, etc. — that group's
                 # digest is lost, everyone else's still goes out.

@@ -43,6 +43,7 @@ def message(
     text: str | None = None,
     from_user: User | None = ALICE,
     reply_to: Message | None = None,
+    thread_id: int | None = None,
     **extra: Any,
 ) -> Message:
     return Message(
@@ -52,8 +53,17 @@ def message(
         from_user=from_user,
         text=text,
         reply_to_message=reply_to,
+        message_thread_id=thread_id,
         **extra,
     )
+
+
+def sent_calls(bot: AsyncMock) -> list[tuple[str, int | None]]:
+    """(text, message_thread_id) for each send — for topic-routing asserts."""
+    return [
+        (call.kwargs["text"], call.kwargs.get("message_thread_id"))
+        for call in bot.send_message.await_args_list
+    ]
 
 
 def command_update(command_message: Message) -> Update:

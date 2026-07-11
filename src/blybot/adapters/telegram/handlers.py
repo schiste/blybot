@@ -182,6 +182,12 @@ def _just_joined(change: ChatMemberUpdated) -> bool:
     )
 
 
+def _thread_of(update: Update) -> int:
+    """The forum topic the message was sent in; 0 for General/non-forum."""
+    message = update.effective_message
+    return (message.message_thread_id or 0) if message else 0
+
+
 def _repo_error_reply(error: Exception) -> str:
     """One place mapping repo-service failures to user-facing replies."""
     if isinstance(error, NoRepoBoundError):
@@ -244,6 +250,7 @@ class GroupHandlers:
         await self._schedule_cleanup(
             context.bot, chat.id, message.message_id, self.cleanup_delay_seconds
         )
+        thread_id = _thread_of(update)
 
         async def reply(text: str) -> None:
             sent = await context.bot.send_message(chat_id=chat.id, text=text)
@@ -255,7 +262,7 @@ class GroupHandlers:
         if target is None:
             await reply(REPLY_USAGE)
             return
-        settings = await self.directory.resolve(chat.id)
+        settings = await self.directory.resolve(chat.id, thread_id)
         if settings.degraded:
             # Fail closed: the group's consent policy and target page are
             # unknown right now; publishing on defaults could violate both.
@@ -320,9 +327,12 @@ class GroupHandlers:
         chat = self._served_group(update)
         if chat is None:
             return
+        thread_id = _thread_of(update)
 
         async def reply(text: str) -> None:
-            await context.bot.send_message(chat_id=chat.id, text=text)
+            await context.bot.send_message(
+                chat_id=chat.id, text=text, message_thread_id=thread_id or None
+            )
 
         description = " ".join(context.args or ()).strip()
         if not description:
@@ -335,7 +345,7 @@ class GroupHandlers:
             await reply(REPLY_THROTTLED)
             return
         try:
-            url = await self.repo_service.file_issue(chat.id, description)
+            url = await self.repo_service.file_issue(chat.id, thread_id, description)
         except (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError) as error:
             await reply(_repo_error_reply(error))
         else:
@@ -348,9 +358,12 @@ class GroupHandlers:
         chat = self._served_group(update)
         if chat is None:
             return
+        thread_id = _thread_of(update)
 
         async def reply(text: str) -> None:
-            await context.bot.send_message(chat_id=chat.id, text=text)
+            await context.bot.send_message(
+                chat_id=chat.id, text=text, message_thread_id=thread_id or None
+            )
 
         if self.repo_service is None:
             await reply(REPLY_ISSUE_DISABLED)
@@ -359,7 +372,7 @@ class GroupHandlers:
             await reply(REPLY_THROTTLED)
             return
         try:
-            summary = await self.repo_service.summary(chat.id)
+            summary = await self.repo_service.summary(chat.id, thread_id)
         except (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError) as error:
             await reply(_repo_error_reply(error))
         else:
@@ -383,13 +396,16 @@ class GroupHandlers:
         chat = update.effective_chat
         if chat is None or chat.type not in _GROUP_TYPES or not self.groups.is_allowed(chat.id):
             return
-        settings = await self.directory.resolve(chat.id)
+        thread_id = _thread_of(update)
+        settings = await self.directory.resolve(chat.id, thread_id)
         page_url = self.page_url_for(settings.log_page)
         text = HELP_GROUP
         if self.directory.self_service_enabled:
             text += HELP_GROUP_SELF_SERVICE
         text += _help_footer(page_url, self.maintainer)
-        await context.bot.send_message(chat_id=chat.id, text=text)
+        await context.bot.send_message(
+            chat_id=chat.id, text=text, message_thread_id=thread_id or None
+        )
 
     async def _schedule_cleanup(
         self, bot: Bot, chat_id: int, message_id: int, delay_seconds: float
@@ -485,12 +501,13 @@ class PrivateHandlers:
         async def reply(text: str) -> None:
             await context.bot.send_message(chat_id=dm_chat_id, text=text)
 
-        group_chat_id = self.binding.peek_link(nonce)
+        target = self.binding.peek_link(nonce)
         message = update.effective_message
         user = message.from_user if message else None
-        if group_chat_id is None:
+        if target is None:
             await reply(REPLY_LINK_EXPIRED)
             return
+        group_chat_id, thread_id = target
         if user is None or not await is_group_admin(context.bot, group_chat_id, user.id):
             # Deliberately NOT consumed: a non-admin tapping the public
             # link must not burn it for the real admin.
@@ -499,11 +516,11 @@ class PrivateHandlers:
         if self.binding.redeem_link(nonce) is None:  # consumed in a race
             await reply(REPLY_LINK_EXPIRED)
             return
-        settings = await self.directory.resolve(group_chat_id)
+        settings = await self.directory.resolve(group_chat_id, thread_id)
         if not settings.repo:
             await reply(REPLY_PAT_NO_REPO)
             return
-        self.binding.open_entry(dm_chat_id, group_chat_id)
+        self.binding.open_entry(dm_chat_id, group_chat_id, thread_id)
         log_event("token_entry_opened", "ok")
         await reply(REPLY_PAT_PROMPT.format(repo=settings.repo))
 
@@ -586,8 +603,8 @@ class PrivateHandlers:
             return
         # An armed token entry claims the next message BEFORE anything
         # can transcribe it: a pasted secret must never reach the wiki.
-        pending_group = self.binding.pending_group(chat.id)
-        if pending_group is not None:
+        pending = self.binding.pending_target(chat.id)
+        if pending is not None:
             # Remove the pasted secret from the chat first — bots may
             # delete messages in private chats, so don't rely on the
             # admin remembering to.
@@ -595,7 +612,7 @@ class PrivateHandlers:
                 await context.bot.delete_message(chat_id=chat.id, message_id=message.message_id)
             except TelegramError:
                 log_event("command_cleanup", "ignored")
-            await self._accept_token(context, chat.id, pending_group, message.text)
+            await self._accept_token(context, chat.id, pending, message.text)
             return
         is_new_session = self.sessions.peek(chat.id) is None
         try:
@@ -610,8 +627,14 @@ class PrivateHandlers:
             await context.bot.send_message(chat_id=chat.id, text=notice)
 
     async def _accept_token(
-        self, context: ContextTypes.DEFAULT_TYPE, dm_chat_id: int, group_chat_id: int, text: str
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        dm_chat_id: int,
+        target: tuple[int, int],
+        text: str,
     ) -> None:
+        group_chat_id, thread_id = target
+
         async def reply(reply_text: str) -> None:
             await context.bot.send_message(chat_id=dm_chat_id, text=reply_text)
 
@@ -619,7 +642,7 @@ class PrivateHandlers:
             self.binding.close_entry(dm_chat_id)
             await reply(REPLY_PAT_NO_REPO)
             return
-        settings = await self.directory.resolve(group_chat_id)
+        settings = await self.directory.resolve(group_chat_id, thread_id)
         if not settings.repo:
             self.binding.close_entry(dm_chat_id)
             await reply(REPLY_PAT_NO_REPO)
@@ -629,7 +652,7 @@ class PrivateHandlers:
             await reply(REPLY_PAT_INVALID)  # entry stays armed for a retry
             return
         try:
-            await self.vault.store_token(group_chat_id, token)
+            await self.vault.store_token(group_chat_id, thread_id, token)
         except StorageError:
             await reply(REPLY_PAT_STORE_FAILED)  # entry stays armed
             return

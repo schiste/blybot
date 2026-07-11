@@ -48,7 +48,7 @@ async def test_unconfigured_group_resolves_to_defaults() -> None:
 async def test_profile_fields_override_defaults_individually() -> None:
     store = InMemoryProfiles()
     directory = make_directory(store)
-    await directory.set_log_page(CHAT, "WikiProject Ours")
+    await directory.set_log_page(CHAT, 0, "WikiProject Ours")
     settings = await directory.resolve(CHAT)
     assert settings.log_page == "WikiProject Ours/Telegram logs"
     assert settings.consent_mode is ConsentMode.IMMEDIATE  # unset field: default
@@ -64,16 +64,16 @@ async def test_set_consent_is_per_group() -> None:
 
 async def test_setpage_appends_the_suffix_and_normalizes() -> None:
     directory = make_directory(InMemoryProfiles())
-    assert await directory.set_log_page(CHAT, "WikiProject_Med") == (
+    assert await directory.set_log_page(CHAT, 0, "WikiProject_Med") == (
         "WikiProject Med/Telegram logs"
     )
     # Any base path is adaptable: userspace, project space, whatever fits.
-    assert await directory.set_log_page(CHAT, "User:Foo") == "User:Foo/Telegram logs"
+    assert await directory.set_log_page(CHAT, 0, "User:Foo") == "User:Foo/Telegram logs"
 
 
 async def test_setpage_is_idempotent_when_the_suffix_is_already_present() -> None:
     directory = make_directory(InMemoryProfiles())
-    page = await directory.set_log_page(CHAT, "Next 25/Telegram logs")
+    page = await directory.set_log_page(CHAT, 0, "Next 25/Telegram logs")
     assert page == "Next 25/Telegram logs"  # not doubled
 
 
@@ -90,13 +90,13 @@ async def test_setpage_is_idempotent_when_the_suffix_is_already_present() -> Non
 async def test_invalid_base_paths_are_rejected(title: str) -> None:
     directory = make_directory(InMemoryProfiles())
     with pytest.raises(PageNotAllowedError):
-        await directory.set_log_page(CHAT, title)
+        await directory.set_log_page(CHAT, 0, title)
 
 
 async def test_page_targeting_requires_a_configured_suffix() -> None:
     directory = make_directory(InMemoryProfiles(), page_suffix="")
     with pytest.raises(SelfServiceUnavailableError):
-        await directory.set_log_page(CHAT, "anything")
+        await directory.set_log_page(CHAT, 0, "anything")
 
 
 async def test_writes_require_a_store() -> None:
@@ -104,16 +104,16 @@ async def test_writes_require_a_store() -> None:
     with pytest.raises(SelfServiceUnavailableError):
         await directory.set_consent(CHAT, ConsentMode.AUTHOR_ONLY)
     with pytest.raises(SelfServiceUnavailableError):
-        await directory.reset(CHAT)
+        await directory.reset(CHAT, 0)
     with pytest.raises(SelfServiceUnavailableError):
-        await directory.profile_of(CHAT)
+        await directory.profile_of(CHAT, 0)
 
 
 async def test_storage_outage_degrades_reads_to_defaults() -> None:
     """A database outage must never stop /log from publishing."""
     store = InMemoryProfiles()
     directory = make_directory(store)
-    await directory.set_log_page(CHAT, "Telegram logs/Ours")
+    await directory.set_log_page(CHAT, 0, "Telegram logs/Ours")
     store.fail = True
     settings = await directory.resolve(CHAT)
     assert settings.log_page == "Next 25/Telegram logs"  # defaults, not a crash
@@ -129,22 +129,22 @@ async def test_storage_outage_surfaces_on_writes() -> None:
 async def test_reset_forgets_everything() -> None:
     store = InMemoryProfiles()
     directory = make_directory(store)
-    await directory.set_log_page(CHAT, "WikiProject Ours")
-    await store.store_token(CHAT, "ghp_x")
-    await directory.reset(CHAT)
-    assert await store.get(CHAT) is None
-    assert await store.fetch_token(CHAT) is None
+    await directory.set_log_page(CHAT, 0, "WikiProject Ours")
+    await store.store_token(CHAT, 0, "ghp_x")
+    await directory.reset(CHAT, 0)
+    assert await store.get(CHAT, 0) is None
+    assert await store.fetch_token(CHAT, 0) is None
 
 
 async def test_profile_of_returns_empty_profile_for_display() -> None:
     directory = make_directory(InMemoryProfiles())
-    profile = await directory.profile_of(CHAT)
-    assert profile == GroupProfile(chat_id=CHAT)
+    profile = await directory.profile_of(CHAT, 0)
+    assert profile == GroupProfile(chat_id=CHAT, thread_id=0)
 
 
 async def test_set_repo_stores_the_binding() -> None:
     directory = make_directory(InMemoryProfiles())
-    await directory.set_repo(CHAT, "wikimedia/mediawiki")
+    await directory.set_repo(CHAT, 0, "wikimedia/mediawiki")
     assert (await directory.resolve(CHAT)).repo == "wikimedia/mediawiki"
 
 
@@ -156,6 +156,56 @@ async def test_migrate_is_a_noop_without_a_store() -> None:
 async def test_migrate_moves_the_profile() -> None:
     store = InMemoryProfiles()
     directory = make_directory(store)
-    await directory.set_log_page(CHAT, "WikiProject Ours")
+    await directory.set_log_page(CHAT, 0, "WikiProject Ours")
     await directory.migrate(CHAT, -777)
     assert (await directory.resolve(-777)).log_page == "WikiProject Ours/Telegram logs"
+
+
+TOPIC = 42
+
+
+async def test_topic_overrides_group_page_but_inherits_the_rest() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    await directory.set_log_page(CHAT, 0, "WikiProject Foo")  # group default
+    await directory.set_consent(CHAT, ConsentMode.AUTHOR_ONLY)  # group-wide
+    await directory.set_log_page(CHAT, TOPIC, "WikiProject Foo/Bugs")  # topic only
+
+    topic = await directory.resolve(CHAT, TOPIC)
+    assert topic.log_page == "WikiProject Foo/Bugs/Telegram logs"
+    assert topic.consent_mode is ConsentMode.AUTHOR_ONLY  # inherited from group
+    other = await directory.resolve(CHAT, 99)  # a topic with no profile
+    assert other.log_page == "WikiProject Foo/Telegram logs"  # group default
+
+
+async def test_topic_repo_and_token_resolve_as_a_unit() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    await directory.set_repo(CHAT, 0, "org/main")  # group repo
+    await store.store_token(CHAT, 0, "group-token")
+    await directory.set_repo(CHAT, TOPIC, "org/frontend")  # topic repo
+    await store.store_token(CHAT, TOPIC, "topic-token")
+
+    topic = await directory.resolve(CHAT, TOPIC)
+    assert topic.repo == "org/frontend"
+    assert topic.repo_thread_id == TOPIC  # token fetched from the topic
+    inheriting = await directory.resolve(CHAT, 99)
+    assert inheriting.repo == "org/main"
+    assert inheriting.repo_thread_id == 0  # inherits the group's token
+
+
+async def test_consent_is_group_wide_even_from_a_topic() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    await directory.set_consent(CHAT, ConsentMode.AUTHOR_ONLY)  # always thread 0
+    assert store.profiles[CHAT, 0].consent_mode is ConsentMode.AUTHOR_ONLY
+    assert (await directory.resolve(CHAT, TOPIC)).consent_mode is ConsentMode.AUTHOR_ONLY
+
+
+async def test_resetting_a_topic_leaves_the_group_default() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    await directory.set_log_page(CHAT, 0, "WikiProject Foo")
+    await directory.set_log_page(CHAT, TOPIC, "WikiProject Foo/Bugs")
+    await directory.reset(CHAT, TOPIC)
+    assert (await directory.resolve(CHAT, TOPIC)).log_page == "WikiProject Foo/Telegram logs"

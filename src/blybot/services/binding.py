@@ -30,43 +30,43 @@ class TokenBinding:
     clock: Clock
     link_ttl: timedelta = timedelta(minutes=10)
     entry_ttl: timedelta = timedelta(minutes=5)
-    _links: dict[str, tuple[int, datetime]] = field(default_factory=dict)
-    _entries: dict[int, tuple[int, datetime]] = field(default_factory=dict)
+    _links: dict[str, tuple[int, int, datetime]] = field(default_factory=dict)
+    _entries: dict[int, tuple[int, int, datetime]] = field(default_factory=dict)
 
-    def mint_link(self, group_chat_id: int) -> str:
-        """Return a fresh one-time nonce bound to the group."""
+    def mint_link(self, group_chat_id: int, thread_id: int) -> str:
+        """Return a fresh one-time nonce bound to the (group, topic)."""
         self._prune()
         nonce = secrets.token_urlsafe(9)
-        self._links[nonce] = (group_chat_id, self.clock.now())
+        self._links[nonce] = (group_chat_id, thread_id, self.clock.now())
         return nonce
 
-    def peek_link(self, nonce: str) -> int | None:
-        """Return the nonce's group without consuming it (admin pre-check)."""
+    def peek_link(self, nonce: str) -> tuple[int, int] | None:
+        """Return the nonce's (group, topic) without consuming it."""
         entry = self._links.get(nonce)
         if entry is None:
             return None
-        group_chat_id, minted_at = entry
+        group_chat_id, thread_id, minted_at = entry
         if self.clock.now() - minted_at > self.link_ttl:
             return None
-        return group_chat_id
+        return group_chat_id, thread_id
 
-    def redeem_link(self, nonce: str) -> int | None:
-        """Consume the nonce; return its group chat id if still fresh."""
+    def redeem_link(self, nonce: str) -> tuple[int, int] | None:
+        """Consume the nonce; return its (group, topic) if still fresh."""
         entry = self._links.pop(nonce, None)
         if entry is None:
             return None
-        group_chat_id, minted_at = entry
+        group_chat_id, thread_id, minted_at = entry
         if self.clock.now() - minted_at > self.link_ttl:
             return None
-        return group_chat_id
+        return group_chat_id, thread_id
 
-    def open_entry(self, dm_chat_id: int, group_chat_id: int) -> None:
-        """Arm token entry: the DM chat's next message is a token for the group."""
+    def open_entry(self, dm_chat_id: int, group_chat_id: int, thread_id: int) -> None:
+        """Arm token entry: the DM chat's next message is a token for (group, topic)."""
         self._prune()
-        self._entries[dm_chat_id] = (group_chat_id, self.clock.now())
+        self._entries[dm_chat_id] = (group_chat_id, thread_id, self.clock.now())
 
-    def pending_group(self, dm_chat_id: int) -> int | None:
-        """Return the group awaiting a token from this DM chat, if any.
+    def pending_target(self, dm_chat_id: int) -> tuple[int, int] | None:
+        """Return the (group, topic) awaiting a token from this DM chat, if any.
 
         Peeks without consuming: a rejected token may be retried until
         the entry expires or :meth:`close_entry` runs on success.
@@ -74,11 +74,11 @@ class TokenBinding:
         entry = self._entries.get(dm_chat_id)
         if entry is None:
             return None
-        group_chat_id, opened_at = entry
+        group_chat_id, thread_id, opened_at = entry
         if self.clock.now() - opened_at > self.entry_ttl:
             del self._entries[dm_chat_id]
             return None
-        return group_chat_id
+        return group_chat_id, thread_id
 
     def close_entry(self, dm_chat_id: int) -> None:
         """Disarm token entry for this DM chat."""
@@ -87,12 +87,8 @@ class TokenBinding:
     def _prune(self) -> None:
         now = self.clock.now()
         self._links = {
-            nonce: (group, minted)
-            for nonce, (group, minted) in self._links.items()
-            if now - minted <= self.link_ttl
+            nonce: value for nonce, value in self._links.items() if now - value[2] <= self.link_ttl
         }
         self._entries = {
-            dm: (group, opened)
-            for dm, (group, opened) in self._entries.items()
-            if now - opened <= self.entry_ttl
+            dm: value for dm, value in self._entries.items() if now - value[2] <= self.entry_ttl
         }

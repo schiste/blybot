@@ -49,12 +49,14 @@ class ConsentMode(Enum):
 class GroupProfile:
     """Self-service configuration one group's admins chose from Telegram.
 
-    This is the only identifier the bot ever persists: the group *chat
-    id* (never a user id, name, or message). ``None`` fields fall back
-    to the operator's environment defaults at resolution time.
+    The only identifiers the bot persists are group structure — the
+    *chat id* and (for forum groups) the *topic thread id* — never a
+    user id, name, or message. ``None`` fields fall back to the group
+    default and then the operator's environment defaults.
     """
 
     chat_id: int
+    thread_id: int = 0  # forum topic; 0 = the group default (General)
     log_page: str | None = None
     repo: str | None = None
     consent_mode: ConsentMode | None = None

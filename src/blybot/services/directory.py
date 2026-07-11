@@ -1,10 +1,9 @@
-"""Resolves each group's effective settings (self-service, spec v2).
+"""Resolves each (group, topic)'s effective settings (self-service).
 
-Two-tier resolution: a group's stored :class:`GroupProfile` overrides
-the operator's environment defaults, field by field. No profile — or no
-profile *store*, the pure v1 deployment — means every group simply gets
-the defaults, so single-tenant behavior is the degenerate case, not a
-special one.
+Three-tier resolution: a forum topic's stored profile overrides the
+group default (thread 0), which overrides the operator's environment
+defaults. No profile — or no store, the pure v1 deployment — means the
+env defaults, so single-tenant behavior is the degenerate case.
 
 Reads are failure-tolerant by design: if ToolsDB is down, ``resolve``
 returns defaults (``/log`` keeps working); only configuration *writes*
@@ -33,6 +32,11 @@ if TYPE_CHECKING:
 _FORBIDDEN_TITLE_CHARS: Final = frozenset('#<>[]|{}"')
 
 
+def _first(*candidates: str | None) -> str:
+    """Return the first truthy candidate (the last is always a default)."""
+    return next(c for c in candidates if c)
+
+
 class SelfServiceUnavailableError(Exception):
     """Self-service is not enabled on this deployment (no store / no prefix)."""
 
@@ -43,7 +47,7 @@ class PageNotAllowedError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class ChannelSettings:
-    """The effective, fully-resolved settings for one chat."""
+    """The effective, fully-resolved settings for one (group, topic)."""
 
     log_page: str
     consent_mode: ConsentMode
@@ -51,6 +55,10 @@ class ChannelSettings:
     has_token: bool
     events_enabled: bool
     event_kinds: frozenset[EventKind]
+    # The thread whose profile provided the repo/token binding — the
+    # token must be fetched from THIS key, not the calling topic (a
+    # topic inheriting the group repo shares the group's token).
+    repo_thread_id: int
     customized: bool  # whether a stored profile contributed anything
     degraded: bool = False  # storage was unreachable: these are fallbacks
 
@@ -70,42 +78,45 @@ class ChannelDirectory:
         """Whether groups can configure themselves at all."""
         return self.store is not None
 
-    async def resolve(self, chat_id: int) -> ChannelSettings:
-        """Return the chat's effective settings; never raises.
+    async def resolve(self, chat_id: int, thread_id: int = 0) -> ChannelSettings:
+        """Resolve a (group, topic)'s settings; never raises.
 
-        A storage outage degrades to the environment defaults — the
-        store already logged the failure, and publishing must not stop.
+        Three tiers: a topic's own profile overrides the group default
+        (thread 0) overrides the operator env defaults. The page falls
+        back per-field; the repo/token/events resolve as a *unit* from
+        the first tier that binds a repo (so a topic's token is used
+        only for the topic's own repo); consent is group-level only.
+        A storage outage degrades to env defaults so /log keeps working.
         """
-        profile: GroupProfile | None = None
+        group: GroupProfile | None = None
+        topic: GroupProfile | None = None
         degraded = False
         if self.store is not None:
             try:
-                profile = await self.store.get(chat_id)
+                group = await self.store.get(chat_id, 0)
+                topic = await self.store.get(chat_id, thread_id) if thread_id else group
             except StorageError:
                 degraded = True
-        if profile is None:
-            return ChannelSettings(
-                log_page=self.default_log_page,
-                consent_mode=self.default_consent,
-                repo=self.default_repo,
-                has_token=False,
-                events_enabled=False,
-                event_kinds=frozenset(),
-                customized=False,
-                degraded=degraded,
-            )
+
+        binder = topic if (topic and topic.repo) else group if (group and group.repo) else None
         return ChannelSettings(
-            log_page=profile.log_page or self.default_log_page,
-            consent_mode=profile.consent_mode or self.default_consent,
-            repo=profile.repo or self.default_repo,
-            has_token=profile.has_token,
-            events_enabled=profile.events_enabled,
-            event_kinds=profile.event_kinds,
-            customized=True,
+            log_page=_first(
+                topic.log_page if topic else None,
+                group.log_page if group else None,
+                self.default_log_page,
+            ),
+            consent_mode=(group.consent_mode if group else None) or self.default_consent,
+            repo=binder.repo if binder and binder.repo else self.default_repo,
+            has_token=bool(binder and binder.has_token),
+            events_enabled=bool(binder and binder.events_enabled),
+            event_kinds=binder.event_kinds if binder else frozenset(),
+            repo_thread_id=binder.thread_id if binder else 0,
+            customized=bool((topic and topic is not group) or group),
+            degraded=degraded,
         )
 
-    async def set_log_page(self, chat_id: int, title: str) -> str:
-        """Point the chat's ``/log`` at a page under the allowed prefix.
+    async def set_log_page(self, chat_id: int, thread_id: int, title: str) -> str:
+        """Point this (group, topic)'s ``/log`` at a page.
 
         ``title`` is a base page path; the log lands on its
         ``/{page_suffix}`` subpage. Returns the full page title. Raises
@@ -116,39 +127,45 @@ class ChannelDirectory:
         if not self.page_suffix:
             raise SelfServiceUnavailableError
         page = self._compose_page(title)
-        await self._update(chat_id, log_page=page)
+        await self._update(chat_id, thread_id, log_page=page)
         return page
 
     async def set_consent(self, chat_id: int, mode: ConsentMode) -> None:
-        """Set the chat's consent policy for ``/log``."""
-        await self._update(chat_id, consent_mode=mode)
+        """Set the group's consent policy for ``/log`` (group-wide, thread 0)."""
+        await self._update(chat_id, 0, consent_mode=mode)
 
-    async def set_repo(self, chat_id: int, repo: str) -> None:
-        """Bind the chat to a GitHub repository (``owner/name``)."""
-        await self._update(chat_id, repo=repo)
+    async def set_repo(self, chat_id: int, thread_id: int, repo: str) -> None:
+        """Bind this (group, topic) to a GitHub repository (``owner/name``)."""
+        await self._update(chat_id, thread_id, repo=repo)
 
-    async def set_events(self, chat_id: int, *, enabled: bool, kinds: frozenset[EventKind]) -> None:
-        """Configure the chat's repository-event notifications."""
-        await self._update(chat_id, events_enabled=enabled, event_kinds=kinds)
+    async def set_events(
+        self, chat_id: int, thread_id: int, *, enabled: bool, kinds: frozenset[EventKind]
+    ) -> None:
+        """Configure this (group, topic)'s repository-event notifications."""
+        await self._update(chat_id, thread_id, events_enabled=enabled, event_kinds=kinds)
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
-        """Carry the profile across a group→supergroup chat-id change."""
+        """Carry every topic's profile across a group→supergroup chat-id change."""
         if self.store is not None:
             await self.store.migrate(old_chat_id, new_chat_id)
 
-    async def reset(self, chat_id: int) -> None:
-        """Forget the chat's profile entirely (token and cursor included)."""
+    async def reset(self, chat_id: int, thread_id: int) -> None:
+        """Forget this (group, topic)'s profile (token and cursor included)."""
         store = self._require_store()
-        await store.delete(chat_id)
+        await store.delete(chat_id, thread_id)
 
-    async def profile_of(self, chat_id: int) -> GroupProfile:
+    async def profile_of(self, chat_id: int, thread_id: int) -> GroupProfile:
         """Return the stored profile (or an empty one) for /settings display."""
         store = self._require_store()
-        return await store.get(chat_id) or GroupProfile(chat_id=chat_id)
+        return await store.get(chat_id, thread_id) or GroupProfile(
+            chat_id=chat_id, thread_id=thread_id
+        )
 
-    async def _update(self, chat_id: int, **changes: Any) -> None:
+    async def _update(self, chat_id: int, thread_id: int, **changes: Any) -> None:
         store = self._require_store()
-        current = await store.get(chat_id) or GroupProfile(chat_id=chat_id)
+        current = await store.get(chat_id, thread_id) or GroupProfile(
+            chat_id=chat_id, thread_id=thread_id
+        )
         await store.upsert(replace(current, **changes))
 
     def _require_store(self) -> ProfileStore:

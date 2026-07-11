@@ -39,23 +39,25 @@ class GroupRepoService:
     vault: TokenVault
     directory: ChannelDirectory
 
-    async def file_issue(self, chat_id: int, text: str) -> str:
-        """File ``text`` as an anonymous issue in the group's repo; return its URL."""
-        repo, token = await self._binding(chat_id)
+    async def file_issue(self, chat_id: int, thread_id: int, text: str) -> str:
+        """File ``text`` as an anonymous issue in the topic's repo; return its URL."""
+        repo, token = await self._binding(chat_id, thread_id)
         return await self.gateway.open_issue(
             repo, token, title=issue_title(text), body=_BODY_PREAMBLE + as_code_block(text)
         )
 
-    async def summary(self, chat_id: int) -> RepoSummary:
-        """Return the group's repo open-items summary."""
-        repo, token = await self._binding(chat_id)
+    async def summary(self, chat_id: int, thread_id: int) -> RepoSummary:
+        """Return the topic's repo open-items summary."""
+        repo, token = await self._binding(chat_id, thread_id)
         return await self.gateway.open_summary(repo, token)
 
-    async def _binding(self, chat_id: int) -> tuple[str, str]:
-        settings = await self.directory.resolve(chat_id)
+    async def _binding(self, chat_id: int, thread_id: int) -> tuple[str, str]:
+        settings = await self.directory.resolve(chat_id, thread_id)
         if not settings.repo:
             raise NoRepoBoundError
-        token = await self.vault.fetch_token(chat_id)
+        # The token lives with whichever tier bound the repo (a topic
+        # inheriting the group repo uses the group's token).
+        token = await self.vault.fetch_token(chat_id, settings.repo_thread_id)
         if not token:
             raise NoTokenError
         return settings.repo, token

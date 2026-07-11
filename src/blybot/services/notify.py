@@ -34,8 +34,8 @@ class RepoNotifier:
     counters: Counters
     max_groups_per_tick: int = 200
 
-    async def collect(self) -> list[tuple[int, str]]:
-        """Return ``(chat_id, digest)`` pairs for groups with fresh events."""
+    async def collect(self) -> list[tuple[int, int, str]]:
+        """Return ``(chat_id, thread_id, digest)`` for profiles with fresh events."""
         try:
             profiles = await self.store.list_event_enabled()
         except StorageError:
@@ -43,26 +43,28 @@ class RepoNotifier:
         if len(profiles) > self.max_groups_per_tick:
             log_event("repo_poll", "ignored", skipped=len(profiles) - self.max_groups_per_tick)
             profiles = profiles[: self.max_groups_per_tick]
-        digests: list[tuple[int, str]] = []
+        digests: list[tuple[int, int, str]] = []
         for profile in profiles:
             if not self.groups.is_allowed(profile.chat_id):
                 continue  # never push into groups the operator excluded
             digest = await self._digest_for(profile)
             if digest is not None:
-                digests.append((profile.chat_id, digest))
+                digests.append((profile.chat_id, profile.thread_id, digest))
         return digests
 
     async def _digest_for(self, profile: GroupProfile) -> str | None:
         if not profile.repo:
             return None
         try:
-            token = await self.vault.fetch_token(profile.chat_id)
+            token = await self.vault.fetch_token(profile.chat_id, profile.thread_id)
             if not token:
                 return None
-            cursor = await self.store.get_cursor(profile.chat_id)
+            cursor = await self.store.get_cursor(profile.chat_id, profile.thread_id)
             events, new_cursor = await self.gateway.events_since(profile.repo, token, cursor)
             if new_cursor and new_cursor != cursor:
-                await self.store.set_cursor(profile.chat_id, new_cursor, profile.repo)
+                await self.store.set_cursor(
+                    profile.chat_id, profile.thread_id, new_cursor, profile.repo
+                )
         except (StorageError, IssueTrackerError):
             log_event("repo_poll", "error")
             return None

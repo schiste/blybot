@@ -208,16 +208,18 @@ async def test_repo_notify_loop_delivers_digests_and_survives_send_failures() ->
         counters=Counters(),
     )
 
-    sent: list[tuple[int, str]] = []
+    sent: list[tuple[int, str, int | None]] = []
 
     class Recorder:
-        async def send_message(self, chat_id: int, text: str) -> None:
+        async def send_message(
+            self, chat_id: int, text: str, message_thread_id: int | None = None
+        ) -> None:
             if chat_id == -13:
                 raise TelegramError("kicked")
-            sent.append((chat_id, text))
+            sent.append((chat_id, text, message_thread_id))
 
-    async def fake_collect() -> list[tuple[int, str]]:
-        return [(-13, "lost"), (-1, "x/y:\n- Release")]
+    async def fake_collect() -> list[tuple[int, int, str]]:
+        return [(-13, 0, "lost"), (-1, 7, "x/y:\n- Release")]
 
     notifier.collect = fake_collect  # type: ignore[method-assign]
     task = asyncio.ensure_future(repo_notify_loop(cast("Any", Recorder()), notifier, 0))
@@ -226,7 +228,7 @@ async def test_repo_notify_loop_delivers_digests_and_survives_send_failures() ->
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert (-1, "x/y:\n- Release") in sent
+    assert (-1, "x/y:\n- Release", 7) in sent
 
 
 async def test_post_init_starts_the_notify_task_when_configured() -> None:
@@ -261,7 +263,7 @@ async def test_notify_loop_survives_a_crashing_collect() -> None:
     )
     calls = {"n": 0}
 
-    async def exploding_collect() -> list[tuple[int, str]]:
+    async def exploding_collect() -> list[tuple[int, int, str]]:
         calls["n"] += 1
         msg = "schema drift"
         raise RuntimeError(msg)

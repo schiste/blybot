@@ -57,7 +57,7 @@ def make_handlers(
         default_log_page=LOG_PAGE,
         default_consent=consent_mode,
         default_repo="",
-        page_prefix="Telegram logs/",
+        page_suffix="Telegram logs",
     )
     handlers = h.GroupHandlers(
         log_service=LogPublicationService(
@@ -335,13 +335,13 @@ async def test_consent_policy_is_resolved_per_group() -> None:
 
 async def test_log_publishes_to_the_group_configured_page() -> None:
     handlers, publisher, _ = make_handlers()
-    await handlers.directory.set_log_page(tg.GROUP.id, "Telegram logs/Ours")
+    await handlers.directory.set_log_page(tg.GROUP.id, "WikiProject Ours")
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
 
     assert isinstance(publisher, FakePublisher)
-    assert publisher.started[0][0] == "Telegram logs/Ours"
-    assert "Telegram_logs/Ours#" in tg.sent_texts(bot)[0]
+    assert publisher.started[0][0] == "WikiProject Ours/Telegram logs"
+    assert "WikiProject_Ours/Telegram_logs#" in tg.sent_texts(bot)[0]
 
 
 async def bind_repo(
@@ -515,12 +515,12 @@ async def test_group_help_hides_self_service_when_disabled() -> None:
 async def test_migration_carries_the_stored_profile() -> None:
     store = InMemoryProfiles()
     handlers, _, policy = make_handlers(allowed={tg.GROUP.id}, store=store)
-    await handlers.directory.set_log_page(tg.GROUP.id, "Telegram logs/Ours")
+    await handlers.directory.set_log_page(tg.GROUP.id, "WikiProject Ours")
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)
     assert policy.is_allowed(-100999)
-    assert (await handlers.directory.resolve(-100999)).log_page == "Telegram logs/Ours"
+    assert (await handlers.directory.resolve(-100999)).log_page == "WikiProject Ours/Telegram logs"
 
 
 async def test_migration_storage_failure_is_logged_not_raised() -> None:

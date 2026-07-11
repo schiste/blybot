@@ -74,7 +74,7 @@ class Config:
     maintainer: str
     github_repo: str
     github_token: str
-    wiki_page_prefix: str
+    wiki_page_suffix: str
     profile_encryption_key: str
     toolsdb_host: str
     toolsdb_name: str
@@ -144,7 +144,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         maintainer=source.get("MAINTAINER", ""),
         github_repo=source.get("GITHUB_REPO", "schiste/blybot"),
         github_token=source.get("GITHUB_TOKEN", ""),
-        wiki_page_prefix=source.get("WIKI_PAGE_PREFIX", ""),
+        wiki_page_suffix=source.get("WIKI_PAGE_SUFFIX", ""),
         profile_encryption_key=source.get("PROFILE_ENCRYPTION_KEY", ""),
         toolsdb_host=source.get("TOOLSDB_HOST", "tools.db.svc.wikimedia.cloud"),
         toolsdb_name=source.get("TOOLSDB_NAME", ""),

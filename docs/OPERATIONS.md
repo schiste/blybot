@@ -41,7 +41,7 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
    issue - File an anonymous issue in this group's bound repo
    repo - Show the bound repository's open items
    setup - (admins) how to configure the bot for this group
-   setpage - (admins) where /log publishes
+   setpage - (admins) where /log publishes (under <path>/Telegram logs)
    setconsent - (admins) who may /log whose messages
    setrepo - (admins) bind a GitHub repository
    events - (admins) repo digests on/off/kinds
@@ -79,8 +79,8 @@ mariadb --defaults-file=$HOME/replica.my.cnf -h tools.db.svc.wikimedia.cloud \
     -e "CREATE DATABASE IF NOT EXISTS \`$TOOL_DB\`"
 # 2. Generate the encryption key for group tokens, straight into the env file:
 echo "PROFILE_ENCRYPTION_KEY=\"$($HOME/venv/bin/python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')\"" >> <name>.env
-# 3. Choose the page prefix group admins may target:
-echo 'WIKI_PAGE_PREFIX="Telegram logs/"' >> <name>.env
+# 3. Choose the subpage leaf every /setpage base gets (safe, group-adaptable):
+echo 'WIKI_PAGE_SUFFIX="Telegram logs"' >> <name>.env
 chmod 600 <name>.env
 ~/blybot/deploy-instance.sh start <name>
 ```

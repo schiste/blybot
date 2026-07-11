@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 def make_handlers(
     store: InMemoryProfiles | None = None,
-    page_prefix: str = "Telegram logs/",
+    page_suffix: str = "Telegram logs",
 ) -> a.AdminHandlers:
     store = store if store is not None else InMemoryProfiles()
     return a.AdminHandlers(
@@ -35,7 +35,7 @@ def make_handlers(
             default_log_page="Next 25/Telegram logs",
             default_consent=ConsentMode.IMMEDIATE,
             default_repo="",
-            page_prefix=page_prefix,
+            page_suffix=page_suffix,
         ),
         counters=Counters(),
         page_url_for=lambda title: f"https://meta.wikimedia.org/wiki/{title.replace(' ', '_')}",
@@ -99,7 +99,7 @@ async def test_v1_deployments_stay_silent_and_skip_the_api_call() -> None:
             default_log_page="P",
             default_consent=ConsentMode.IMMEDIATE,
             default_repo="",
-            page_prefix="",
+            page_suffix="",
         ),
         counters=Counters(),
         page_url_for=str,
@@ -115,8 +115,8 @@ async def test_v1_deployments_stay_silent_and_skip_the_api_call() -> None:
 async def test_unlisted_groups_cannot_configure_anything() -> None:
     handlers = make_handlers()
     handlers.groups.allowed = {-42}  # this test group is not on the list
-    context, bot = admin_context(args=["Telegram", "logs/X"])
-    await handlers.on_setpage(command("/setpage Telegram logs/X"), context)
+    context, bot = admin_context(args=["WikiProject", "X"])
+    await handlers.on_setpage(command("/setpage WikiProject X"), context)
     assert tg.sent_texts(bot) == []
     bot.get_chat_member.assert_not_awaited()
 
@@ -126,37 +126,39 @@ async def test_setup_lists_the_commands() -> None:
     context, bot = admin_context()
     await handlers.on_setup(command("/setup"), context)
     (sent,) = tg.sent_texts(bot)
-    for expected in ("/setpage", "/setconsent", "/settings", "/reset", "Telegram logs/"):
+    for expected in ("/setpage", "/setconsent", "/settings", "/reset", "Telegram logs"):
         assert expected in sent
 
 
 async def test_setpage_stores_and_links_the_page() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    context, bot = admin_context(args=["Telegram", "logs/Ours"])
-    await handlers.on_setpage(command("/setpage Telegram logs/Ours"), context)
+    context, bot = admin_context(args=["WikiProject", "Ours"])
+    await handlers.on_setpage(command("/setpage WikiProject Ours"), context)
 
-    assert store.profiles[tg.GROUP.id].log_page == "Telegram logs/Ours"
+    assert store.profiles[tg.GROUP.id].log_page == "WikiProject Ours/Telegram logs"
     (sent,) = tg.sent_texts(bot)
-    assert sent == a.REPLY_PAGE_SET.format(url="https://meta.wikimedia.org/wiki/Telegram_logs/Ours")
+    assert sent == a.REPLY_PAGE_SET.format(
+        url="https://meta.wikimedia.org/wiki/WikiProject_Ours/Telegram_logs"
+    )
 
 
 async def test_setpage_without_arguments_shows_usage() -> None:
     handlers = make_handlers()
     context, bot = admin_context()
     await handlers.on_setpage(command("/setpage"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_SETPAGE_USAGE.format(prefix="Telegram logs/")]
+    assert tg.sent_texts(bot) == [a.REPLY_SETPAGE_USAGE.format(suffix="Telegram logs")]
 
 
-async def test_setpage_refuses_pages_outside_the_prefix() -> None:
+async def test_setpage_refuses_invalid_base_paths() -> None:
     handlers = make_handlers()
-    context, bot = admin_context(args=["User:Jimbo"])
-    await handlers.on_setpage(command("/setpage User:Jimbo"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_PAGE_REFUSED.format(prefix="Telegram logs/")]
+    context, bot = admin_context(args=["bad", "{{title}}"])
+    await handlers.on_setpage(command("/setpage bad {{title}}"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_PAGE_REFUSED.format(suffix="Telegram logs")]
 
 
 async def test_setpage_reports_disabled_page_targeting() -> None:
-    handlers = make_handlers(page_prefix="")
+    handlers = make_handlers(page_suffix="")
     context, bot = admin_context(args=["anything"])
     await handlers.on_setpage(command("/setpage anything"), context)
     assert tg.sent_texts(bot) == [a.REPLY_SELF_SERVICE_OFF]
@@ -164,8 +166,8 @@ async def test_setpage_reports_disabled_page_targeting() -> None:
 
 async def test_setpage_reports_storage_outage() -> None:
     handlers = make_handlers(InMemoryProfiles(fail=True))
-    context, bot = admin_context(args=["Telegram", "logs/Ours"])
-    await handlers.on_setpage(command("/setpage Telegram logs/Ours"), context)
+    context, bot = admin_context(args=["WikiProject", "Ours"])
+    await handlers.on_setpage(command("/setpage WikiProject Ours"), context)
     assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
 
 
@@ -200,18 +202,18 @@ async def test_settings_shows_defaults_then_customization() -> None:
     assert "(all defaults)" in tg.sent_texts(bot)[0]
     assert "Next_25/Telegram_logs" in tg.sent_texts(bot)[0]
 
-    await handlers.directory.set_log_page(tg.GROUP.id, "Telegram logs/Ours")
+    await handlers.directory.set_log_page(tg.GROUP.id, "WikiProject Ours")
     await handlers.on_settings(command("/settings"), context)
     latest = tg.sent_texts(bot)[-1]
     assert "(all defaults)" not in latest
-    assert "Telegram_logs/Ours" in latest
+    assert "WikiProject_Ours/Telegram_logs" in latest
 
 
 async def test_reset_returns_the_group_to_defaults() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
     context, bot = admin_context()
-    await handlers.directory.set_log_page(tg.GROUP.id, "Telegram logs/Ours")
+    await handlers.directory.set_log_page(tg.GROUP.id, "WikiProject Ours")
     await handlers.on_reset(command("/reset"), context)
     assert store.profiles == {}
     assert tg.sent_texts(bot)[-1] == a.REPLY_RESET

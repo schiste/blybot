@@ -210,7 +210,7 @@ Loaded from the tool home directory (env or a `0600`-permission file), not the r
 | `LOG_CLEANUP_SECONDS` | Delay before deleting the `/log` command (0 = keep) | 5 |
 | `REPLY_CLEANUP_SECONDS` | Delay before the bot deletes its own `/log` replies (0 = keep) | 15 |
 | `GITHUB_REPO` / `GITHUB_TOKEN` | `/bug` issue filing (token optional; absent = degrade to link) | `schiste/blybot` / empty |
-| `WIKI_PAGE_PREFIX` | Subpage prefix `/setpage` may target; empty disables self-service pages | empty |
+| `WIKI_PAGE_SUFFIX` | Leaf appended to every `/setpage` base (`<base>/<suffix>`); empty disables self-service pages | empty |
 | `PROFILE_ENCRYPTION_KEY` | Fernet key enabling ToolsDB profiles + encrypted group tokens | empty (self-service off) |
 | `TOOLSDB_HOST` / `TOOLSDB_NAME` / `TOOLSDB_CNF` | ToolsDB connection (name defaults to `<cnf user>__blybot`) | Toolforge conventions |
 | `EVENTS_POLL_MINUTES` | Minutes between repository-event polls for `/events` digests | 5 |

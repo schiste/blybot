@@ -102,7 +102,7 @@ def main() -> int:
         # Deliberately NOT config.github_repo: that is the bot's own /bug
         # tracker, not a repo any group consented to bind.
         default_repo="",
-        page_prefix=config.wiki_page_prefix,
+        page_suffix=config.wiki_page_suffix,
     )
     group_handlers = GroupHandlers(
         log_service=LogPublicationService(

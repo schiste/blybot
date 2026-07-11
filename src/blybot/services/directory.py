@@ -10,10 +10,11 @@ Reads are failure-tolerant by design: if ToolsDB is down, ``resolve``
 returns defaults (``/log`` keeps working); only configuration *writes*
 surface :class:`~blybot.domain.ports.StorageError` to the admin.
 
-Wiki safety: self-service page targeting is confined to subpages of the
-operator-configured ``page_prefix`` — group admins configure *where
-under the bot's area* their log lives, never arbitrary pages the shared
-wiki account would then be blamed for.
+Wiki safety: ``/setpage`` takes any base page path and always writes to
+its ``/{page_suffix}`` subpage (default ``Telegram logs``). A group
+picks *where* its log lives, but the leaf is always a clearly-named
+logs subpage — the shared wiki account can never be pointed at a bare
+content page.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ class ChannelDirectory:
     default_log_page: str
     default_consent: ConsentMode
     default_repo: str
-    page_prefix: str  # "" disables self-service page targeting
+    page_suffix: str  # leaf appended to every /setpage base; "" disables it
 
     @property
     def self_service_enabled(self) -> bool:
@@ -106,16 +107,17 @@ class ChannelDirectory:
     async def set_log_page(self, chat_id: int, title: str) -> str:
         """Point the chat's ``/log`` at a page under the allowed prefix.
 
-        Returns the normalized title. Raises
+        ``title`` is a base page path; the log lands on its
+        ``/{page_suffix}`` subpage. Returns the full page title. Raises
         :class:`SelfServiceUnavailableError` when page targeting is off,
-        :class:`PageNotAllowedError` for out-of-prefix or invalid titles,
-        and :class:`StorageError` when the store is down.
+        :class:`PageNotAllowedError` for invalid titles, and
+        :class:`StorageError` when the store is down.
         """
-        if not self.page_prefix:
+        if not self.page_suffix:
             raise SelfServiceUnavailableError
-        normalized = self._validate_title(title)
-        await self._update(chat_id, log_page=normalized)
-        return normalized
+        page = self._compose_page(title)
+        await self._update(chat_id, log_page=page)
+        return page
 
     async def set_consent(self, chat_id: int, mode: ConsentMode) -> None:
         """Set the chat's consent policy for ``/log``."""
@@ -154,13 +156,21 @@ class ChannelDirectory:
             raise SelfServiceUnavailableError
         return self.store
 
-    def _validate_title(self, title: str) -> str:
-        normalized = " ".join(title.replace("_", " ").split())
+    def _compose_page(self, base: str) -> str:
+        """Validate a base path and append the ``/{page_suffix}`` leaf.
+
+        A base that already ends with the suffix is accepted as-is, so
+        re-running /setpage with the full page is idempotent.
+        """
+        normalized = " ".join(base.replace("_", " ").split())
+        leaf = f"/{self.page_suffix}"
+        page = normalized if normalized.endswith(leaf) else f"{normalized}{leaf}"
         if (
-            not normalized.startswith(self.page_prefix)
-            or len(normalized) <= len(self.page_prefix)
-            or len(normalized) > 255  # noqa: PLR2004 -- MediaWiki's title limit
-            or any(char in _FORBIDDEN_TITLE_CHARS for char in normalized)
+            not normalized
+            or normalized.startswith("/")
+            or normalized.endswith("/")
+            or len(page) > 255  # noqa: PLR2004 -- MediaWiki's title limit
+            or any(char in _FORBIDDEN_TITLE_CHARS for char in page)
         ):
             raise PageNotAllowedError
-        return normalized
+        return page

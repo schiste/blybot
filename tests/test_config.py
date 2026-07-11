@@ -153,7 +153,7 @@ def test_cleanup_rejects_negatives_and_junk() -> None:
 
 def test_self_service_defaults_are_off_and_toolsdb_conventional() -> None:
     config = load_config(dict(REQUIRED))
-    assert config.wiki_page_prefix == ""
+    assert config.wiki_page_suffix == ""
     assert config.profile_encryption_key == ""
     assert config.toolsdb_host == "tools.db.svc.wikimedia.cloud"
     assert config.toolsdb_name == ""

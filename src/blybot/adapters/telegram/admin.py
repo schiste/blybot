@@ -38,9 +38,12 @@ REPLY_SELF_SERVICE_OFF: Final = (
 REPLY_STORAGE_DOWN: Final = "Configuration is temporarily unavailable — please try again later."
 REPLY_PAGE_SET: Final = "Done. This group's /log now publishes to {url}"
 REPLY_PAGE_REFUSED: Final = (
-    'That page isn\'t allowed: pick a subpage of "{prefix}" — e.g. /setpage {prefix}YourGroup'
+    "That page path isn't valid — give a plain project or user page, "
+    'e.g. /setpage WikiProject Foo (I add the "/{suffix}" leaf myself).'
 )
-REPLY_SETPAGE_USAGE: Final = "Usage: /setpage {prefix}YourGroup"
+REPLY_SETPAGE_USAGE: Final = (
+    "Usage: /setpage <page path> — I publish under <path>/{suffix}, e.g. /setpage WikiProject Foo"
+)
 REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode}"
 REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
 REPLY_RESET: Final = "Forgotten. This group is back on the operator defaults."
@@ -57,7 +60,7 @@ REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
 DEFAULT_EVENT_KINDS: Final = frozenset({EventKind.RELEASES, EventKind.PRS})
 SETUP_TEXT: Final = (
     "I'm configurable by this group's admins, right here:\n\n"
-    "/setpage {prefix}YourGroup — where /log publishes\n"
+    "/setpage <page path> — where /log publishes (under <path>/{suffix})\n"
     "/setconsent immediate|author_only — who may /log whose messages\n"
     "/setrepo owner/repo — bind a GitHub repo (then /issue, /repo)\n"
     "/events on|off|releases,prs,issues — repo digests in this chat\n"
@@ -104,7 +107,7 @@ class AdminHandlers:
         """Explain the self-service commands to an admin."""
         chat = await self._admin_chat(update, context)
         if chat is not None:
-            text = SETUP_TEXT.format(prefix=self.directory.page_prefix or "<disabled>")
+            text = SETUP_TEXT.format(suffix=self.directory.page_suffix or "<disabled>")
             await context.bot.send_message(chat_id=chat.id, text=text)
 
     async def on_setpage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -114,13 +117,13 @@ class AdminHandlers:
             return
         title = " ".join(context.args or ()).strip()
         if not title:
-            usage = REPLY_SETPAGE_USAGE.format(prefix=self.directory.page_prefix)
+            usage = REPLY_SETPAGE_USAGE.format(suffix=self.directory.page_suffix)
             await context.bot.send_message(chat_id=chat.id, text=usage)
             return
         try:
             normalized = await self.directory.set_log_page(chat.id, title)
         except PageNotAllowedError:
-            refused = REPLY_PAGE_REFUSED.format(prefix=self.directory.page_prefix)
+            refused = REPLY_PAGE_REFUSED.format(suffix=self.directory.page_suffix)
             await context.bot.send_message(chat_id=chat.id, text=refused)
             return
         except SelfServiceUnavailableError:

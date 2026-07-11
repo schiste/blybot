@@ -18,14 +18,14 @@ CHAT = -100500
 
 def make_directory(
     store: InMemoryProfiles | None,
-    page_prefix: str = "Telegram logs/",
+    page_suffix: str = "Telegram logs",
 ) -> ChannelDirectory:
     return ChannelDirectory(
         store=store,
         default_log_page="Next 25/Telegram logs",
         default_consent=ConsentMode.IMMEDIATE,
         default_repo="schiste/blybot",
-        page_prefix=page_prefix,
+        page_suffix=page_suffix,
     )
 
 
@@ -48,9 +48,9 @@ async def test_unconfigured_group_resolves_to_defaults() -> None:
 async def test_profile_fields_override_defaults_individually() -> None:
     store = InMemoryProfiles()
     directory = make_directory(store)
-    await directory.set_log_page(CHAT, "Telegram logs/Ours")
+    await directory.set_log_page(CHAT, "WikiProject Ours")
     settings = await directory.resolve(CHAT)
-    assert settings.log_page == "Telegram logs/Ours"
+    assert settings.log_page == "WikiProject Ours/Telegram logs"
     assert settings.consent_mode is ConsentMode.IMMEDIATE  # unset field: default
     assert settings.customized
 
@@ -62,29 +62,39 @@ async def test_set_consent_is_per_group() -> None:
     assert (await directory.resolve(-2)).consent_mode is ConsentMode.IMMEDIATE
 
 
-async def test_set_log_page_normalizes_underscores_and_whitespace() -> None:
+async def test_setpage_appends_the_suffix_and_normalizes() -> None:
     directory = make_directory(InMemoryProfiles())
-    normalized = await directory.set_log_page(CHAT, "Telegram_logs/My  group")
-    assert normalized == "Telegram logs/My group"
+    assert await directory.set_log_page(CHAT, "WikiProject_Med") == (
+        "WikiProject Med/Telegram logs"
+    )
+    # Any base path is adaptable: userspace, project space, whatever fits.
+    assert await directory.set_log_page(CHAT, "User:Foo") == "User:Foo/Telegram logs"
+
+
+async def test_setpage_is_idempotent_when_the_suffix_is_already_present() -> None:
+    directory = make_directory(InMemoryProfiles())
+    page = await directory.set_log_page(CHAT, "Next 25/Telegram logs")
+    assert page == "Next 25/Telegram logs"  # not doubled
 
 
 @pytest.mark.parametrize(
     "title",
     [
-        "User talk:Jimbo",  # outside the prefix
-        "Telegram logs/",  # prefix alone, no subpage
-        "Telegram logs/{{bad}}",  # forbidden characters
-        "Telegram logs/" + "x" * 300,  # over MediaWiki's title limit
+        "",  # empty base
+        "/leading",  # leading slash
+        "trailing/",  # trailing slash
+        "Bad {{title}}",  # forbidden characters
+        "x" * 300,  # over MediaWiki's title limit once the suffix is added
     ],
 )
-async def test_pages_outside_the_safe_prefix_are_rejected(title: str) -> None:
+async def test_invalid_base_paths_are_rejected(title: str) -> None:
     directory = make_directory(InMemoryProfiles())
     with pytest.raises(PageNotAllowedError):
         await directory.set_log_page(CHAT, title)
 
 
-async def test_page_targeting_requires_a_configured_prefix() -> None:
-    directory = make_directory(InMemoryProfiles(), page_prefix="")
+async def test_page_targeting_requires_a_configured_suffix() -> None:
+    directory = make_directory(InMemoryProfiles(), page_suffix="")
     with pytest.raises(SelfServiceUnavailableError):
         await directory.set_log_page(CHAT, "anything")
 
@@ -119,7 +129,7 @@ async def test_storage_outage_surfaces_on_writes() -> None:
 async def test_reset_forgets_everything() -> None:
     store = InMemoryProfiles()
     directory = make_directory(store)
-    await directory.set_log_page(CHAT, "Telegram logs/Ours")
+    await directory.set_log_page(CHAT, "WikiProject Ours")
     await store.store_token(CHAT, "ghp_x")
     await directory.reset(CHAT)
     assert await store.get(CHAT) is None
@@ -146,6 +156,6 @@ async def test_migrate_is_a_noop_without_a_store() -> None:
 async def test_migrate_moves_the_profile() -> None:
     store = InMemoryProfiles()
     directory = make_directory(store)
-    await directory.set_log_page(CHAT, "Telegram logs/Ours")
+    await directory.set_log_page(CHAT, "WikiProject Ours")
     await directory.migrate(CHAT, -777)
-    assert (await directory.resolve(-777)).log_page == "Telegram logs/Ours"
+    assert (await directory.resolve(-777)).log_page == "WikiProject Ours/Telegram logs"

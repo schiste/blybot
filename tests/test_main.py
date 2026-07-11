@@ -66,7 +66,7 @@ async def test_valid_encryption_key_enables_self_service(
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
-    monkeypatch.setenv("WIKI_PAGE_PREFIX", "Telegram logs/")
+    monkeypatch.setenv("WIKI_PAGE_SUFFIX", "Telegram logs")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_dummy")  # builds the /bug tracker too
     seen: dict[str, Any] = {}
     monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
@@ -74,7 +74,7 @@ async def test_valid_encryption_key_enables_self_service(
     assert entry.main() == 0
     directory = seen["group_handlers"].directory
     assert isinstance(directory.store, ToolsDbStore)
-    assert directory.page_prefix == "Telegram logs/"
+    assert directory.page_suffix == "Telegram logs"
     assert seen["lifecycle"].bootstrap is not None
     await seen["lifecycle"].release()  # closes both HTTP clients cleanly
 

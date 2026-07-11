@@ -11,7 +11,7 @@ from telegram.constants import ChatType
 from telegram.error import TelegramError
 
 from blybot.adapters.telegram import handlers as h
-from blybot.domain.models import ConsentMode, TimestampGranularity
+from blybot.domain.models import ConsentMode, GroupProfile, TimestampGranularity
 from blybot.observability import Counters
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
@@ -47,11 +47,18 @@ def make_handlers(
     store: InMemoryProfiles | None = None,
     gateway: FakeRepoGateway | None = None,
     with_repo_service: bool = True,
+    configure_page: bool = True,
 ) -> tuple[h.GroupHandlers, FakePublisher | FailingPublisher, GroupPolicy]:
     publisher = publisher if publisher is not None else FakePublisher()
     policy = GroupPolicy(allowed=allowed if allowed is not None else set())
     store = store if store is not None else InMemoryProfiles()
     gateway = gateway if gateway is not None else FakeRepoGateway()
+    if configure_page:
+        # A realistic configured group has a group-default page; without
+        # one, self-service /log now refuses (test_log_without_a_page).
+        store.profiles[tg.GROUP.id, 0] = GroupProfile(
+            chat_id=tg.GROUP.id, thread_id=0, log_page=LOG_PAGE
+        )
     directory = ChannelDirectory(
         store=store,
         default_log_page=LOG_PAGE,
@@ -536,3 +543,34 @@ def test_thread_of_ignores_non_topic_and_missing_messages() -> None:
     assert h._thread_of(Update(update_id=1)) == 0  # no message
     assert h._thread_of(tg.command_update(tg.message(text="x"))) == 0  # not a topic
     assert h._thread_of(tg.command_update(tg.message(text="x", thread_id=7))) == 7
+
+
+async def test_log_without_a_page_refuses_on_a_self_service_group() -> None:
+    handlers, publisher, _ = make_handlers(configure_page=False)
+    context, bot = tg.make_context()
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == [h.REPLY_NO_LOG_PAGE]
+
+
+async def test_topic_page_publishes_while_general_without_a_page_refuses() -> None:
+    store = InMemoryProfiles()
+    handlers, publisher, _ = make_handlers(store=store, configure_page=False)
+    await handlers.directory.set_log_page(tg.GROUP.id, 77, "WikiProject Foo")  # topic only
+
+    # In the configured topic: publishes to the topic's page.
+    context, bot = tg.make_context()
+    await handlers.on_log(
+        tg.command_update(
+            tg.message(text="/log", from_user=tg.BOB, reply_to=tg.message(text="hi"), thread_id=77)
+        ),
+        context,
+    )
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.started[0][0] == "WikiProject Foo/Telegram logs"
+
+    # In General (no group-default page): refused.
+    context, bot = tg.make_context()
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+    assert tg.sent_texts(bot) == [h.REPLY_NO_LOG_PAGE]

@@ -76,6 +76,11 @@ REPLY_CONFIG_UNAVAILABLE: Final = (
     "This group's configuration is temporarily unreachable, so I won't "
     "publish right now — please try again shortly."
 )
+REPLY_NO_LOG_PAGE: Final = (
+    "No log page is set for this group. An admin needs to run /setpage "
+    "<page path> here to set the group default, or inside a topic to scope "
+    "it to that topic. Nothing was published."
+)
 REPLY_ISSUE_USAGE: Final = "Describe the issue after the command: /issue something is broken"
 REPLY_ISSUE_UNBOUND: Final = (
     "No repository is bound to this group — an admin can bind one with /setrepo."
@@ -276,6 +281,11 @@ class GroupHandlers:
             # Fail closed: the group's consent policy and target page are
             # unknown right now; publishing on defaults could violate both.
             await reply(REPLY_CONFIG_UNAVAILABLE)
+            return
+        if self.directory.self_service_enabled and not settings.page_explicit:
+            # A self-service group must choose its own page — never leak
+            # its logs onto the shared operator default.
+            await reply(REPLY_NO_LOG_PAGE)
             return
         if settings.consent_mode is ConsentMode.AUTHOR_ONLY and not _same_author(message, target):
             # N1 hook: ConsentMode.CONFIRM would branch here into a

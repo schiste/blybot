@@ -32,11 +32,6 @@ if TYPE_CHECKING:
 _FORBIDDEN_TITLE_CHARS: Final = frozenset('#<>[]|{}"')
 
 
-def _first(*candidates: str | None) -> str:
-    """Return the first truthy candidate (the last is always a default)."""
-    return next(c for c in candidates if c)
-
-
 class SelfServiceUnavailableError(Exception):
     """Self-service is not enabled on this deployment (no store / no prefix)."""
 
@@ -59,6 +54,10 @@ class ChannelSettings:
     # token must be fetched from THIS key, not the calling topic (a
     # topic inheriting the group repo shares the group's token).
     repo_thread_id: int
+    # Whether the log page came from an explicit /setpage (topic or
+    # group) rather than the operator default — self-service groups
+    # publish only when this is True.
+    page_explicit: bool
     customized: bool  # whether a stored profile contributed anything
     degraded: bool = False  # storage was unreachable: these are fallbacks
 
@@ -99,12 +98,10 @@ class ChannelDirectory:
                 degraded = True
 
         binder = topic if (topic and topic.repo) else group if (group and group.repo) else None
+        explicit_page = (topic.log_page if topic else None) or (group.log_page if group else None)
         return ChannelSettings(
-            log_page=_first(
-                topic.log_page if topic else None,
-                group.log_page if group else None,
-                self.default_log_page,
-            ),
+            log_page=explicit_page or self.default_log_page,
+            page_explicit=bool(explicit_page),
             consent_mode=(group.consent_mode if group else None) or self.default_consent,
             repo=binder.repo if binder and binder.repo else self.default_repo,
             has_token=bool(binder and binder.has_token),

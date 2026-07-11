@@ -209,3 +209,21 @@ async def test_resetting_a_topic_leaves_the_group_default() -> None:
     await directory.set_log_page(CHAT, TOPIC, "WikiProject Foo/Bugs")
     await directory.reset(CHAT, TOPIC)
     assert (await directory.resolve(CHAT, TOPIC)).log_page == "WikiProject Foo/Telegram logs"
+
+
+async def test_page_explicit_flag_tracks_configuration() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    assert not (await directory.resolve(CHAT)).page_explicit  # nothing set
+    await directory.set_log_page(CHAT, 0, "WikiProject Foo")
+    assert (await directory.resolve(CHAT)).page_explicit  # group default set
+    # A topic with its own page is explicit; a sibling topic inherits and
+    # is still explicit because the group default is set.
+    assert (await directory.resolve(CHAT, 5)).page_explicit
+
+
+async def test_page_not_explicit_when_only_non_page_fields_set() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    await directory.set_consent(CHAT, ConsentMode.AUTHOR_ONLY)  # no page
+    assert not (await directory.resolve(CHAT)).page_explicit

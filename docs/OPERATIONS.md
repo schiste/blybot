@@ -80,7 +80,10 @@ token step), `/events`, `/settings`, `/revoke`, `/reset`; members get
 `/issue` and `/repo` once a repo is bound. **Forum groups:** run a
 command inside a topic to configure that topic (its own page and/or
 repo), or in the General area to set the group default that every other
-topic inherits — consent stays group-wide. Two env keys enable it:
+topic inherits — consent stays group-wide. A self-service group must
+run `/setpage` before `/log` works; an unconfigured scope is refused
+rather than falling back to the operator default page. Two env keys
+enable it:
 
 ```sh
 become <tool>

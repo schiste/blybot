@@ -120,6 +120,7 @@ class InMemoryProfiles:
     tokens: dict[tuple[int, int], str] = field(default_factory=dict)
     cursors: dict[tuple[int, int], str] = field(default_factory=dict)
     fail: bool = False
+    fail_upserts: bool = False
     fail_token_writes: bool = False
     fail_token_reads: bool = False
 
@@ -137,6 +138,8 @@ class InMemoryProfiles:
 
     async def upsert(self, profile: GroupProfile) -> None:
         self._check()
+        if self.fail_upserts:
+            raise StorageError
         self.profiles[profile.chat_id, profile.thread_id] = profile
 
     async def delete(self, chat_id: int, thread_id: int) -> None:

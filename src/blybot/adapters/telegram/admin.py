@@ -44,7 +44,7 @@ REPLY_PAGE_REFUSED: Final = (
 REPLY_SETPAGE_USAGE: Final = (
     "Usage: /setpage <page path> — I publish under <path>/{suffix}, e.g. /setpage WikiProject Foo"
 )
-REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode}"
+REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode} (group-wide)."
 REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
 REPLY_RESET: Final = "Forgotten. {scope} is back on the inherited defaults."
 REPLY_SETREPO_USAGE: Final = "Usage: /setrepo owner/repository"
@@ -55,6 +55,10 @@ REPLY_REPO_BOUND: Final = (
     "fine-grained PAT restricted to {repo} with Issues read/write only."
 )
 REPLY_PAT_REVOKED: Final = "Token discarded. /issue and /repo are disabled for this group."
+REPLY_EVENTS_NEED_REPO: Final = (
+    "Bind a repository at this scope first: /setrepo owner/repo here in the "
+    "topic (or in General for the group), then /events on."
+)
 REPLY_EVENTS_USAGE: Final = "Usage: /events on | off | <kinds> — kinds from: releases, prs, issues"
 REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
 DEFAULT_EVENT_KINDS: Final = frozenset({EventKind.RELEASES, EventKind.PRS})
@@ -94,9 +98,15 @@ async def is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 
 def _thread_of(update: Update) -> int:
-    """The forum topic the command was sent in; 0 for General/non-forum."""
+    """The forum topic the command was sent in; 0 for General/non-forum.
+
+    Gated on ``is_topic_message`` so a reply chain in a non-forum
+    supergroup is not mistaken for a topic.
+    """
     message = update.effective_message
-    return (message.message_thread_id or 0) if message else 0
+    if message is None or not message.is_topic_message:
+        return 0
+    return message.message_thread_id or 0
 
 
 def _scope(thread_id: int) -> str:
@@ -228,6 +238,17 @@ class AdminHandlers:
             await self._reply(context, chat.id, thread_id, REPLY_EVENTS_USAGE)
             return
         enabled, kinds = parsed
+        if enabled:
+            try:
+                own = await self.directory.profile_of(chat.id, thread_id)
+            except StorageError:
+                await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
+                return
+            if not own.repo:
+                # A topic that only inherits the group repo can't get its
+                # own digests — the notifier polls per bound-repo row.
+                await self._reply(context, chat.id, thread_id, REPLY_EVENTS_NEED_REPO)
+                return
         try:
             await self.directory.set_events(chat.id, thread_id, enabled=enabled, kinds=kinds)
         except StorageError:
@@ -244,6 +265,7 @@ class AdminHandlers:
             return
         chat, thread_id = resolved
         settings = await self.directory.resolve(chat.id, thread_id)
+        own = await self.directory.profile_of(chat.id, thread_id)
         text = SETTINGS_TEMPLATE.format(
             scope=_scope(thread_id),
             customized="" if settings.customized else " (all defaults)",
@@ -252,8 +274,8 @@ class AdminHandlers:
             repo=settings.repo or "none",
             token="yes" if settings.has_token else "no",
             events=(
-                ", ".join(sorted(kind.value for kind in settings.event_kinds)) or "on"
-                if settings.events_enabled
+                ", ".join(sorted(kind.value for kind in own.event_kinds)) or "on"
+                if own.events_enabled
                 else "off"
             ),
         )

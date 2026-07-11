@@ -43,28 +43,29 @@ CREATE TABLE IF NOT EXISTS profiles (
 """
 
 _PROFILE_COLUMNS: Final = (
-    "chat_id, log_page, repo, consent_mode, events_enabled, event_kinds, "
+    "chat_id, thread_id, log_page, repo, consent_mode, events_enabled, event_kinds, "
     "token_ciphertext IS NOT NULL"
 )
-Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE chat_id = %s"  # noqa: S608
+_KEY: Final = "chat_id = %s AND thread_id = %s"
+Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_LIST_EVENT_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE events_enabled = 1"  # noqa: S608
 Q_UPSERT: Final = """
-INSERT INTO profiles (chat_id, log_page, repo, consent_mode, events_enabled, event_kinds)
-VALUES (%s, %s, %s, %s, %s, %s)
+INSERT INTO profiles (chat_id, thread_id, log_page, repo, consent_mode, events_enabled, event_kinds)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE log_page = VALUES(log_page), repo = VALUES(repo),
     consent_mode = VALUES(consent_mode), events_enabled = VALUES(events_enabled),
     event_kinds = VALUES(event_kinds)
 """
-Q_DELETE: Final = "DELETE FROM profiles WHERE chat_id = %s"
-Q_GET_CURSOR: Final = "SELECT event_cursor FROM profiles WHERE chat_id = %s"
-Q_SET_CURSOR: Final = "UPDATE profiles SET event_cursor = %s WHERE chat_id = %s AND repo = %s"
+Q_DELETE: Final = f"DELETE FROM profiles WHERE {_KEY}"  # noqa: S608
+Q_GET_CURSOR: Final = f"SELECT event_cursor FROM profiles WHERE {_KEY}"  # noqa: S608
+Q_SET_CURSOR: Final = f"UPDATE profiles SET event_cursor = %s WHERE {_KEY} AND repo = %s"  # noqa: S608
 Q_MIGRATE: Final = "UPDATE IGNORE profiles SET chat_id = %s WHERE chat_id = %s"
-Q_VAULT_READ: Final = "SELECT token_ciphertext FROM profiles WHERE chat_id = %s"
+Q_VAULT_READ: Final = f"SELECT token_ciphertext FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_VAULT_WRITE: Final = """
-INSERT INTO profiles (chat_id, token_ciphertext) VALUES (%s, %s)
+INSERT INTO profiles (chat_id, thread_id, token_ciphertext) VALUES (%s, %s, %s)
 ON DUPLICATE KEY UPDATE token_ciphertext = VALUES(token_ciphertext)
 """
-Q_VAULT_CLEAR: Final = "UPDATE profiles SET token_ciphertext = NULL WHERE chat_id = %s"
+Q_VAULT_CLEAR: Final = f"UPDATE profiles SET token_ciphertext = NULL WHERE {_KEY}"  # noqa: S608
 
 
 class SqlRunner(Protocol):

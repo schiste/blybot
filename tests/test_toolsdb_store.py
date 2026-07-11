@@ -69,6 +69,9 @@ class FakeToolsDb:
         if self.fail:
             msg = "db down"
             raise OSError(msg)
+        # Guard the exact failure the fake would otherwise mask: a SQL
+        # constant whose %s count drifts from what the caller passes.
+        assert query.count("%s") == len(params), f"placeholder/param mismatch: {query!r}"
         if query == SCHEMA:
             self.schema_created = True
             return []

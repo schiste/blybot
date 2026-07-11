@@ -46,6 +46,9 @@ def message(
     thread_id: int | None = None,
     **extra: Any,
 ) -> Message:
+    # A real topic message sets is_topic_message; the bot ignores
+    # message_thread_id otherwise (reply chains in non-forum groups).
+    is_topic = extra.pop("is_topic_message", thread_id is not None)
     return Message(
         message_id=extra.pop("message_id", 10),
         date=NOW,
@@ -54,6 +57,7 @@ def message(
         text=text,
         reply_to_message=reply_to,
         message_thread_id=thread_id,
+        is_topic_message=is_topic,
         **extra,
     )
 

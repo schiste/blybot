@@ -183,9 +183,16 @@ def _just_joined(change: ChatMemberUpdated) -> bool:
 
 
 def _thread_of(update: Update) -> int:
-    """The forum topic the message was sent in; 0 for General/non-forum."""
+    """The forum topic the message was sent in; 0 for General/non-forum.
+
+    Gated on ``is_topic_message`` so a reply chain in a *non-forum*
+    supergroup (which also populates ``message_thread_id``) is not
+    mistaken for a topic.
+    """
     message = update.effective_message
-    return (message.message_thread_id or 0) if message else 0
+    if message is None or not message.is_topic_message:
+        return 0
+    return message.message_thread_id or 0
 
 
 def _repo_error_reply(error: Exception) -> str:
@@ -253,7 +260,9 @@ class GroupHandlers:
         thread_id = _thread_of(update)
 
         async def reply(text: str) -> None:
-            sent = await context.bot.send_message(chat_id=chat.id, text=text)
+            sent = await context.bot.send_message(
+                chat_id=chat.id, text=text, message_thread_id=thread_id or None
+            )
             await self._schedule_cleanup(
                 context.bot, chat.id, sent.message_id, self.reply_cleanup_delay_seconds
             )

@@ -57,6 +57,10 @@ def command(text: str) -> Update:
     return tg.command_update(tg.message(text=text, from_user=tg.ALICE))
 
 
+def command_in_topic(text: str, thread_id: int) -> Update:
+    return tg.command_update(tg.message(text=text, from_user=tg.ALICE, thread_id=thread_id))
+
+
 async def test_admin_check_is_performed_live() -> None:
     _context, bot = admin_context()
     assert await a.is_group_admin(bot, -1, 1)
@@ -279,9 +283,21 @@ async def test_revoke_without_a_vault_reports_self_service_off() -> None:
     assert tg.sent_texts(bot) == [a.REPLY_SELF_SERVICE_OFF]
 
 
+async def test_events_on_requires_a_repo_at_this_scope() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    context, bot = admin_context(args=["on"])
+    await handlers.on_events(command("/events on"), context)  # no repo bound
+    assert tg.sent_texts(bot) == [a.REPLY_EVENTS_NEED_REPO]
+    assert (tg.GROUP.id, 0) not in store.profiles or not store.profiles[
+        tg.GROUP.id, 0
+    ].events_enabled
+
+
 async def test_events_on_uses_default_kinds() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
+    await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)
     profile = store.profiles[tg.GROUP.id, 0]
@@ -293,6 +309,7 @@ async def test_events_on_uses_default_kinds() -> None:
 async def test_events_accepts_explicit_kinds_and_off() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
+    await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
     context, _ = admin_context(args=["releases,issues"])
     await handlers.on_events(command("/events releases,issues"), context)
     assert store.profiles[tg.GROUP.id, 0].event_kinds == frozenset(
@@ -336,3 +353,51 @@ async def test_setrepo_without_a_vault_still_binds() -> None:
     await handlers.on_setrepo(command("/setrepo x/y"), context)
     assert store.profiles[tg.GROUP.id, 0].repo == "x/y"
     assert "cfg_" in tg.sent_texts(bot)[0]
+
+
+async def test_commands_configure_the_topic_they_are_run_in() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    context, bot = admin_context(args=["WikiProject", "Foo"])
+    await handlers.on_setpage(command_in_topic("/setpage WikiProject Foo", 42), context)
+
+    assert (tg.GROUP.id, 42) in store.profiles  # the topic, not the group default
+    assert store.profiles[tg.GROUP.id, 42].log_page == "WikiProject Foo/Telegram logs"
+    (sent, thread) = tg.sent_calls(bot)[0]
+    assert thread == 42  # confirmation routed back into the topic
+    assert "this topic" in sent
+
+
+async def test_setconsent_says_group_wide_even_from_a_topic() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    context, bot = admin_context(args=["author_only"])
+    await handlers.on_setconsent(command_in_topic("/setconsent author_only", 42), context)
+    assert store.profiles[tg.GROUP.id, 0].consent_mode is ConsentMode.AUTHOR_ONLY  # thread 0
+    assert (tg.GROUP.id, 42) not in store.profiles
+    assert "group-wide" in tg.sent_texts(bot)[0]
+
+
+async def test_events_storage_failure_after_repo_check_is_reported() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
+    store.fail_upserts = True  # get() still works; the set_events write fails
+    context, bot = admin_context(args=["on"])
+    await handlers.on_events(command("/events on"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_events_profile_lookup_outage_is_reported() -> None:
+    handlers = make_handlers(InMemoryProfiles(fail=True))
+    context, bot = admin_context(args=["on"])
+    await handlers.on_events(command("/events on"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+def test_thread_of_ignores_non_topic_and_missing_messages() -> None:
+    assert a._thread_of(Update(update_id=1)) == 0  # no message
+    plain = tg.command_update(tg.message(text="/x"))  # not a topic message
+    assert a._thread_of(plain) == 0
+    topical = tg.command_update(tg.message(text="/x", thread_id=42))
+    assert a._thread_of(topical) == 42

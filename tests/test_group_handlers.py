@@ -530,3 +530,11 @@ async def test_migration_storage_failure_is_logged_not_raised() -> None:
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)  # no raise
+
+
+def test_thread_of_ignores_non_topic_and_missing_messages() -> None:
+    from telegram import Update
+
+    assert h._thread_of(Update(update_id=1)) == 0  # no message
+    assert h._thread_of(tg.command_update(tg.message(text="x"))) == 0  # not a topic
+    assert h._thread_of(tg.command_update(tg.message(text="x", thread_id=7))) == 7

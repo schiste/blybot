@@ -179,7 +179,17 @@ v1 had **no persistent datastore**; v2's self-service adds exactly one, per this
 
 1. **In-memory session map** (volatile, see 10).
 2. **Configuration** in the tool home directory (see 12).
-3. **v2: one `profiles` table on ToolsDB**, keyed by `(chat_id, thread_id)` so forum-group topics configure independently — chosen page/repo, consent policy, event settings, poll cursor, and an admin-supplied API token encrypted with Fernet (`PROFILE_ENCRYPTION_KEY`). Resolution is three-tier: topic override → group default (thread 0) → operator env default. On a self-service deployment `/log` publishes only when a page is set explicitly (topic or group); an unconfigured group is told to `/setpage` rather than silently using the operator default page. **The only identifiers persisted are group structure (chat id, topic thread id) — never a user id, name, or message**; admin-ship is verified live per command and never stored.
+3. **v2: one `profiles` table on ToolsDB**, keyed by `(chat_id, thread_id)` so forum-group topics configure independently — chosen page/repo, consent policy, whether notifications are on, a JSON array of composable event **rules**, a JSON map of per-resource poll **cursors**, and an admin-supplied API token encrypted with Fernet (`PROFILE_ENCRYPTION_KEY`). Resolution is three-tier: topic override → group default (thread 0) → operator env default. On a self-service deployment `/log` publishes only when a page is set explicitly (topic or group); an unconfigured group is told to `/setpage` rather than silently using the operator default page. **The only identifiers persisted are group structure (chat id, topic thread id) — never a user id, name, or message**; admin-ship is verified live per command and never stored.
+
+### 11.1 Composable event rules
+
+Repository notifications are driven by per-scope **rules**, not a fixed digest. A rule is a **trigger** (event type) + **filter** (composable conditions) + **delivery mode**. Admins manage them with `/rule add <trigger> [filters…] [live|digest]`, `/rule remove <id>`, `/rule clear`, and `/rules`; `/events on|off` is the master switch and seeds two starter digest rules (`pr.merged`, `release`) when a scope has none. Cap: 20 rules per scope.
+
+- **Triggers** (each reliably detectable from a REST list endpoint by comparing item timestamps against a per-resource watermark): `issue.opened`, `issue.closed`, `pr.opened`, `pr.closed`, `pr.merged`, `comment`, `release`.
+- **Filters** (distinct keys AND; comma-separated or repeated values are any-of; unset never constrains): `label:`, `author:`, `base:`, `assignee:`, `milestone:`, `draft:true|false`, and `title:` — a substring, or `title:/regex/` for a case-insensitive pattern.
+- **Delivery**: `live` sends one message per matching event as it is found; `digest` accumulates one combined message per poll cycle (silent when nothing matched). An event matching both a live and a digest rule is delivered once in each mode.
+
+Each poll cycle the notifier polls only the resource streams the scope's rules need, matches every fresh event against every rule, advances per-resource cursors under a repo guard, and never replays history on the first poll. **Deferred** (need the issue-events *timeline* API, not a list snapshot): fine-grained `issue.reopened|labeled|assigned|milestoned` and `pr.ready`; also GitHub Discussions (GraphQL-only), PR reviews, path filters, and scheduled digests. Their conditions are still expressible as *filters* on the triggers above (e.g. `issue.opened label:bug`).
 
 ---
 

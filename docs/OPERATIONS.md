@@ -47,7 +47,7 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
    setpage - [group] (admins) where /log publishes (under <path>/Telegram logs)
    setconsent - [group] (admins) who may /log whose messages
    setrepo - [group] (admins) bind a GitHub repository
-   events - [group] (admins) repo digests on/off/kinds
+   events - [group] (admins) turn rule-driven repo notifications on/off
    rule - [group] (admins) add/remove/clear composable event rules
    rules - [group] (admins) list this chat's event rules
    settings - [group] (admins) current group configuration

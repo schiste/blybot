@@ -12,7 +12,7 @@ from typing import Any, Final
 
 import httpx
 
-from blybot.domain.models import EventKind, RepoEvent, RepoSummary
+from blybot.domain.models import EventType, RepoEvent, RepoSummary
 from blybot.domain.ports import IssueTrackerError
 from blybot.observability import log_event
 
@@ -166,7 +166,7 @@ def _reduce(item: dict[str, Any]) -> RepoEvent | None:
     if kind == "ReleaseEvent" and payload.get("action") == "published":
         release = payload.get("release", {})
         return RepoEvent(
-            kind=EventKind.RELEASES,
+            event_type=EventType.RELEASE,
             title=_clip(f"Release {release.get('name') or release.get('tag_name', '?')}"),
             url=str(release.get("html_url", "")),
         )
@@ -175,14 +175,14 @@ def _reduce(item: dict[str, Any]) -> RepoEvent | None:
         if not pull.get("merged"):
             return None
         return RepoEvent(
-            kind=EventKind.PRS,
+            event_type=EventType.PR_MERGED,
             title=_clip(f"Merged: {pull.get('title', '?')}"),
             url=str(pull.get("html_url", "")),
         )
     if kind == "IssuesEvent" and payload.get("action") == "opened":
         issue = payload.get("issue", {})
         return RepoEvent(
-            kind=EventKind.ISSUES,
+            event_type=EventType.ISSUE_OPENED,
             title=_clip(f"New issue: {issue.get('title', '?')}"),
             url=str(issue.get("html_url", "")),
         )

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from blybot.domain.models import EventKind, EventType
 from blybot.domain.ports import IssueTrackerError, StorageError
 from blybot.observability import Counters, log_event
 
@@ -21,6 +22,14 @@ if TYPE_CHECKING:
     from blybot.services.policy import GroupPolicy
 
 _DIGEST_LINES: Final = 5
+
+# Interim bridge from the coarse /events kinds to concrete event types;
+# replaced by the rules engine (Phase R3).
+_KIND_TYPES: Final = {
+    EventKind.RELEASES: {EventType.RELEASE},
+    EventKind.PRS: {EventType.PR_MERGED},
+    EventKind.ISSUES: {EventType.ISSUE_OPENED},
+}
 
 
 @dataclass(eq=False)
@@ -68,7 +77,8 @@ class RepoNotifier:
         except (StorageError, IssueTrackerError):
             log_event("repo_poll", "error")
             return None
-        wanted = [event for event in events if event.kind in profile.event_kinds]
+        allowed = {t for kind in profile.event_kinds for t in _KIND_TYPES[kind]}
+        wanted = [event for event in events if event.event_type in allowed]
         if not wanted:
             return None
         self.counters.increment("repo_digests")

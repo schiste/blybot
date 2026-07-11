@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from blybot.domain.models import EventKind, GroupProfile, RepoEvent
+from blybot.domain.models import EventKind, EventType, GroupProfile, RepoEvent
 from blybot.observability import Counters
 from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy
 from tests.fakes import FakeRepoGateway, InMemoryProfiles
 
-RELEASE = RepoEvent(kind=EventKind.RELEASES, title="Release 1.0", url="https://x/r/1")
-MERGE = RepoEvent(kind=EventKind.PRS, title="Merged: fix", url="https://x/pr/2")
-ISSUE = RepoEvent(kind=EventKind.ISSUES, title="New issue: bug", url="https://x/i/3")
+RELEASE = RepoEvent(event_type=EventType.RELEASE, title="Release 1.0", url="https://x/r/1")
+MERGE = RepoEvent(event_type=EventType.PR_MERGED, title="Merged: fix", url="https://x/pr/2")
+ISSUE = RepoEvent(event_type=EventType.ISSUE_OPENED, title="New issue: bug", url="https://x/i/3")
 
 
 def make_notifier(

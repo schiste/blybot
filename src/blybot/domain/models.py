@@ -7,7 +7,8 @@ this module can hold a Telegram user ID, username, or display name
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
@@ -30,6 +31,56 @@ class EventKind(Enum):
     RELEASES = "releases"
     PRS = "prs"
     ISSUES = "issues"
+
+
+class Resource(Enum):
+    """A GitHub resource stream the poller fetches to source events."""
+
+    ISSUES = "issues"
+    PULLS = "pulls"
+    ISSUE_COMMENTS = "issue_comments"
+    RELEASES = "releases"
+
+
+class EventType(Enum):
+    """A specific repository happening a rule can trigger on.
+
+    ``value`` is the user-facing ``family.action`` token; ``resource``
+    is the stream the poller reads to observe it.
+    """
+
+    ISSUE_OPENED = ("issue.opened", Resource.ISSUES)
+    ISSUE_CLOSED = ("issue.closed", Resource.ISSUES)
+    ISSUE_REOPENED = ("issue.reopened", Resource.ISSUES)
+    ISSUE_LABELED = ("issue.labeled", Resource.ISSUES)
+    ISSUE_ASSIGNED = ("issue.assigned", Resource.ISSUES)
+    ISSUE_MILESTONED = ("issue.milestoned", Resource.ISSUES)
+    PR_OPENED = ("pr.opened", Resource.PULLS)
+    PR_CLOSED = ("pr.closed", Resource.PULLS)
+    PR_MERGED = ("pr.merged", Resource.PULLS)
+    PR_READY = ("pr.ready", Resource.PULLS)
+    COMMENT = ("comment", Resource.ISSUE_COMMENTS)
+    RELEASE = ("release", Resource.RELEASES)
+
+    def __init__(self, token: str, resource: Resource) -> None:
+        self.token = token
+        self.resource = resource
+
+    @classmethod
+    def from_token(cls, token: str) -> EventType:
+        """Return the event type for a ``family.action`` token."""
+        for member in cls:
+            if member.token == token:
+                return member
+        msg = f"unknown event type: {token}"
+        raise ValueError(msg)
+
+
+class DeliveryMode(Enum):
+    """How a rule's matches reach the chat."""
+
+    LIVE = "live"  # one message per matching event, as it is found
+    DIGEST = "digest"  # one combined message per poll cycle, silent if empty
 
 
 class ConsentMode(Enum):
@@ -62,16 +113,88 @@ class GroupProfile:
     consent_mode: ConsentMode | None = None
     events_enabled: bool = False
     event_kinds: frozenset[EventKind] = frozenset()
+    rules: tuple[Rule, ...] = ()
     has_token: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class RepoEvent:
-    """One repository happening, already reduced to publishable facts."""
+    """One repository happening, normalized to publishable + filterable facts.
 
-    kind: EventKind
+    Carries only what rules filter on and messages render — never a
+    Telegram identifier. ``author`` etc. are *GitHub* handles, which are
+    public repository metadata, not chat identities (spec R6).
+    """
+
+    event_type: EventType
     title: str
     url: str
+    author: str = ""
+    labels: frozenset[str] = frozenset()
+    base_branch: str = ""
+    draft: bool = False
+    assignees: frozenset[str] = frozenset()
+    milestone: str = ""
+    state: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class RuleFilter:
+    """Composable conditions on a :class:`RepoEvent`.
+
+    Distinct keys AND together; a comma-separated value is any-of (OR).
+    ``title_match`` is a substring by default, or a regex when the
+    parser wrapped it in slashes. An unset field never constrains.
+    """
+
+    labels: frozenset[str] = frozenset()
+    author: str = ""
+    base: str = ""
+    title_match: str = ""
+    title_is_regex: bool = False
+    draft: bool | None = None
+    assignee: str = ""
+    milestone: str = ""
+
+    def matches(self, event: RepoEvent) -> bool:
+        """Whether ``event`` satisfies every set condition."""
+        return (
+            self._labels_ok(event)
+            and (not self.author or self.author.casefold() == event.author.casefold())
+            and (not self.base or self.base == event.base_branch)
+            and self._title_ok(event)
+            and (self.draft is None or self.draft == event.draft)
+            and (not self.assignee or self.assignee in {a.casefold() for a in event.assignees})
+            and (not self.milestone or self.milestone.casefold() == event.milestone.casefold())
+        )
+
+    def _labels_ok(self, event: RepoEvent) -> bool:
+        if not self.labels:
+            return True
+        wanted = {label.casefold() for label in self.labels}
+        present = {label.casefold() for label in event.labels}
+        return bool(wanted & present)  # any-of
+
+    def _title_ok(self, event: RepoEvent) -> bool:
+        if not self.title_match:
+            return True
+        if self.title_is_regex:
+            return re.search(self.title_match, event.title, re.IGNORECASE) is not None
+        return self.title_match.casefold() in event.title.casefold()
+
+
+@dataclass(frozen=True, slots=True)
+class Rule:
+    """A trigger + filter + delivery mode a scope watches for."""
+
+    rule_id: str
+    trigger: EventType
+    filter: RuleFilter = field(default_factory=RuleFilter)
+    mode: DeliveryMode = DeliveryMode.LIVE
+
+    def matches(self, event: RepoEvent) -> bool:
+        """Whether ``event`` fires this rule."""
+        return event.event_type is self.trigger and self.filter.matches(event)
 
 
 @dataclass(frozen=True, slots=True)

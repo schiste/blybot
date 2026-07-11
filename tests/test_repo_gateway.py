@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from blybot.adapters.github.gateway import GitHubRepoGateway
-from blybot.domain.models import EventKind
+from blybot.domain.models import EventType
 from blybot.domain.ports import IssueTrackerError
 
 
@@ -182,8 +182,8 @@ async def test_events_baseline_never_replays_history() -> None:
 async def test_events_filter_by_watermark_map_kinds_and_order_oldest_first() -> None:
     gateway = make_gateway(EventsApi())
     events, cursor = await gateway.events_since("x/y", "tok", 'W/"old"|10')
-    kinds = [event.kind for event in events]
-    assert kinds == [EventKind.ISSUES, EventKind.PRS, EventKind.RELEASES]  # oldest first
+    types = [event.event_type for event in events]
+    assert types == [EventType.ISSUE_OPENED, EventType.PR_MERGED, EventType.RELEASE]  # oldest first
     assert events[0].title == "New issue: Bug"
     assert events[1].title == "Merged: Fix it"  # the unmerged PR was dropped
     assert events[2].url == "https://x/rel/2"

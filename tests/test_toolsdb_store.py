@@ -12,16 +12,17 @@ import pytest
 from cryptography.fernet import Fernet
 
 from blybot.adapters.toolsdb.store import (
+    MIGRATE_ADD_CURSORS,
     MIGRATE_ADD_RULES,
     MIGRATE_ADD_THREAD,
     MIGRATE_REBUILD_PK,
     Q_DELETE,
     Q_GET,
-    Q_GET_CURSOR,
+    Q_GET_CURSORS,
     Q_LIST_EVENT_ENABLED,
     Q_MIGRATE,
     Q_MIGRATE_CLEAR,
-    Q_SET_CURSOR,
+    Q_SET_CURSORS,
     Q_THREAD_IN_PK,
     Q_UPSERT,
     Q_VAULT_CLEAR,
@@ -31,7 +32,7 @@ from blybot.adapters.toolsdb.store import (
     PymysqlRunner,
     ToolsDbStore,
 )
-from blybot.domain.models import ConsentMode, EventKind, GroupProfile
+from blybot.domain.models import ConsentMode, GroupProfile
 from blybot.domain.ports import StorageError
 from blybot.services.rules import parse_rule
 
@@ -54,10 +55,9 @@ class FakeToolsDb:
                 "repo": None,
                 "consent_mode": None,
                 "events_enabled": 0,
-                "event_kinds": "",
                 "rules_json": None,
                 "token": None,
-                "cursor": None,
+                "cursors": None,
             },
         )
 
@@ -71,7 +71,6 @@ class FakeToolsDb:
             row["repo"],
             row["consent_mode"],
             row["events_enabled"],
-            row["event_kinds"],
             row["rules_json"],
             row["token"] is not None,
         )
@@ -88,7 +87,7 @@ class FakeToolsDb:
                 self.schema_created = True
                 self.thread_in_pk = True  # a freshly created table has the composite key
             return []
-        if query in (MIGRATE_ADD_THREAD, MIGRATE_ADD_RULES):
+        if query in (MIGRATE_ADD_THREAD, MIGRATE_ADD_RULES, MIGRATE_ADD_CURSORS):
             return []  # column add: no-op in the fake
         if query == Q_THREAD_IN_PK:
             return [(1 if self.thread_in_pk else 0,)]
@@ -102,14 +101,13 @@ class FakeToolsDb:
                 del self.tables[key]
             return []
         if query == Q_UPSERT:
-            chat_id, thread_id, log_page, repo, consent, events_enabled, kinds, rules_json = params
+            chat_id, thread_id, log_page, repo, consent, events_enabled, rules_json = params
             row = self._row((chat_id, thread_id))
             row.update(
                 log_page=log_page,
                 repo=repo,
                 consent_mode=consent,
                 events_enabled=events_enabled,
-                event_kinds=kinds,
                 rules_json=rules_json,
             )
             return []
@@ -125,14 +123,14 @@ class FakeToolsDb:
         if query == Q_DELETE:
             self.tables.pop((params[0], params[1]), None)
             return []
-        if query == Q_GET_CURSOR:
+        if query == Q_GET_CURSORS:
             key = (params[0], params[1])
-            return [(self.tables[key]["cursor"],)] if key in self.tables else []
-        if query == Q_SET_CURSOR:
-            cursor, chat_id, thread_id, repo = params
+            return [(self.tables[key]["cursors"],)] if key in self.tables else []
+        if query == Q_SET_CURSORS:
+            cursors, chat_id, thread_id, repo = params
             key = (chat_id, thread_id)
             if key in self.tables and self.tables[key]["repo"] == repo:
-                self.tables[key]["cursor"] = cursor
+                self.tables[key]["cursors"] = cursors
             return []
         if query == Q_MIGRATE:
             new_id, old_id = params
@@ -165,7 +163,6 @@ PROFILE = GroupProfile(
     repo="schiste/blybot",
     consent_mode=ConsentMode.AUTHOR_ONLY,
     events_enabled=True,
-    event_kinds=frozenset({EventKind.RELEASES, EventKind.PRS}),
 )
 
 
@@ -240,12 +237,13 @@ async def test_list_event_enabled_filters() -> None:
     assert [profile.chat_id for profile in enabled] == [-100500]
 
 
-async def test_cursor_roundtrip_and_default() -> None:
+async def test_cursors_roundtrip_and_default() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    assert await store.get_cursor(-100500, 0) is None
-    await store.set_cursor(-100500, 0, 'W/"etag123"', PROFILE.repo or "")
-    assert await store.get_cursor(-100500, 0) == 'W/"etag123"'
+    assert await store.get_cursors(-100500, 0) == {}
+    cursors = {"issues": "2026-07-05T00:00:00Z", "pulls": "2026-07-06T00:00:00Z"}
+    await store.set_cursors(-100500, 0, cursors, PROFILE.repo or "")
+    assert await store.get_cursors(-100500, 0) == cursors
 
 
 async def test_tokens_are_encrypted_at_rest_and_roundtrip() -> None:
@@ -261,14 +259,14 @@ async def test_tokens_are_encrypted_at_rest_and_roundtrip() -> None:
     assert profile.has_token
 
 
-async def test_upsert_preserves_token_and_cursor() -> None:
+async def test_upsert_preserves_token_and_cursors() -> None:
     store, _ = make_store()
-    await store.upsert(PROFILE)  # the row must carry the repo the cursor is for
+    await store.upsert(PROFILE)  # the row must carry the repo the cursors are for
     await store.store_token(-100500, 0, "ghp_secret")
-    await store.set_cursor(-100500, 0, "etag", "schiste/blybot")
+    await store.set_cursors(-100500, 0, {"issues": "2026-07-05T00:00:00Z"}, "schiste/blybot")
     await store.upsert(PROFILE)
     assert await store.fetch_token(-100500, 0) == "ghp_secret"
-    assert await store.get_cursor(-100500, 0) == "etag"
+    assert await store.get_cursors(-100500, 0) == {"issues": "2026-07-05T00:00:00Z"}
 
 
 async def test_token_absent_reads_as_none() -> None:
@@ -354,11 +352,11 @@ def test_pymysql_runner_connects_with_cnf_credentials(
 
 
 async def test_cursor_writes_are_repo_guarded() -> None:
-    """An in-flight cursor for the OLD binding never lands on a new one."""
+    """An in-flight cursor map for the OLD binding never lands on a new one."""
     store, _ = make_store()
     await store.upsert(PROFILE)
-    await store.set_cursor(-100500, 0, "stale", "some/other")  # repo mismatch
-    assert await store.get_cursor(-100500, 0) is None
+    await store.set_cursors(-100500, 0, {"issues": "stale"}, "some/other")  # repo mismatch
+    assert await store.get_cursors(-100500, 0) == {}
 
 
 async def test_migrate_rekeys_the_profile() -> None:

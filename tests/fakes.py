@@ -118,7 +118,7 @@ class InMemoryProfiles:
 
     profiles: dict[tuple[int, int], GroupProfile] = field(default_factory=dict)
     tokens: dict[tuple[int, int], str] = field(default_factory=dict)
-    cursors: dict[tuple[int, int], str] = field(default_factory=dict)
+    cursors: dict[tuple[int, int], dict[str, str]] = field(default_factory=dict)
     fail: bool = False
     fail_upserts: bool = False
     fail_token_writes: bool = False
@@ -157,17 +157,19 @@ class InMemoryProfiles:
             if profile.events_enabled
         ]
 
-    async def get_cursor(self, chat_id: int, thread_id: int) -> str | None:
+    async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:
         self._check()
-        return self.cursors.get((chat_id, thread_id))
+        return dict(self.cursors.get((chat_id, thread_id), {}))
 
-    async def set_cursor(self, chat_id: int, thread_id: int, cursor: str, repo: str = "") -> None:
+    async def set_cursors(
+        self, chat_id: int, thread_id: int, cursors: dict[str, str], repo: str = ""
+    ) -> None:
         self._check()
         key = (chat_id, thread_id)
         profile = self.profiles.get(key)
         if repo and (profile is None or profile.repo != repo):
             return  # repo guard: stale in-flight cursor writes are dropped
-        self.cursors[key] = cursor
+        self.cursors[key] = dict(cursors)
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
         self._check()
@@ -204,7 +206,6 @@ class FakeRepoGateway:
     issues: list[tuple[str, str, str, str]] = field(default_factory=list)
     summaries: dict[str, RepoSummary] = field(default_factory=dict)
     events: list[RepoEvent] = field(default_factory=list)
-    next_cursor: str = "etag|9"
     fail: bool = False
 
     async def validate_token(self, repo: str, token: str) -> bool:
@@ -223,16 +224,6 @@ class FakeRepoGateway:
         return self.summaries.get(
             repo, RepoSummary(repo=repo, open_count=2, recent_titles=("A", "B"))
         )
-
-    async def events_since(
-        self, repo: str, token: str, cursor: str | None
-    ) -> tuple[list[RepoEvent], str]:
-        del repo
-        if self.fail or token not in self.valid_tokens:
-            raise IssueTrackerError
-        if cursor is None:
-            return [], "etag|1"
-        return list(self.events), self.next_cursor
 
     async def poll_resource(
         self, repo: str, token: str, resource: Resource, cursor: str | None

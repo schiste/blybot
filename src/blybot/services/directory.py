@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Final
 
-from blybot.domain.models import ConsentMode, EventKind, GroupProfile
+from blybot.domain.models import ConsentMode, GroupProfile
 from blybot.domain.ports import StorageError
 from blybot.services.rules import MAX_RULES
 
@@ -55,7 +55,6 @@ class ChannelSettings:
     repo: str
     has_token: bool
     events_enabled: bool
-    event_kinds: frozenset[EventKind]
     # The thread whose profile provided the repo/token binding — the
     # token must be fetched from THIS key, not the calling topic (a
     # topic inheriting the group repo shares the group's token).
@@ -112,7 +111,6 @@ class ChannelDirectory:
             repo=binder.repo if binder and binder.repo else self.default_repo,
             has_token=bool(binder and binder.has_token),
             events_enabled=bool(binder and binder.events_enabled),
-            event_kinds=binder.event_kinds if binder else frozenset(),
             repo_thread_id=binder.thread_id if binder else 0,
             customized=bool((topic and topic is not group) or group),
             degraded=degraded,
@@ -141,11 +139,9 @@ class ChannelDirectory:
         """Bind this (group, topic) to a GitHub repository (``owner/name``)."""
         await self._update(chat_id, thread_id, repo=repo)
 
-    async def set_events(
-        self, chat_id: int, thread_id: int, *, enabled: bool, kinds: frozenset[EventKind]
-    ) -> None:
-        """Configure this (group, topic)'s repository-event notifications."""
-        await self._update(chat_id, thread_id, events_enabled=enabled, event_kinds=kinds)
+    async def set_events(self, chat_id: int, thread_id: int, *, enabled: bool) -> None:
+        """Switch this (group, topic)'s rule-driven notifications on or off."""
+        await self._update(chat_id, thread_id, events_enabled=enabled)
 
     async def add_rule(self, chat_id: int, thread_id: int, rule: Rule) -> tuple[Rule, ...]:
         """Append a composable event rule to this (group, topic).

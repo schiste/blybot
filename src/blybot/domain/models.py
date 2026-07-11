@@ -25,14 +25,6 @@ class TimestampGranularity(Enum):
     MINUTE = "minute"
 
 
-class EventKind(Enum):
-    """Repository happenings a group may subscribe to (polled, never pushed)."""
-
-    RELEASES = "releases"
-    PRS = "prs"
-    ISSUES = "issues"
-
-
 class Resource(Enum):
     """A GitHub resource stream the poller fetches to source events."""
 
@@ -116,7 +108,6 @@ class GroupProfile:
     repo: str | None = None
     consent_mode: ConsentMode | None = None
     events_enabled: bool = False
-    event_kinds: frozenset[EventKind] = frozenset()
     rules: tuple[Rule, ...] = ()
     has_token: bool = False
 

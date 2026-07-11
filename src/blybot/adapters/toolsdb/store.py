@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import configparser
+import json
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import pymysql
 from cryptography.fernet import Fernet, InvalidToken
 
-from blybot.domain.models import ConsentMode, EventKind, GroupProfile
+from blybot.domain.models import ConsentMode, GroupProfile
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 from blybot.services.rules import dumps_rules, loads_rules
@@ -35,17 +36,16 @@ CREATE TABLE IF NOT EXISTS profiles (
     repo VARCHAR(140) NULL,
     consent_mode VARCHAR(16) NULL,
     events_enabled TINYINT(1) NOT NULL DEFAULT 0,
-    event_kinds VARCHAR(64) NOT NULL DEFAULT '',
     rules_json TEXT NULL,
+    cursors_json TEXT NULL,
     token_ciphertext BLOB NULL,
-    event_cursor VARCHAR(128) NULL,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (chat_id, thread_id)
 )
 """
 
 _PROFILE_COLUMNS: Final = (
-    "chat_id, thread_id, log_page, repo, consent_mode, events_enabled, event_kinds, "
+    "chat_id, thread_id, log_page, repo, consent_mode, events_enabled, "
     "rules_json, token_ciphertext IS NOT NULL"
 )
 _KEY: Final = "chat_id = %s AND thread_id = %s"
@@ -53,15 +53,15 @@ Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: 
 Q_LIST_EVENT_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE events_enabled = 1"  # noqa: S608
 Q_UPSERT: Final = """
 INSERT INTO profiles
-    (chat_id, thread_id, log_page, repo, consent_mode, events_enabled, event_kinds, rules_json)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    (chat_id, thread_id, log_page, repo, consent_mode, events_enabled, rules_json)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE log_page = VALUES(log_page), repo = VALUES(repo),
     consent_mode = VALUES(consent_mode), events_enabled = VALUES(events_enabled),
-    event_kinds = VALUES(event_kinds), rules_json = VALUES(rules_json)
+    rules_json = VALUES(rules_json)
 """
 Q_DELETE: Final = f"DELETE FROM profiles WHERE {_KEY}"  # noqa: S608
-Q_GET_CURSOR: Final = f"SELECT event_cursor FROM profiles WHERE {_KEY}"  # noqa: S608
-Q_SET_CURSOR: Final = f"UPDATE profiles SET event_cursor = %s WHERE {_KEY} AND repo = %s"  # noqa: S608
+Q_GET_CURSORS: Final = f"SELECT cursors_json FROM profiles WHERE {_KEY}"  # noqa: S608
+Q_SET_CURSORS: Final = f"UPDATE profiles SET cursors_json = %s WHERE {_KEY} AND repo = %s"  # noqa: S608
 # Group→supergroup migration re-keys the group's rows to the new chat
 # id. The migrating group is authoritative, so any pre-existing rows at
 # the destination (a chat id the bot somehow already knew) are cleared
@@ -79,9 +79,12 @@ MIGRATE_ADD_THREAD: Final = (
 MIGRATE_REBUILD_PK: Final = (
     "ALTER TABLE profiles DROP PRIMARY KEY, ADD PRIMARY KEY (chat_id, thread_id)"
 )
-# Composable rules arrived after event_kinds; older tables gain the
-# column in place. No-op once applied.
+# Composable rules and per-resource poll cursors arrived after the
+# original schema; older tables gain the columns in place. No-op once
+# applied. (The retired event_kinds/event_cursor columns are simply
+# left in place on old tables — unused and harmless.)
 MIGRATE_ADD_RULES: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS rules_json TEXT NULL"
+MIGRATE_ADD_CURSORS: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS cursors_json TEXT NULL"
 Q_THREAD_IN_PK: Final = """
 SELECT COUNT(*) FROM information_schema.STATISTICS
 WHERE table_schema = DATABASE() AND table_name = 'profiles'
@@ -158,6 +161,7 @@ class ToolsDbStore:
         await self._run(SCHEMA, ())
         await self._run(MIGRATE_ADD_THREAD, ())
         await self._run(MIGRATE_ADD_RULES, ())
+        await self._run(MIGRATE_ADD_CURSORS, ())
         rows = await self._run(Q_THREAD_IN_PK, ())
         if rows and not int(rows[0][0]):
             await self._run(MIGRATE_REBUILD_PK, ())
@@ -169,7 +173,7 @@ class ToolsDbStore:
         return _profile_from_row(rows[0]) if rows else None
 
     async def upsert(self, profile: GroupProfile) -> None:
-        """Create or update the profile (token and cursor are untouched)."""
+        """Create or update the profile (token and cursors are untouched)."""
         await self._run(
             Q_UPSERT,
             (
@@ -179,7 +183,6 @@ class ToolsDbStore:
                 profile.repo,
                 profile.consent_mode.value if profile.consent_mode else None,
                 int(profile.events_enabled),
-                ",".join(sorted(kind.value for kind in profile.event_kinds)),
                 dumps_rules(profile.rules),
             ),
         )
@@ -193,14 +196,25 @@ class ToolsDbStore:
         rows = await self._run(Q_LIST_EVENT_ENABLED, ())
         return [_profile_from_row(row) for row in rows]
 
-    async def get_cursor(self, chat_id: int, thread_id: int) -> str | None:
-        """Return the (group, topic) event-poll cursor (ETag), if any."""
-        rows = await self._run(Q_GET_CURSOR, (chat_id, thread_id))
-        return rows[0][0] if rows and rows[0][0] else None
+    async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:
+        """Return the (group, topic) per-resource poll cursor map."""
+        rows = await self._run(Q_GET_CURSORS, (chat_id, thread_id))
+        raw = rows[0][0] if rows else None
+        if not raw:
+            return {}
+        loaded: dict[str, str] = json.loads(raw)
+        return loaded
 
-    async def set_cursor(self, chat_id: int, thread_id: int, cursor: str, repo: str) -> None:
-        """Persist the cursor iff the profile is still bound to ``repo``."""
-        await self._run(Q_SET_CURSOR, (cursor, chat_id, thread_id, repo))
+    async def set_cursors(
+        self, chat_id: int, thread_id: int, cursors: dict[str, str], repo: str
+    ) -> None:
+        """Persist the per-resource cursor map iff still bound to ``repo``.
+
+        The repo guard keeps an in-flight poll from stamping stale
+        cursors onto a profile that was reset or rebound meanwhile.
+        """
+        payload = json.dumps(cursors, separators=(",", ":"))
+        await self._run(Q_SET_CURSORS, (payload, chat_id, thread_id, repo))
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
         """Re-key every topic of a group after a group→supergroup upgrade."""
@@ -249,7 +263,6 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         repo,
         consent,
         events_enabled,
-        event_kinds,
         rules_json,
         has_token,
     ) = row
@@ -260,7 +273,6 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         repo=repo,
         consent_mode=ConsentMode(consent) if consent else None,
         events_enabled=bool(events_enabled),
-        event_kinds=frozenset(EventKind(kind) for kind in event_kinds.split(",") if kind),
         rules=loads_rules(rules_json),
         has_token=bool(has_token),
     )

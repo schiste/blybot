@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Final
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 
-from blybot.domain.models import ConsentMode, EventKind
+from blybot.domain.models import ConsentMode
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
 from blybot.services.directory import (
@@ -64,9 +64,14 @@ REPLY_EVENTS_NEED_REPO: Final = (
     "Bind a repository at this scope first: /setrepo owner/repo here in the "
     "topic (or in General for the group), then /events on."
 )
-REPLY_EVENTS_USAGE: Final = "Usage: /events on | off | <kinds> — kinds from: releases, prs, issues"
+REPLY_EVENTS_USAGE: Final = "Usage: /events on | off — rules decide what's delivered (see /rules)"
 REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
-DEFAULT_EVENT_KINDS: Final = frozenset({EventKind.RELEASES, EventKind.PRS})
+REPLY_EVENTS_SEEDED: Final = (
+    "Repo notifications on. Seeded two starter rules — pr.merged and release, "
+    "both digest. Use /rules to see them, /rule to add more, /rule clear to start over."
+)
+# Sensible defaults so /events on works out of the box; admins refine them.
+DEFAULT_RULES: Final = ("pr.merged digest", "release digest")
 REPLY_RULE_USAGE: Final = (
     "Usage:\n"
     "/rule add <event> [filters] [live|digest]\n"
@@ -92,7 +97,7 @@ SETUP_TEXT: Final = (
     "/setpage <page path> — where /log publishes (under <path>/{suffix})\n"
     "/setconsent immediate|author_only — who may /log whose messages\n"
     "/setrepo owner/repo — bind a GitHub repo (then /issue, /repo)\n"
-    "/events on|off|releases,prs,issues — repo digests in this chat\n"
+    "/events on|off — turn rule-driven repo notifications on/off\n"
     "/rule add|remove|clear — composable event rules (see /rules)\n"
     "/rules — list this chat's event rules\n"
     "/revoke — discard this group's stored GitHub token\n"
@@ -253,36 +258,43 @@ class AdminHandlers:
         await self._reply(context, chat.id, thread_id, REPLY_PAT_REVOKED)
 
     async def on_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Switch this group's repo-notification digests on, off, or by kind."""
+        """Switch this (group, topic)'s rule-driven notifications on or off.
+
+        ``on`` requires a repo bound at this scope and seeds two starter
+        rules when none exist, so it works out of the box; the rules
+        themselves decide what is delivered.
+        """
         resolved = await self._admin_chat(update, context)
         if resolved is None:
             return
         chat, thread_id = resolved
-        arguments = [word for arg in (context.args or ()) for word in arg.split(",") if word]
-        parsed = _parse_events(arguments)
-        if parsed is None:
+        argument = (context.args or [""])[0].lower()
+        if argument not in {"on", "off"}:
             await self._reply(context, chat.id, thread_id, REPLY_EVENTS_USAGE)
             return
-        enabled, kinds = parsed
-        if enabled:
-            try:
-                own = await self.directory.profile_of(chat.id, thread_id)
-            except StorageError:
-                await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
-                return
-            if not own.repo:
-                # A topic that only inherits the group repo can't get its
-                # own digests — the notifier polls per bound-repo row.
-                await self._reply(context, chat.id, thread_id, REPLY_EVENTS_NEED_REPO)
-                return
         try:
-            await self.directory.set_events(chat.id, thread_id, enabled=enabled, kinds=kinds)
+            reply = await self._toggle_events(chat.id, thread_id, enabled=argument == "on")
         except StorageError:
-            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
-            return
+            reply = REPLY_STORAGE_DOWN
+        await self._reply(context, chat.id, thread_id, reply)
+
+    async def _toggle_events(self, chat_id: int, thread_id: int, *, enabled: bool) -> str:
+        if not enabled:
+            await self.directory.set_events(chat_id, thread_id, enabled=False)
+            log_event("profile_update", "ok")
+            return REPLY_EVENTS_SET.format(state="off")
+        own = await self.directory.profile_of(chat_id, thread_id)
+        if not own.repo:
+            # A topic that only inherits the group repo can't get its own
+            # notifications — the notifier polls per bound-repo row.
+            return REPLY_EVENTS_NEED_REPO
+        await self.directory.set_events(chat_id, thread_id, enabled=True)
         log_event("profile_update", "ok")
-        state = ", ".join(sorted(kind.value for kind in kinds)) if enabled else "off"
-        await self._reply(context, chat.id, thread_id, REPLY_EVENTS_SET.format(state=state))
+        if own.rules:
+            return REPLY_EVENTS_SET.format(state="on")
+        for spec in DEFAULT_RULES:
+            await self.directory.add_rule(chat_id, thread_id, parse_rule(spec))
+        return REPLY_EVENTS_SEEDED
 
     async def on_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or clear this (group, topic)'s composable event rules."""
@@ -361,11 +373,7 @@ class AdminHandlers:
             consent=settings.consent_mode.value,
             repo=settings.repo or "none",
             token="yes" if settings.has_token else "no",
-            events=(
-                ", ".join(sorted(kind.value for kind in own.event_kinds)) or "on"
-                if own.events_enabled
-                else "off"
-            ),
+            events=(f"on ({len(own.rules)} rule(s))" if own.events_enabled else "off"),
         )
         await self._reply(context, chat.id, thread_id, text)
 
@@ -412,18 +420,3 @@ class AdminHandlers:
             await self._reply(context, chat.id, thread_id, REPLY_NOT_ADMIN)
             return None
         return chat, thread_id
-
-
-def _parse_events(arguments: list[str]) -> tuple[bool, frozenset[EventKind]] | None:
-    """Parse /events arguments; None means unusable input."""
-    if not arguments:
-        return None
-    if arguments == ["off"]:
-        return False, frozenset()
-    if arguments == ["on"]:
-        return True, DEFAULT_EVENT_KINDS
-    try:
-        kinds = frozenset(EventKind(word) for word in arguments)
-    except ValueError:
-        return None
-    return True, kinds

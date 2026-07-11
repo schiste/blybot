@@ -11,7 +11,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from blybot.adapters.telegram import admin as a
-from blybot.domain.models import ConsentMode, EventKind, EventType
+from blybot.domain.models import ConsentMode, DeliveryMode, EventType
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
@@ -297,7 +297,7 @@ async def test_events_on_requires_a_repo_at_this_scope() -> None:
     ].events_enabled
 
 
-async def test_events_on_uses_default_kinds() -> None:
+async def test_events_on_enables_and_seeds_starter_rules() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
     await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
@@ -305,20 +305,30 @@ async def test_events_on_uses_default_kinds() -> None:
     await handlers.on_events(command("/events on"), context)
     profile = store.profiles[tg.GROUP.id, 0]
     assert profile.events_enabled
-    assert profile.event_kinds == a.DEFAULT_EVENT_KINDS
-    assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SET.format(state="prs, releases")]
+    assert {rule.trigger.token for rule in profile.rules} == {"pr.merged", "release"}
+    assert all(rule.mode is DeliveryMode.DIGEST for rule in profile.rules)
+    assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SEEDED]
 
 
-async def test_events_accepts_explicit_kinds_and_off() -> None:
+async def test_events_on_keeps_existing_rules_and_does_not_reseed() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
     await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
-    context, _ = admin_context(args=["releases,issues"])
-    await handlers.on_events(command("/events releases,issues"), context)
-    assert store.profiles[tg.GROUP.id, 0].event_kinds == frozenset(
-        {EventKind.RELEASES, EventKind.ISSUES}
-    )
+    context, _ = admin_context(args=["add", "issue.opened"])
+    await handlers.on_rule(command("/rule add issue.opened"), context)
+    context, bot = admin_context(args=["on"])
+    await handlers.on_events(command("/events on"), context)
+    rules = store.profiles[tg.GROUP.id, 0].rules
+    assert [rule.trigger.token for rule in rules] == ["issue.opened"]  # not reseeded
+    assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SET.format(state="on")]
 
+
+async def test_events_off_disables() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
+    context, _ = admin_context(args=["on"])
+    await handlers.on_events(command("/events on"), context)
     context, bot = admin_context(args=["off"])
     await handlers.on_events(command("/events off"), context)
     assert not store.profiles[tg.GROUP.id, 0].events_enabled
@@ -327,7 +337,7 @@ async def test_events_accepts_explicit_kinds_and_off() -> None:
 
 async def test_events_rejects_junk_and_reports_outages() -> None:
     handlers = make_handlers()
-    for bad in ([], ["sometimes"], ["releases", "junk"]):
+    for bad in ([], ["sometimes"], ["releases,prs"]):
         context, bot = admin_context(args=bad)
         await handlers.on_events(command("/events"), context)
         assert tg.sent_texts(bot) == [a.REPLY_EVENTS_USAGE]

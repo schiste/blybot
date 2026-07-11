@@ -53,15 +53,17 @@ class ProfileStore(Protocol):
         """Return every profile with repo notifications switched on."""
         ...
 
-    async def get_cursor(self, chat_id: int, thread_id: int) -> str | None:
-        """Return the (group, topic) event-poll cursor (ETag), if any."""
+    async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:
+        """Return the (group, topic) per-resource poll cursor map."""
         ...
 
-    async def set_cursor(self, chat_id: int, thread_id: int, cursor: str, repo: str) -> None:
-        """Persist the cursor iff the profile is still bound to ``repo``.
+    async def set_cursors(
+        self, chat_id: int, thread_id: int, cursors: dict[str, str], repo: str
+    ) -> None:
+        """Persist the per-resource cursor map iff still bound to ``repo``.
 
-        The repo guard keeps an in-flight poll from stamping a stale
-        cursor onto a profile that was reset/rebound meanwhile.
+        The repo guard keeps an in-flight poll from stamping stale
+        cursors onto a profile that was reset/rebound meanwhile.
         """
         ...
 
@@ -103,17 +105,6 @@ class RepoGateway(Protocol):
 
     async def open_summary(self, repo: str, token: str) -> RepoSummary:
         """Return a small open-items summary of the bound repo."""
-        ...
-
-    async def events_since(
-        self, repo: str, token: str, cursor: str | None
-    ) -> tuple[list[RepoEvent], str]:
-        """Return events newer than ``cursor`` plus the advanced cursor.
-
-        A ``None`` cursor is a baseline poll: it returns no events and
-        a cursor at the current head, so binding a repo never replays
-        its history into the chat.
-        """
         ...
 
     async def poll_resource(

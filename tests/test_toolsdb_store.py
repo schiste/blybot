@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from blybot.adapters.toolsdb.store import (
+    MIGRATE_ADD_RULES,
     MIGRATE_ADD_THREAD,
     MIGRATE_REBUILD_PK,
     Q_DELETE,
@@ -31,6 +33,7 @@ from blybot.adapters.toolsdb.store import (
 )
 from blybot.domain.models import ConsentMode, EventKind, GroupProfile
 from blybot.domain.ports import StorageError
+from blybot.services.rules import parse_rule
 
 
 class FakeToolsDb:
@@ -52,6 +55,7 @@ class FakeToolsDb:
                 "consent_mode": None,
                 "events_enabled": 0,
                 "event_kinds": "",
+                "rules_json": None,
                 "token": None,
                 "cursor": None,
             },
@@ -68,6 +72,7 @@ class FakeToolsDb:
             row["consent_mode"],
             row["events_enabled"],
             row["event_kinds"],
+            row["rules_json"],
             row["token"] is not None,
         )
 
@@ -83,7 +88,7 @@ class FakeToolsDb:
                 self.schema_created = True
                 self.thread_in_pk = True  # a freshly created table has the composite key
             return []
-        if query == MIGRATE_ADD_THREAD:
+        if query in (MIGRATE_ADD_THREAD, MIGRATE_ADD_RULES):
             return []  # column add: no-op in the fake
         if query == Q_THREAD_IN_PK:
             return [(1 if self.thread_in_pk else 0,)]
@@ -97,7 +102,7 @@ class FakeToolsDb:
                 del self.tables[key]
             return []
         if query == Q_UPSERT:
-            chat_id, thread_id, log_page, repo, consent, events_enabled, kinds = params
+            chat_id, thread_id, log_page, repo, consent, events_enabled, kinds, rules_json = params
             row = self._row((chat_id, thread_id))
             row.update(
                 log_page=log_page,
@@ -105,6 +110,7 @@ class FakeToolsDb:
                 consent_mode=consent,
                 events_enabled=events_enabled,
                 event_kinds=kinds,
+                rules_json=rules_json,
             )
             return []
         if query == Q_GET:
@@ -199,6 +205,18 @@ async def test_profile_roundtrip() -> None:
     await store.upsert(PROFILE)
     loaded = await store.get(-100500, 0)
     assert loaded == PROFILE
+
+
+async def test_rules_roundtrip_through_json_column() -> None:
+    store, _ = make_store()
+    rules = (
+        parse_rule("pr.merged base:main label:release,hotfix digest"),
+        parse_rule("issue.opened title:/^WIP:/ author:octocat"),
+    )
+    await store.upsert(replace(PROFILE, rules=rules))
+    loaded = await store.get(-100500, 0)
+    assert loaded is not None
+    assert loaded.rules == rules  # ids, triggers, filters, modes all survive
 
 
 async def test_missing_profile_reads_as_none() -> None:

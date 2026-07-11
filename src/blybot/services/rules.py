@@ -17,9 +17,10 @@ Rule grammar (``/rule add`` payload)::
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from blybot.domain.models import DeliveryMode, EventType, Resource, Rule, RuleFilter
 
@@ -80,6 +81,23 @@ def describe_rule(rule: Rule) -> str:
 def resources_for(rules: Iterable[Rule]) -> set[Resource]:
     """The set of GitHub resource streams these rules need polled."""
     return {rule.trigger.resource for rule in rules}
+
+
+def dumps_rules(rules: tuple[Rule, ...]) -> str:
+    """Serialize a scope's rules to a compact JSON array for storage.
+
+    Only non-default filter conditions are written, so the payload
+    stays small and the schema can gain filter keys without rewriting
+    old rows (:func:`loads_rules` defaults anything absent).
+    """
+    return json.dumps([_rule_to_dict(rule) for rule in rules], separators=(",", ":"))
+
+
+def loads_rules(text: str | None) -> tuple[Rule, ...]:
+    """Rebuild a scope's rules from stored JSON (``None``/empty → no rules)."""
+    if not text:
+        return ()
+    return tuple(_rule_from_dict(item) for item in json.loads(text))
 
 
 def format_event(event: RepoEvent) -> str:
@@ -174,6 +192,57 @@ def _describe_filter(rule_filter: RuleFilter) -> list[str]:
     if rule_filter.draft is not None:
         parts.append(f"draft:{str(rule_filter.draft).lower()}")
     return parts
+
+
+def _rule_to_dict(rule: Rule) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "id": rule.rule_id,
+        "trigger": rule.trigger.token,
+        "mode": rule.mode.value,
+    }
+    conditions = _filter_to_dict(rule.filter)
+    if conditions:
+        data["filter"] = conditions
+    return data
+
+
+def _filter_to_dict(rule_filter: RuleFilter) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    if rule_filter.labels:
+        out["labels"] = sorted(rule_filter.labels)
+    for key, value in (
+        ("author", rule_filter.author),
+        ("base", rule_filter.base),
+        ("assignee", rule_filter.assignee),
+        ("milestone", rule_filter.milestone),
+        ("title_match", rule_filter.title_match),
+    ):
+        if value:
+            out[key] = value
+    if rule_filter.title_is_regex:
+        out["title_is_regex"] = True
+    if rule_filter.draft is not None:
+        out["draft"] = rule_filter.draft
+    return out
+
+
+def _rule_from_dict(item: dict[str, Any]) -> Rule:
+    conditions: dict[str, Any] = item.get("filter", {})
+    return Rule(
+        rule_id=item["id"],
+        trigger=EventType.from_token(item["trigger"]),
+        filter=RuleFilter(
+            labels=frozenset(conditions.get("labels", ())),
+            author=conditions.get("author", ""),
+            base=conditions.get("base", ""),
+            assignee=conditions.get("assignee", ""),
+            milestone=conditions.get("milestone", ""),
+            title_match=conditions.get("title_match", ""),
+            title_is_regex=conditions.get("title_is_regex", False),
+            draft=conditions.get("draft"),
+        ),
+        mode=DeliveryMode(item["mode"]),
+    )
 
 
 def _mint_id() -> str:

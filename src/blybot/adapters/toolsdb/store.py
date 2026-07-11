@@ -22,6 +22,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from blybot.domain.models import ConsentMode, EventKind, GroupProfile
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
+from blybot.services.rules import dumps_rules, loads_rules
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     consent_mode VARCHAR(16) NULL,
     events_enabled TINYINT(1) NOT NULL DEFAULT 0,
     event_kinds VARCHAR(64) NOT NULL DEFAULT '',
+    rules_json TEXT NULL,
     token_ciphertext BLOB NULL,
     event_cursor VARCHAR(128) NULL,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -44,17 +46,18 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 _PROFILE_COLUMNS: Final = (
     "chat_id, thread_id, log_page, repo, consent_mode, events_enabled, event_kinds, "
-    "token_ciphertext IS NOT NULL"
+    "rules_json, token_ciphertext IS NOT NULL"
 )
 _KEY: Final = "chat_id = %s AND thread_id = %s"
 Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_LIST_EVENT_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE events_enabled = 1"  # noqa: S608
 Q_UPSERT: Final = """
-INSERT INTO profiles (chat_id, thread_id, log_page, repo, consent_mode, events_enabled, event_kinds)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+INSERT INTO profiles
+    (chat_id, thread_id, log_page, repo, consent_mode, events_enabled, event_kinds, rules_json)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE log_page = VALUES(log_page), repo = VALUES(repo),
     consent_mode = VALUES(consent_mode), events_enabled = VALUES(events_enabled),
-    event_kinds = VALUES(event_kinds)
+    event_kinds = VALUES(event_kinds), rules_json = VALUES(rules_json)
 """
 Q_DELETE: Final = f"DELETE FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_GET_CURSOR: Final = f"SELECT event_cursor FROM profiles WHERE {_KEY}"  # noqa: S608
@@ -76,6 +79,9 @@ MIGRATE_ADD_THREAD: Final = (
 MIGRATE_REBUILD_PK: Final = (
     "ALTER TABLE profiles DROP PRIMARY KEY, ADD PRIMARY KEY (chat_id, thread_id)"
 )
+# Composable rules arrived after event_kinds; older tables gain the
+# column in place. No-op once applied.
+MIGRATE_ADD_RULES: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS rules_json TEXT NULL"
 Q_THREAD_IN_PK: Final = """
 SELECT COUNT(*) FROM information_schema.STATISTICS
 WHERE table_schema = DATABASE() AND table_name = 'profiles'
@@ -151,6 +157,7 @@ class ToolsDbStore:
         """
         await self._run(SCHEMA, ())
         await self._run(MIGRATE_ADD_THREAD, ())
+        await self._run(MIGRATE_ADD_RULES, ())
         rows = await self._run(Q_THREAD_IN_PK, ())
         if rows and not int(rows[0][0]):
             await self._run(MIGRATE_REBUILD_PK, ())
@@ -173,6 +180,7 @@ class ToolsDbStore:
                 profile.consent_mode.value if profile.consent_mode else None,
                 int(profile.events_enabled),
                 ",".join(sorted(kind.value for kind in profile.event_kinds)),
+                dumps_rules(profile.rules),
             ),
         )
 
@@ -234,7 +242,17 @@ class ToolsDbStore:
 
 
 def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
-    (chat_id, thread_id, log_page, repo, consent, events_enabled, event_kinds, has_token) = row
+    (
+        chat_id,
+        thread_id,
+        log_page,
+        repo,
+        consent,
+        events_enabled,
+        event_kinds,
+        rules_json,
+        has_token,
+    ) = row
     return GroupProfile(
         chat_id=int(chat_id),
         thread_id=int(thread_id),
@@ -243,5 +261,6 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         consent_mode=ConsentMode(consent) if consent else None,
         events_enabled=bool(events_enabled),
         event_kinds=frozenset(EventKind(kind) for kind in event_kinds.split(",") if kind),
+        rules=loads_rules(rules_json),
         has_token=bool(has_token),
     )

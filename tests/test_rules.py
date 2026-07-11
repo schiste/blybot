@@ -8,7 +8,9 @@ from blybot.domain.models import DeliveryMode, EventType, RepoEvent, Resource
 from blybot.services.rules import (
     RuleParseError,
     describe_rule,
+    dumps_rules,
     format_event,
+    loads_rules,
     parse_rule,
     resources_for,
 )
@@ -90,6 +92,21 @@ def test_resources_for_collapses_to_needed_streams() -> None:
     rules = [parse_rule("pr.merged"), parse_rule("issue.opened"), parse_rule("release")]
     assert resources_for(rules) == {Resource.PULLS, Resource.ISSUES, Resource.RELEASES}
     assert resources_for([]) == set()
+
+
+def test_rule_json_roundtrip_including_bare_rule() -> None:
+    rules = (
+        parse_rule("release"),  # empty filter → no "filter" key emitted
+        parse_rule("pr.merged base:main label:release draft:false title:/rc/ digest"),
+    )
+    restored = loads_rules(dumps_rules(rules))
+    assert restored == rules
+
+
+def test_loads_empty_is_no_rules() -> None:
+    assert loads_rules(None) == ()
+    assert loads_rules("") == ()
+    assert dumps_rules(()) == "[]"
 
 
 def test_format_event_variants() -> None:

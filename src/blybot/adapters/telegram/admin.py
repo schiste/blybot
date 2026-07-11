@@ -18,7 +18,12 @@ from telegram.error import TelegramError
 from blybot.domain.models import ConsentMode, EventKind
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
-from blybot.services.directory import PageNotAllowedError, SelfServiceUnavailableError
+from blybot.services.directory import (
+    PageNotAllowedError,
+    SelfServiceUnavailableError,
+    TooManyRulesError,
+)
+from blybot.services.rules import MAX_RULES, RuleParseError, describe_rule, parse_rule
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -62,6 +67,25 @@ REPLY_EVENTS_NEED_REPO: Final = (
 REPLY_EVENTS_USAGE: Final = "Usage: /events on | off | <kinds> — kinds from: releases, prs, issues"
 REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
 DEFAULT_EVENT_KINDS: Final = frozenset({EventKind.RELEASES, EventKind.PRS})
+REPLY_RULE_USAGE: Final = (
+    "Usage:\n"
+    "/rule add <event> [filters] [live|digest]\n"
+    "/rule remove <id>\n"
+    "/rule clear\n"
+    "Events: issue.opened, pr.merged, release, comment, … · "
+    "filters: label:bug,urgent · author:x · base:main · "
+    "title:text or title:/regex/ · draft:false · milestone:v2 · assignee:y. "
+    "See /rules to list them."
+)
+REPLY_RULE_ADDED: Final = "Rule added for {scope}: {desc}"
+REPLY_RULE_REMOVED: Final = "Rule {id} removed from {scope}."
+REPLY_RULE_UNKNOWN: Final = "No rule {id} at {scope}. Use /rules to list them."
+REPLY_RULES_CLEARED: Final = "Cleared {count} rule(s) for {scope}."
+REPLY_RULES_NONE: Final = "No rules set for {scope}. Add one, e.g. /rule add pr.merged"
+REPLY_RULES_LIST: Final = "Rules for {scope}:\n{lines}"
+REPLY_RULES_FULL: Final = (
+    "You already have the maximum of {max} rules at {scope}; remove one with /rule remove <id>."
+)
 SETUP_TEXT: Final = (
     "I'm configurable by this group's admins, right here:\n\n"
     "(run a command IN a topic to set that topic; in General for the group)\n\n"
@@ -69,6 +93,8 @@ SETUP_TEXT: Final = (
     "/setconsent immediate|author_only — who may /log whose messages\n"
     "/setrepo owner/repo — bind a GitHub repo (then /issue, /repo)\n"
     "/events on|off|releases,prs,issues — repo digests in this chat\n"
+    "/rule add|remove|clear — composable event rules (see /rules)\n"
+    "/rules — list this chat's event rules\n"
     "/revoke — discard this group's stored GitHub token\n"
     "/settings — current configuration\n"
     "/reset — forget everything and return to defaults\n\n"
@@ -257,6 +283,68 @@ class AdminHandlers:
         log_event("profile_update", "ok")
         state = ", ".join(sorted(kind.value for kind in kinds)) if enabled else "off"
         await self._reply(context, chat.id, thread_id, REPLY_EVENTS_SET.format(state=state))
+
+    async def on_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Add, remove, or clear this (group, topic)'s composable event rules."""
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
+            return
+        chat, thread_id = resolved
+        args = list(context.args or ())
+        sub = args[0].lower() if args else ""
+        try:
+            if sub == "add":
+                reply = await self._rule_add(chat.id, thread_id, args[1:])
+            elif sub == "remove" and len(args) == 2:  # noqa: PLR2004 -- "remove <id>"
+                reply = await self._rule_remove(chat.id, thread_id, args[1])
+            elif sub == "clear":
+                reply = await self._rule_clear(chat.id, thread_id)
+            else:
+                reply = REPLY_RULE_USAGE
+        except StorageError:
+            reply = REPLY_STORAGE_DOWN
+        await self._reply(context, chat.id, thread_id, reply)
+
+    async def _rule_add(self, chat_id: int, thread_id: int, tokens: list[str]) -> str:
+        try:
+            rule = parse_rule(" ".join(tokens))
+        except RuleParseError as error:
+            return str(error)
+        try:
+            await self.directory.add_rule(chat_id, thread_id, rule)
+        except TooManyRulesError:
+            return REPLY_RULES_FULL.format(max=MAX_RULES, scope=_scope(thread_id))
+        log_event("profile_update", "ok")
+        return REPLY_RULE_ADDED.format(scope=_scope(thread_id), desc=describe_rule(rule))
+
+    async def _rule_remove(self, chat_id: int, thread_id: int, rule_id: str) -> str:
+        if not await self.directory.remove_rule(chat_id, thread_id, rule_id):
+            return REPLY_RULE_UNKNOWN.format(id=rule_id, scope=_scope(thread_id))
+        log_event("profile_update", "ok")
+        return REPLY_RULE_REMOVED.format(id=rule_id, scope=_scope(thread_id))
+
+    async def _rule_clear(self, chat_id: int, thread_id: int) -> str:
+        count = await self.directory.clear_rules(chat_id, thread_id)
+        log_event("profile_update", "ok")
+        return REPLY_RULES_CLEARED.format(count=count, scope=_scope(thread_id))
+
+    async def on_rules(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """List this (group, topic)'s event rules with their ids."""
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
+            return
+        chat, thread_id = resolved
+        try:
+            rules = await self.directory.list_rules(chat.id, thread_id)
+        except StorageError:
+            text = REPLY_STORAGE_DOWN
+        else:
+            if rules:
+                lines = "\n".join(describe_rule(rule) for rule in rules)
+                text = REPLY_RULES_LIST.format(scope=_scope(thread_id), lines=lines)
+            else:
+                text = REPLY_RULES_NONE.format(scope=_scope(thread_id))
+        await self._reply(context, chat.id, thread_id, text)
 
     async def on_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show this group's effective configuration."""

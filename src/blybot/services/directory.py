@@ -23,8 +23,10 @@ from typing import TYPE_CHECKING, Any, Final
 
 from blybot.domain.models import ConsentMode, EventKind, GroupProfile
 from blybot.domain.ports import StorageError
+from blybot.services.rules import MAX_RULES
 
 if TYPE_CHECKING:
+    from blybot.domain.models import Rule
     from blybot.domain.ports import ProfileStore
 
 # Characters MediaWiki forbids in page titles (underscores are handled
@@ -38,6 +40,10 @@ class SelfServiceUnavailableError(Exception):
 
 class PageNotAllowedError(Exception):
     """The requested page is outside the operator's allowed prefix or invalid."""
+
+
+class TooManyRulesError(Exception):
+    """The scope already holds the maximum number of rules."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +147,45 @@ class ChannelDirectory:
         """Configure this (group, topic)'s repository-event notifications."""
         await self._update(chat_id, thread_id, events_enabled=enabled, event_kinds=kinds)
 
+    async def add_rule(self, chat_id: int, thread_id: int, rule: Rule) -> tuple[Rule, ...]:
+        """Append a composable event rule to this (group, topic).
+
+        Raises :class:`TooManyRulesError` at the per-scope cap so a
+        runaway ruleset can't bloat one row. Returns the new ruleset.
+        """
+        store = self._require_store()
+        current = await self._profile(store, chat_id, thread_id)
+        if len(current.rules) >= MAX_RULES:
+            raise TooManyRulesError
+        rules = (*current.rules, rule)
+        await store.upsert(replace(current, rules=rules))
+        return rules
+
+    async def remove_rule(self, chat_id: int, thread_id: int, rule_id: str) -> bool:
+        """Drop the rule with ``rule_id``; ``False`` if no such rule exists."""
+        store = self._require_store()
+        current = await store.get(chat_id, thread_id)
+        if current is None:
+            return False
+        kept = tuple(rule for rule in current.rules if rule.rule_id != rule_id)
+        if len(kept) == len(current.rules):
+            return False
+        await store.upsert(replace(current, rules=kept))
+        return True
+
+    async def clear_rules(self, chat_id: int, thread_id: int) -> int:
+        """Remove every rule at this scope; returns how many were removed."""
+        store = self._require_store()
+        current = await store.get(chat_id, thread_id)
+        if current is None or not current.rules:
+            return 0
+        await store.upsert(replace(current, rules=()))
+        return len(current.rules)
+
+    async def list_rules(self, chat_id: int, thread_id: int) -> tuple[Rule, ...]:
+        """Return this (group, topic)'s stored rules (empty tuple if none)."""
+        return (await self.profile_of(chat_id, thread_id)).rules
+
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
         """Carry every topic's profile across a group→supergroup chat-id change."""
         if self.store is not None:
@@ -153,17 +198,19 @@ class ChannelDirectory:
 
     async def profile_of(self, chat_id: int, thread_id: int) -> GroupProfile:
         """Return the stored profile (or an empty one) for /settings display."""
-        store = self._require_store()
-        return await store.get(chat_id, thread_id) or GroupProfile(
-            chat_id=chat_id, thread_id=thread_id
-        )
+        return await self._profile(self._require_store(), chat_id, thread_id)
 
     async def _update(self, chat_id: int, thread_id: int, **changes: Any) -> None:
         store = self._require_store()
-        current = await store.get(chat_id, thread_id) or GroupProfile(
+        current = await self._profile(store, chat_id, thread_id)
+        await store.upsert(replace(current, **changes))
+
+    @staticmethod
+    async def _profile(store: ProfileStore, chat_id: int, thread_id: int) -> GroupProfile:
+        """The stored profile for a scope, or a fresh empty one."""
+        return await store.get(chat_id, thread_id) or GroupProfile(
             chat_id=chat_id, thread_id=thread_id
         )
-        await store.upsert(replace(current, **changes))
 
     def _require_store(self) -> ProfileStore:
         if self.store is None:

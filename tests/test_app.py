@@ -86,8 +86,9 @@ def test_build_registers_every_handler() -> None:
     handlers = application.handlers[0]
     kinds = [type(handler) for handler in handlers]
     # log, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
-    # setup, setpage, setconsent, setrepo, events, revoke, settings, reset
-    assert kinds.count(CommandHandler) == 19
+    # setup, setpage, setconsent, setrepo, events, rule, rules, revoke,
+    # settings, reset
+    assert kinds.count(CommandHandler) == 21
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 2  # migration and DM text
 

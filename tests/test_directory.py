@@ -11,6 +11,7 @@ from blybot.services.directory import (
     PageNotAllowedError,
     SelfServiceUnavailableError,
 )
+from blybot.services.rules import parse_rule
 from tests.fakes import InMemoryProfiles
 
 CHAT = -100500
@@ -107,6 +108,39 @@ async def test_writes_require_a_store() -> None:
         await directory.reset(CHAT, 0)
     with pytest.raises(SelfServiceUnavailableError):
         await directory.profile_of(CHAT, 0)
+
+
+async def test_rule_ops_require_a_store() -> None:
+    directory = make_directory(store=None)
+    for op in (
+        directory.add_rule(CHAT, 0, parse_rule("pr.merged")),
+        directory.remove_rule(CHAT, 0, "x"),
+        directory.clear_rules(CHAT, 0),
+        directory.list_rules(CHAT, 0),
+    ):
+        with pytest.raises(SelfServiceUnavailableError):
+            await op
+
+
+async def test_remove_and_clear_on_an_empty_scope_are_no_ops() -> None:
+    directory = make_directory(InMemoryProfiles())
+    assert await directory.remove_rule(CHAT, 0, "x") is False  # no profile row at all
+    assert await directory.clear_rules(CHAT, 0) == 0
+    # a profile with no rules: remove misses, clear removes nothing
+    await directory.set_repo(CHAT, 0, "org/repo")
+    assert await directory.remove_rule(CHAT, 0, "x") is False
+    assert await directory.clear_rules(CHAT, 0) == 0
+
+
+async def test_add_rule_appends_and_preserves_other_fields() -> None:
+    store = InMemoryProfiles()
+    directory = make_directory(store)
+    await directory.set_repo(CHAT, 0, "org/repo")
+    await directory.add_rule(CHAT, 0, parse_rule("pr.merged"))
+    await directory.add_rule(CHAT, 0, parse_rule("release"))
+    profile = store.profiles[CHAT, 0]
+    assert [rule.trigger.token for rule in profile.rules] == ["pr.merged", "release"]
+    assert profile.repo == "org/repo"  # unrelated fields untouched
 
 
 async def test_storage_outage_degrades_reads_to_defaults() -> None:

@@ -48,6 +48,8 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
    setconsent - [group] (admins) who may /log whose messages
    setrepo - [group] (admins) bind a GitHub repository
    events - [group] (admins) repo digests on/off/kinds
+   rule - [group] (admins) add/remove/clear composable event rules
+   rules - [group] (admins) list this chat's event rules
    settings - [group] (admins) current group configuration
    revoke - [group] (admins) discard this group's stored token
    reset - [group] (admins) forget this group's configuration
@@ -76,7 +78,8 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
 
 With self-service on, any group's admins configure the bot from
 Telegram: `/setup`, `/setpage`, `/setconsent`, `/setrepo` (+ the DM
-token step), `/events`, `/settings`, `/revoke`, `/reset`; members get
+token step), `/events`, `/rule`, `/rules`, `/settings`, `/revoke`,
+`/reset`; members get
 `/issue` and `/repo` once a repo is bound. **Forum groups:** run a
 command inside a topic to configure that topic (its own page and/or
 repo), or in the General area to set the group default that every other

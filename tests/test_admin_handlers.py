@@ -11,11 +11,12 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from blybot.adapters.telegram import admin as a
-from blybot.domain.models import ConsentMode, EventKind
+from blybot.domain.models import ConsentMode, EventKind, EventType
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy
+from blybot.services.rules import MAX_RULES
 from tests import tg
 from tests.fakes import FakeClock, InMemoryProfiles
 
@@ -78,6 +79,8 @@ async def test_non_admins_are_refused_on_every_command() -> None:
         "on_setconsent",
         "on_setrepo",
         "on_events",
+        "on_rule",
+        "on_rules",
         "on_revoke",
         "on_settings",
         "on_reset",
@@ -393,6 +396,121 @@ async def test_events_profile_lookup_outage_is_reported() -> None:
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)
     assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_rule_add_stores_and_confirms() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    context, bot = admin_context(args=["add", "pr.merged", "base:main", "digest"])
+    await handlers.on_rule(command("/rule add pr.merged base:main digest"), context)
+    (rule,) = store.profiles[tg.GROUP.id, 0].rules
+    assert rule.trigger is EventType.PR_MERGED
+    assert rule.filter.base == "main"
+    (sent,) = tg.sent_texts(bot)
+    assert sent.startswith(f"Rule added for the group default: [{rule.rule_id}] pr.merged")
+
+
+async def test_rules_lists_every_rule_with_ids() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    for spec in (["add", "pr.merged"], ["add", "issue.opened", "label:bug"]):
+        context, _ = admin_context(args=spec)
+        await handlers.on_rule(command("/rule"), context)
+    context, bot = admin_context()
+    await handlers.on_rules(command("/rules"), context)
+    listing = tg.sent_texts(bot)[-1]
+    assert listing.startswith("Rules for the group default:")
+    assert "pr.merged" in listing
+    assert "issue.opened label:bug → live" in listing
+
+
+async def test_rules_empty_prompts_to_add_one() -> None:
+    handlers = make_handlers()
+    context, bot = admin_context()
+    await handlers.on_rules(command("/rules"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_RULES_NONE.format(scope="the group default")]
+
+
+async def test_rule_remove_by_id_and_unknown() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    context, _ = admin_context(args=["add", "release"])
+    await handlers.on_rule(command("/rule add release"), context)
+    (rule,) = store.profiles[tg.GROUP.id, 0].rules
+
+    context, bot = admin_context(args=["remove", "nope"])
+    await handlers.on_rule(command("/rule remove nope"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_RULE_UNKNOWN.format(id="nope", scope="the group default")]
+
+    context, bot = admin_context(args=["remove", rule.rule_id])
+    await handlers.on_rule(command("/rule remove id"), context)
+    assert store.profiles[tg.GROUP.id, 0].rules == ()
+    assert tg.sent_texts(bot) == [
+        a.REPLY_RULE_REMOVED.format(id=rule.rule_id, scope="the group default")
+    ]
+
+
+async def test_rule_clear_reports_count() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    for spec in (["add", "pr.merged"], ["add", "release"]):
+        context, _ = admin_context(args=spec)
+        await handlers.on_rule(command("/rule"), context)
+    context, bot = admin_context(args=["clear"])
+    await handlers.on_rule(command("/rule clear"), context)
+    assert store.profiles[tg.GROUP.id, 0].rules == ()
+    assert tg.sent_texts(bot) == [a.REPLY_RULES_CLEARED.format(count=2, scope="the group default")]
+
+
+async def test_rule_add_surfaces_parse_errors() -> None:
+    handlers = make_handlers()
+    context, bot = admin_context(args=["add", "nope.nope"])
+    await handlers.on_rule(command("/rule add nope.nope"), context)
+    assert "Unknown event type" in tg.sent_texts(bot)[0]
+
+
+async def test_rule_bad_subcommand_shows_usage() -> None:
+    handlers = make_handlers()
+    for args in ([], ["frobnicate"], ["remove"], ["remove", "a", "b"]):
+        context, bot = admin_context(args=args)
+        await handlers.on_rule(command("/rule"), context)
+        assert tg.sent_texts(bot) == [a.REPLY_RULE_USAGE]
+
+
+async def test_rule_cap_is_enforced() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    for _ in range(MAX_RULES):
+        context, _ = admin_context(args=["add", "pr.merged"])
+        await handlers.on_rule(command("/rule add pr.merged"), context)
+    context, bot = admin_context(args=["add", "release"])
+    await handlers.on_rule(command("/rule add release"), context)
+    assert len(store.profiles[tg.GROUP.id, 0].rules) == MAX_RULES  # not exceeded
+    assert tg.sent_texts(bot) == [
+        a.REPLY_RULES_FULL.format(max=MAX_RULES, scope="the group default")
+    ]
+
+
+async def test_rule_and_rules_report_storage_outage() -> None:
+    handlers = make_handlers(InMemoryProfiles(fail=True))
+    context, bot = admin_context(args=["add", "pr.merged"])
+    await handlers.on_rule(command("/rule add pr.merged"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+    context, bot = admin_context()
+    await handlers.on_rules(command("/rules"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_rules_configure_the_topic_they_run_in() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    context, bot = admin_context(args=["add", "pr.merged"])
+    await handlers.on_rule(command_in_topic("/rule add pr.merged", 42), context)
+    assert store.profiles[tg.GROUP.id, 42].rules  # the topic, not the group default
+    (_sent, thread) = tg.sent_calls(bot)[0]
+    assert thread == 42
+    assert "this topic" in tg.sent_texts(bot)[0]
 
 
 def test_thread_of_ignores_non_topic_and_missing_messages() -> None:

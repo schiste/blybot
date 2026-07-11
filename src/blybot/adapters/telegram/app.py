@@ -174,6 +174,8 @@ def build_application(
         ("setconsent", admin_handlers.on_setconsent),
         ("setrepo", admin_handlers.on_setrepo),
         ("events", admin_handlers.on_events),
+        ("rule", admin_handlers.on_rule),
+        ("rules", admin_handlers.on_rules),
         ("revoke", admin_handlers.on_revoke),
         ("settings", admin_handlers.on_settings),
         ("reset", admin_handlers.on_reset),

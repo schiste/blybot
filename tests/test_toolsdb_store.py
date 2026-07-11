@@ -11,12 +11,16 @@ import pytest
 from cryptography.fernet import Fernet
 
 from blybot.adapters.toolsdb.store import (
+    MIGRATE_ADD_THREAD,
+    MIGRATE_REBUILD_PK,
     Q_DELETE,
     Q_GET,
     Q_GET_CURSOR,
     Q_LIST_EVENT_ENABLED,
     Q_MIGRATE,
+    Q_MIGRATE_CLEAR,
     Q_SET_CURSOR,
+    Q_THREAD_IN_PK,
     Q_UPSERT,
     Q_VAULT_CLEAR,
     Q_VAULT_READ,
@@ -34,6 +38,8 @@ class FakeToolsDb:
 
     def __init__(self) -> None:
         self.tables: dict[tuple[int, int], dict[str, Any]] = {}
+        self.thread_in_pk = False  # simulates an old (single-key) table
+        self.schema_migrated = False
         self.fail = False
         self.schema_created = False
 
@@ -73,7 +79,22 @@ class FakeToolsDb:
         # constant whose %s count drifts from what the caller passes.
         assert query.count("%s") == len(params), f"placeholder/param mismatch: {query!r}"
         if query == SCHEMA:
-            self.schema_created = True
+            if not self.schema_created:  # CREATE IF NOT EXISTS: no-op on old tables
+                self.schema_created = True
+                self.thread_in_pk = True  # a freshly created table has the composite key
+            return []
+        if query == MIGRATE_ADD_THREAD:
+            return []  # column add: no-op in the fake
+        if query == Q_THREAD_IN_PK:
+            return [(1 if self.thread_in_pk else 0,)]
+        if query == MIGRATE_REBUILD_PK:
+            self.thread_in_pk = True
+            self.schema_migrated = True
+            return []
+        if query == Q_MIGRATE_CLEAR:
+            (chat_id,) = params
+            for key in [k for k in self.tables if k[0] == chat_id]:
+                del self.tables[key]
             return []
         if query == Q_UPSERT:
             chat_id, thread_id, log_page, repo, consent, events_enabled, kinds = params
@@ -142,10 +163,35 @@ PROFILE = GroupProfile(
 )
 
 
-async def test_bootstrap_creates_the_schema() -> None:
+async def test_bootstrap_creates_a_fresh_schema_without_migrating() -> None:
     store, fake = make_store()
     await store.bootstrap()
     assert fake.schema_created
+    assert not fake.schema_migrated  # fresh table is already up to date
+
+
+async def test_bootstrap_upgrades_an_old_single_key_table_in_place() -> None:
+    store, fake = make_store()
+    fake.schema_created = True  # pretend the table predates thread_id...
+    fake.thread_in_pk = False  # ...with a single-column primary key
+    await store.bootstrap()
+    assert fake.schema_migrated  # primary key rebuilt, no data dropped
+
+
+async def test_migration_into_an_occupied_destination_replaces_it() -> None:
+    store, _ = make_store()
+    await store.upsert(GroupProfile(chat_id=-1, thread_id=0, log_page="Old/dest"))
+    await store.upsert(GroupProfile(chat_id=-9, thread_id=0, log_page="Source"))
+    await store.upsert(GroupProfile(chat_id=-9, thread_id=5, log_page="Source topic"))
+    await store.migrate(-9, -1)
+
+    assert await store.get(-9, 0) is None  # source moved
+    moved = await store.get(-1, 0)
+    assert moved is not None
+    assert moved.log_page == "Source"  # authoritative source overwrote the dest
+    topic = await store.get(-1, 5)
+    assert topic is not None
+    assert topic.log_page == "Source topic"
 
 
 async def test_profile_roundtrip() -> None:

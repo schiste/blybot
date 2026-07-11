@@ -59,7 +59,28 @@ ON DUPLICATE KEY UPDATE log_page = VALUES(log_page), repo = VALUES(repo),
 Q_DELETE: Final = f"DELETE FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_GET_CURSOR: Final = f"SELECT event_cursor FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_SET_CURSOR: Final = f"UPDATE profiles SET event_cursor = %s WHERE {_KEY} AND repo = %s"  # noqa: S608
-Q_MIGRATE: Final = "UPDATE IGNORE profiles SET chat_id = %s WHERE chat_id = %s"
+# Group→supergroup migration re-keys the group's rows to the new chat
+# id. The migrating group is authoritative, so any pre-existing rows at
+# the destination (a chat id the bot somehow already knew) are cleared
+# first — otherwise the UPDATE would collide on the (chat_id, thread_id)
+# primary key and silently strand rows.
+Q_MIGRATE_CLEAR: Final = "DELETE FROM profiles WHERE chat_id = %s"
+Q_MIGRATE: Final = "UPDATE profiles SET chat_id = %s WHERE chat_id = %s"
+
+# Idempotent in-place schema upgrade for tables created before the
+# thread_id column existed. Runs on every startup; each step no-ops once
+# applied, so no data is ever dropped.
+MIGRATE_ADD_THREAD: Final = (
+    "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS thread_id BIGINT NOT NULL DEFAULT 0"
+)
+MIGRATE_REBUILD_PK: Final = (
+    "ALTER TABLE profiles DROP PRIMARY KEY, ADD PRIMARY KEY (chat_id, thread_id)"
+)
+Q_THREAD_IN_PK: Final = """
+SELECT COUNT(*) FROM information_schema.STATISTICS
+WHERE table_schema = DATABASE() AND table_name = 'profiles'
+  AND index_name = 'PRIMARY' AND column_name = 'thread_id'
+"""
 Q_VAULT_READ: Final = f"SELECT token_ciphertext FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_VAULT_WRITE: Final = """
 INSERT INTO profiles (chat_id, thread_id, token_ciphertext) VALUES (%s, %s, %s)
@@ -121,8 +142,19 @@ class ToolsDbStore:
         self._fernet = Fernet(fernet_key)
 
     async def bootstrap(self) -> None:
-        """Create the schema if absent (additive DDL is the migration story)."""
+        """Create the schema, then bring an older table up to date in place.
+
+        Idempotent: a fresh table is created complete by ``SCHEMA``; an
+        older single-column-keyed table gains ``thread_id`` and has its
+        primary key rebuilt to ``(chat_id, thread_id)`` — without
+        dropping any rows. Every step is a no-op once applied.
+        """
         await self._run(SCHEMA, ())
+        await self._run(MIGRATE_ADD_THREAD, ())
+        rows = await self._run(Q_THREAD_IN_PK, ())
+        if rows and not int(rows[0][0]):
+            await self._run(MIGRATE_REBUILD_PK, ())
+            log_event("storage_migrated", "ok")
 
     async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
         """Return the (group, topic) profile, or ``None`` if unconfigured."""
@@ -163,7 +195,8 @@ class ToolsDbStore:
         await self._run(Q_SET_CURSOR, (cursor, chat_id, thread_id, repo))
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
-        """Re-key a profile after a group→supergroup upgrade."""
+        """Re-key every topic of a group after a group→supergroup upgrade."""
+        await self._run(Q_MIGRATE_CLEAR, (new_chat_id,))
         await self._run(Q_MIGRATE, (new_chat_id, old_chat_id))
 
     async def store_token(self, chat_id: int, thread_id: int, token: str) -> None:

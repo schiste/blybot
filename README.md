@@ -36,10 +36,11 @@ words, and the precise edit times in the wiki's public history. `/log` means
 ## Status
 
 **v2: self-service multi-tenant.** Group admins configure everything
-from Telegram — per-group `/log` pages (prefix-restricted), consent
-policy, a bound GitHub repo with the group's own encrypted token
-(`/issue`, `/repo`), and polled repo-event digests (`/events`, no
-webhooks). Storage is one ToolsDB table holding only group-level state;
+from Telegram — `/log` pages, consent policy, a bound GitHub repo with
+the group's own encrypted token (`/issue`, `/repo`), and polled
+repo-event digests (`/events`, no webhooks). **Forum groups get
+per-topic overrides**: a topic can publish `/log` to its own page and
+bind its own repo, inheriting anything it doesn't set from the group. Storage is one ToolsDB table holding only group-level state;
 no user identifier is ever persisted. All of v1 remains
 (spec Phases 1–3): the group `/log` flow with
 confirmation and consent policy, greet-on-entry, DM transcription with

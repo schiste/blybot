@@ -179,7 +179,7 @@ v1 had **no persistent datastore**; v2's self-service adds exactly one, per this
 
 1. **In-memory session map** (volatile, see 10).
 2. **Configuration** in the tool home directory (see 12).
-3. **v2: one `profiles` table on ToolsDB** — per-group chat id, chosen page/repo, consent policy, event settings, poll cursor, and an admin-supplied API token encrypted with Fernet (`PROFILE_ENCRYPTION_KEY`). **No user identifier, name, or message content is ever persisted**; group admin-ship is verified live per command and never stored.
+3. **v2: one `profiles` table on ToolsDB**, keyed by `(chat_id, thread_id)` so forum-group topics configure independently — chosen page/repo, consent policy, event settings, poll cursor, and an admin-supplied API token encrypted with Fernet (`PROFILE_ENCRYPTION_KEY`). Resolution is three-tier: topic override → group default (thread 0) → operator env default. **The only identifiers persisted are group structure (chat id, topic thread id) — never a user id, name, or message**; admin-ship is verified live per command and never stored.
 
 ---
 

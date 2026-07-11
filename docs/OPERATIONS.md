@@ -77,7 +77,10 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
 With self-service on, any group's admins configure the bot from
 Telegram: `/setup`, `/setpage`, `/setconsent`, `/setrepo` (+ the DM
 token step), `/events`, `/settings`, `/revoke`, `/reset`; members get
-`/issue` and `/repo` once a repo is bound. Two env keys enable it:
+`/issue` and `/repo` once a repo is bound. **Forum groups:** run a
+command inside a topic to configure that topic (its own page and/or
+repo), or in the General area to set the group default that every other
+topic inherits — consent stays group-wide. Two env keys enable it:
 
 ```sh
 become <tool>

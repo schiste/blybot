@@ -38,7 +38,7 @@ if TYPE_CHECKING:
     from blybot.domain.models import Session
     from blybot.domain.ports import RepoActions, TokenVault
     from blybot.services.binding import TokenBinding
-    from blybot.services.directory import ChannelDirectory
+    from blybot.services.directory import ChannelDirectory, ChannelSettings
     from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.publish import LogPublicationService
@@ -232,9 +232,7 @@ class GroupHandlers:
     reply_cleanup_delay_seconds: float = 15.0
     _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
-    async def on_log(  # noqa: PLR0911 -- one early return per decline reason
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> None:
+    async def on_log(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Publish the replied-to message anonymously (R2)."""
         message = update.effective_message
         chat = update.effective_chat
@@ -266,25 +264,8 @@ class GroupHandlers:
             await reply(REPLY_USAGE)
             return
         settings = await self.directory.resolve(chat.id, thread_id)
-        if settings.degraded:
-            # Fail closed: the group's consent policy and target page are
-            # unknown right now; publishing on defaults could violate both.
-            await reply(REPLY_CONFIG_UNAVAILABLE)
-            return
-        if self.directory.self_service_enabled and not settings.page_explicit:
-            # A self-service group must choose its own page — never leak
-            # its logs onto the shared operator default.
-            await reply(REPLY_NO_LOG_PAGE)
-            return
-        if settings.consent_mode is ConsentMode.AUTHOR_ONLY and not _same_author(message, target):
-            # N1 hook: ConsentMode.CONFIRM would branch here into a
-            # DM-confirmation flow; configuration rejects it until built.
-            self.counters.increment("log_declined_consent")
-            await reply(REPLY_AUTHOR_ONLY)
-            return
-        if not self._within_rate_limits(message, chat.id):
-            self.counters.increment("log_throttled")
-            await reply(REPLY_THROTTLED)
+        if (decline := self._log_decline(settings, message, target)) is not None:
+            await reply(decline)
             return
 
         try:
@@ -299,6 +280,33 @@ class GroupHandlers:
             page_url = self.page_url_for(settings.log_page)
             section_url = f"{page_url}#{heading.replace(' ', '_')}"
             await reply(REPLY_PUBLISHED.format(url=section_url))
+
+    def _log_decline(
+        self, settings: ChannelSettings, command: Message, target: Message
+    ) -> str | None:
+        """The reply to send if this /log must be declined, else None to publish.
+
+        Recording the throttle/consent reason is a side effect here; the
+        rate-limit check also consumes a limiter token, so this runs in
+        strict order and only once the earlier guards pass.
+        """
+        if settings.degraded:
+            # Fail closed: the group's consent policy and target page are
+            # unknown right now; publishing on defaults could violate both.
+            return REPLY_CONFIG_UNAVAILABLE
+        if self.directory.self_service_enabled and not settings.page_explicit:
+            # A self-service group must choose its own page — never leak
+            # its logs onto the shared operator default.
+            return REPLY_NO_LOG_PAGE
+        if settings.consent_mode is ConsentMode.AUTHOR_ONLY and not _same_author(command, target):
+            # N1 hook: ConsentMode.CONFIRM would branch here into a
+            # DM-confirmation flow; configuration rejects it until built.
+            self.counters.increment("log_declined_consent")
+            return REPLY_AUTHOR_ONLY
+        if not self._within_rate_limits(command, command.chat.id):
+            self.counters.increment("log_throttled")
+            return REPLY_THROTTLED
+        return None
 
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Greet once when added to a group (R3)."""

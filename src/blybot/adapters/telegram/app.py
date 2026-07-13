@@ -21,6 +21,7 @@ from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters
 
+from blybot.adapters.telegram._common import send_threaded
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
@@ -127,9 +128,7 @@ async def repo_notify_loop(bot: Bot, notifier: RepoNotifier, interval_seconds: f
             continue
         for chat_id, thread_id, digest in digests:
             try:
-                await bot.send_message(
-                    chat_id=chat_id, text=digest, message_thread_id=thread_id or None
-                )
+                await send_threaded(bot, chat_id, thread_id, digest)
             except TelegramError:
                 # Kicked from the group, muted, etc. — that group's
                 # digest is lost, everyone else's still goes out.

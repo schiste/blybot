@@ -21,6 +21,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 
+from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
 from blybot.adapters.telegram.admin import is_group_admin
 from blybot.domain.models import ConsentMode
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
@@ -160,10 +161,11 @@ PRIVACY_TEXT: Final = (
     "including this message, is auditable at https://github.com/schiste/blybot"
 )
 
-_GROUP_TYPES: Final = frozenset({ChatType.GROUP, ChatType.SUPERGROUP})
 _MEMBER_STATUSES: Final = frozenset(
     {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
 )
+# Errors from the bound-repo services that map to a user-facing reply.
+_REPO_ERRORS: Final = (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError)
 
 
 def _same_author(command: Message, target: Message) -> bool:
@@ -185,19 +187,6 @@ def _just_joined(change: ChatMemberUpdated) -> bool:
         change.old_chat_member.status not in _MEMBER_STATUSES
         and change.new_chat_member.status in _MEMBER_STATUSES
     )
-
-
-def _thread_of(update: Update) -> int:
-    """The forum topic the message was sent in; 0 for General/non-forum.
-
-    Gated on ``is_topic_message`` so a reply chain in a *non-forum*
-    supergroup (which also populates ``message_thread_id``) is not
-    mistaken for a topic.
-    """
-    message = update.effective_message
-    if message is None or not message.is_topic_message:
-        return 0
-    return message.message_thread_id or 0
 
 
 def _repo_error_reply(error: Exception) -> str:
@@ -251,7 +240,7 @@ class GroupHandlers:
         chat = update.effective_chat
         if message is None or chat is None:
             return
-        if chat.type not in _GROUP_TYPES:
+        if chat.type not in GROUP_TYPES:
             if chat.type == ChatType.PRIVATE:
                 # Silence here reads as breakage; explain the gesture instead.
                 await context.bot.send_message(chat_id=chat.id, text=REPLY_LOG_IS_GROUP_ONLY)
@@ -262,7 +251,7 @@ class GroupHandlers:
         await self._schedule_cleanup(
             context.bot, chat.id, message.message_id, self.cleanup_delay_seconds
         )
-        thread_id = _thread_of(update)
+        thread_id = thread_of(update)
 
         async def reply(text: str) -> None:
             sent = await context.bot.send_message(
@@ -314,7 +303,7 @@ class GroupHandlers:
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Greet once when added to a group (R3)."""
         change = update.my_chat_member
-        if change is None or change.chat.type not in _GROUP_TYPES:
+        if change is None or change.chat.type not in GROUP_TYPES:
             return
         if not _just_joined(change) or not self.groups.is_allowed(change.chat.id):
             return
@@ -346,85 +335,76 @@ class GroupHandlers:
         chat = self._served_group(update)
         if chat is None:
             return
-        thread_id = _thread_of(update)
-
-        async def reply(text: str) -> None:
-            await context.bot.send_message(
-                chat_id=chat.id, text=text, message_thread_id=thread_id or None
-            )
-
+        thread_id = thread_of(update)
+        bot = context.bot
         description = " ".join(context.args or ()).strip()
         if not description:
-            await reply(REPLY_ISSUE_USAGE)
+            await send_threaded(bot, chat.id, thread_id, REPLY_ISSUE_USAGE)
             return
         if self.repo_service is None:
-            await reply(REPLY_ISSUE_DISABLED)
+            await send_threaded(bot, chat.id, thread_id, REPLY_ISSUE_DISABLED)
             return
         if not self.limiter.allow("issue", chat.id):
-            await reply(REPLY_THROTTLED)
+            await send_threaded(bot, chat.id, thread_id, REPLY_THROTTLED)
             return
         try:
             url = await self.repo_service.file_issue(chat.id, thread_id, description)
-        except (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError) as error:
-            await reply(_repo_error_reply(error))
+        except _REPO_ERRORS as error:
+            await send_threaded(bot, chat.id, thread_id, _repo_error_reply(error))
         else:
             self.counters.increment("group_issues_filed")
             log_event("group_issue", "ok")
-            await reply(REPLY_BUG_FILED.format(url=url))
+            await send_threaded(bot, chat.id, thread_id, REPLY_BUG_FILED.format(url=url))
 
     async def on_repo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show the bound repository's open-items summary."""
         chat = self._served_group(update)
         if chat is None:
             return
-        thread_id = _thread_of(update)
-
-        async def reply(text: str) -> None:
-            await context.bot.send_message(
-                chat_id=chat.id, text=text, message_thread_id=thread_id or None
-            )
-
+        thread_id = thread_of(update)
+        bot = context.bot
         if self.repo_service is None:
-            await reply(REPLY_ISSUE_DISABLED)
+            await send_threaded(bot, chat.id, thread_id, REPLY_ISSUE_DISABLED)
             return
         if not self.limiter.allow("repo", chat.id):
-            await reply(REPLY_THROTTLED)
+            await send_threaded(bot, chat.id, thread_id, REPLY_THROTTLED)
             return
         try:
             summary = await self.repo_service.summary(chat.id, thread_id)
-        except (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError) as error:
-            await reply(_repo_error_reply(error))
+        except _REPO_ERRORS as error:
+            await send_threaded(bot, chat.id, thread_id, _repo_error_reply(error))
         else:
-            await reply(
+            await send_threaded(
+                bot,
+                chat.id,
+                thread_id,
                 REPLY_REPO_SUMMARY.format(
                     repo=summary.repo,
                     count=summary.open_count,
                     titles="; ".join(summary.recent_titles) or "none",
-                )
+                ),
             )
 
     def _served_group(self, update: Update) -> Chat | None:
         """Return the chat when this is a group the bot serves."""
         chat = update.effective_chat
-        if chat is None or chat.type not in _GROUP_TYPES or not self.groups.is_allowed(chat.id):
+        if chat is None or chat.type not in GROUP_TYPES or not self.groups.is_allowed(chat.id):
             return None
         return chat
 
     async def on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain the /log gesture when asked in a served group."""
-        chat = update.effective_chat
-        if chat is None or chat.type not in _GROUP_TYPES or not self.groups.is_allowed(chat.id):
+        chat = self._served_group(update)
+        if chat is None:
             return
-        thread_id = _thread_of(update)
+        thread_id = thread_of(update)
         settings = await self.directory.resolve(chat.id, thread_id)
         page_url = self.page_url_for(settings.log_page)
         text = HELP_GROUP
         if self.directory.self_service_enabled:
             text += HELP_GROUP_SELF_SERVICE
         text += _help_footer(page_url, self.maintainer)
-        await context.bot.send_message(
-            chat_id=chat.id, text=text, message_thread_id=thread_id or None
-        )
+        await send_threaded(context.bot, chat.id, thread_id, text)
 
     async def _schedule_cleanup(
         self, bot: Bot, chat_id: int, message_id: int, delay_seconds: float
@@ -462,7 +442,7 @@ class GroupHandlers:
         if not self.newcomer_welcome_enabled:
             return
         change = update.chat_member
-        if change is None or change.chat.type not in _GROUP_TYPES:
+        if change is None or change.chat.type not in GROUP_TYPES:
             return
         if not _just_joined(change) or not self.groups.is_allowed(change.chat.id):
             return

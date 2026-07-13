@@ -521,11 +521,3 @@ async def test_rules_configure_the_topic_they_run_in() -> None:
     (_sent, thread) = tg.sent_calls(bot)[0]
     assert thread == 42
     assert "this topic" in tg.sent_texts(bot)[0]
-
-
-def test_thread_of_ignores_non_topic_and_missing_messages() -> None:
-    assert a._thread_of(Update(update_id=1)) == 0  # no message
-    plain = tg.command_update(tg.message(text="/x"))  # not a topic message
-    assert a._thread_of(plain) == 0
-    topical = tg.command_update(tg.message(text="/x", thread_id=42))
-    assert a._thread_of(topical) == 42

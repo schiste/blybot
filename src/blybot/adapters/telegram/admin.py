@@ -12,9 +12,10 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from telegram.constants import ChatMemberStatus, ChatType
+from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError
 
+from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
 from blybot.domain.models import ConsentMode
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
@@ -116,7 +117,6 @@ SETTINGS_TEMPLATE: Final = (
 )
 
 _ADMIN_STATUSES: Final = frozenset({ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER})
-_GROUP_TYPES: Final = frozenset({ChatType.GROUP, ChatType.SUPERGROUP})
 
 
 async def is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
@@ -126,18 +126,6 @@ async def is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     except TelegramError:
         return False
     return member.status in _ADMIN_STATUSES
-
-
-def _thread_of(update: Update) -> int:
-    """The forum topic the command was sent in; 0 for General/non-forum.
-
-    Gated on ``is_topic_message`` so a reply chain in a non-forum
-    supergroup is not mistaken for a topic.
-    """
-    message = update.effective_message
-    if message is None or not message.is_topic_message:
-        return 0
-    return message.message_thread_id or 0
 
 
 def _scope(thread_id: int) -> str:
@@ -392,9 +380,7 @@ class AdminHandlers:
     async def _reply(
         context: ContextTypes.DEFAULT_TYPE, chat_id: int, thread_id: int, text: str
     ) -> None:
-        await context.bot.send_message(
-            chat_id=chat_id, text=text, message_thread_id=thread_id or None
-        )
+        await send_threaded(context.bot, chat_id, thread_id, text)
 
     async def _admin_chat(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -402,7 +388,7 @@ class AdminHandlers:
         """Return (group chat, topic) when the sender is one of its admins."""
         chat = update.effective_chat
         message = update.effective_message
-        if chat is None or message is None or chat.type not in _GROUP_TYPES:
+        if chat is None or message is None or chat.type not in GROUP_TYPES:
             return None
         if not self.groups.is_allowed(chat.id):
             return None  # unlisted groups get silence, same as /log
@@ -411,7 +397,7 @@ class AdminHandlers:
             # round-trip) — group /help doesn't advertise these commands.
             log_event("admin_command", "ignored")
             return None
-        thread_id = _thread_of(update)
+        thread_id = thread_of(update)
         user = message.from_user
         if user is None or not await is_group_admin(context.bot, chat.id, user.id):
             await self._reply(context, chat.id, thread_id, REPLY_NOT_ADMIN)

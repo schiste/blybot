@@ -11,6 +11,7 @@ from telegram.constants import ChatType
 from telegram.error import TelegramError
 
 from blybot.adapters.telegram import handlers as h
+from blybot.adapters.telegram._common import thread_of
 from blybot.domain.models import ConsentMode, GroupProfile, TimestampGranularity
 from blybot.observability import Counters
 from blybot.services.directory import ChannelDirectory
@@ -540,9 +541,9 @@ async def test_migration_storage_failure_is_logged_not_raised() -> None:
 
 
 def test_thread_of_ignores_non_topic_and_missing_messages() -> None:
-    assert h._thread_of(Update(update_id=1)) == 0  # no message
-    assert h._thread_of(tg.command_update(tg.message(text="x"))) == 0  # not a topic
-    assert h._thread_of(tg.command_update(tg.message(text="x", thread_id=7))) == 7
+    assert thread_of(Update(update_id=1)) == 0  # no message
+    assert thread_of(tg.command_update(tg.message(text="x"))) == 0  # not a topic
+    assert thread_of(tg.command_update(tg.message(text="x", thread_id=7))) == 7
 
 
 async def test_log_without_a_page_refuses_on_a_self_service_group() -> None:

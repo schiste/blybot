@@ -52,5 +52,5 @@ def configure_logging(level: int = logging.INFO) -> None:
     )
     # python-telegram-bot and httpx log request URLs at INFO; keep them
     # at WARNING so chat ids never appear in operational logs (spec 16).
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("telegram").setLevel(logging.WARNING)
+    for noisy in ("httpx", "telegram"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

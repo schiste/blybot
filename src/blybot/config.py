@@ -13,6 +13,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Final
 
+from cryptography.fernet import Fernet
+
 from blybot.domain.models import ConsentMode, TimestampGranularity
 
 _REQUIRED_KEYS: Final = (
@@ -145,13 +147,24 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         github_repo=source.get("GITHUB_REPO", "schiste/blybot"),
         github_token=source.get("GITHUB_TOKEN", ""),
         wiki_page_suffix=source.get("WIKI_PAGE_SUFFIX", ""),
-        profile_encryption_key=source.get("PROFILE_ENCRYPTION_KEY", ""),
+        profile_encryption_key=_validate_fernet_key(source.get("PROFILE_ENCRYPTION_KEY", "")),
         toolsdb_host=source.get("TOOLSDB_HOST", "tools.db.svc.wikimedia.cloud"),
         toolsdb_name=source.get("TOOLSDB_NAME", ""),
         toolsdb_cnf=source.get("TOOLSDB_CNF", str(Path.home() / "replica.my.cnf")),
         events_poll_minutes=_parse_positive_int(source, "EVENTS_POLL_MINUTES", 5),
         user_agent=source["USER_AGENT"],
     )
+
+
+def _validate_fernet_key(raw: str) -> str:
+    """Ensure a set PROFILE_ENCRYPTION_KEY is a usable Fernet key (spec 12)."""
+    if raw:
+        try:
+            Fernet(raw)
+        except (ValueError, TypeError) as exc:
+            msg = "PROFILE_ENCRYPTION_KEY is not a valid Fernet key"
+            raise ConfigurationError(msg) from exc
+    return raw
 
 
 def _parse_newcomer_welcome(raw: str) -> bool:

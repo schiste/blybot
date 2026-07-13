@@ -68,31 +68,19 @@ def main() -> int:
         debounce_seconds=config.burst_debounce.total_seconds(),
         timestamp_granularity=config.timestamp_granularity,
     )
+    # The key was validated at load; construction can't raise on it.
     store: ToolsDbStore | None = None
     if config.profile_encryption_key:
-        try:
-            store = ToolsDbStore(
-                runner=PymysqlRunner(
-                    host=config.toolsdb_host,
-                    database=config.toolsdb_name,
-                    cnf_path=Path(config.toolsdb_cnf),
-                ),
-                fernet_key=config.profile_encryption_key,
-            )
-        except ValueError:
-            print(
-                "configuration error: PROFILE_ENCRYPTION_KEY is not a valid Fernet key",
-                file=sys.stderr,
-            )
-            return 2
+        store = ToolsDbStore(
+            runner=PymysqlRunner(
+                host=config.toolsdb_host,
+                database=config.toolsdb_name,
+                cnf_path=Path(config.toolsdb_cnf),
+            ),
+            fernet_key=config.profile_encryption_key,
+        )
     binding = TokenBinding(clock=clock)
     gateway = GitHubRepoGateway(user_agent=config.user_agent)
-
-    async def release_clients() -> None:
-        await publisher.aclose()
-        await gateway.aclose()
-        if tracker is not None:
-            await tracker.aclose()
 
     group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
     directory = ChannelDirectory(
@@ -141,6 +129,13 @@ def main() -> int:
         if config.github_token
         else None
     )
+
+    async def release_clients() -> None:
+        await publisher.aclose()
+        await gateway.aclose()
+        if tracker is not None:
+            await tracker.aclose()
+
     private_handlers = PrivateHandlers(
         transcription=transcription,
         sessions=sessions,
@@ -168,29 +163,27 @@ def main() -> int:
         vault=store,
     )
 
+    notifier = (
+        RepoNotifier(
+            store=store, vault=store, gateway=gateway, groups=group_policy, counters=counters
+        )
+        if store
+        else None
+    )
+    lifecycle = Lifecycle(
+        maintenance=Maintenance(sessions=sessions, counters=counters),
+        transcription=transcription,
+        release=release_clients,
+        bootstrap=store.bootstrap if store else None,
+        notifier=notifier,
+        poll_interval_seconds=config.events_poll_minutes * 60,
+    )
     run_polling(
         token=config.telegram_bot_token,
         group_handlers=group_handlers,
         private_handlers=private_handlers,
         admin_handlers=admin_handlers,
-        lifecycle=Lifecycle(
-            maintenance=Maintenance(sessions=sessions, counters=counters),
-            transcription=transcription,
-            release=release_clients,
-            bootstrap=store.bootstrap if store else None,
-            notifier=(
-                RepoNotifier(
-                    store=store,
-                    vault=store,
-                    gateway=gateway,
-                    groups=group_policy,
-                    counters=counters,
-                )
-                if store
-                else None
-            ),
-            poll_interval_seconds=config.events_poll_minutes * 60,
-        ),
+        lifecycle=lifecycle,
     )
     return 0
 

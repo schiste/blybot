@@ -92,8 +92,13 @@ class TokenVault(Protocol):
         ...
 
 
-class RepoGateway(Protocol):
-    """Talks to a group-bound repository with the group's own token."""
+class RepoActions(Protocol):
+    """On-demand actions against a group-bound repo with the group's token.
+
+    Consumed by the interactive ``/issue`` and ``/repo`` commands; kept
+    separate from :class:`RepoPoller` so neither consumer depends on the
+    other's surface (ISP).
+    """
 
     async def validate_token(self, repo: str, token: str) -> bool:
         """Whether the token can see the repo and write its issues."""
@@ -106,6 +111,10 @@ class RepoGateway(Protocol):
     async def open_summary(self, repo: str, token: str) -> RepoSummary:
         """Return a small open-items summary of the bound repo."""
         ...
+
+
+class RepoPoller(Protocol):
+    """Background polling of a group-bound repo's resource streams."""
 
     async def poll_resource(
         self, repo: str, token: str, resource: Resource, cursor: str | None

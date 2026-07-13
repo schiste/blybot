@@ -22,7 +22,7 @@ from blybot.services.rules import format_event, resources_for
 
 if TYPE_CHECKING:
     from blybot.domain.models import GroupProfile, RepoEvent
-    from blybot.domain.ports import ProfileStore, RepoGateway, TokenVault
+    from blybot.domain.ports import ProfileStore, RepoPoller, TokenVault
     from blybot.observability import Counters
     from blybot.services.policy import GroupPolicy
 
@@ -36,7 +36,7 @@ class RepoNotifier:
 
     store: ProfileStore
     vault: TokenVault
-    gateway: RepoGateway
+    gateway: RepoPoller
     groups: GroupPolicy
     counters: Counters
     max_groups_per_tick: int = 200

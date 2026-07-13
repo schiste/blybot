@@ -8,7 +8,7 @@ never cached here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, Final
@@ -29,10 +29,12 @@ _RECENT: Final = 3
 _PER_PAGE: Final = 50
 _PAGE_CAP: Final = 10  # at most 500 items/resource/poll for `since`-less streams
 _TITLE_CAP: Final = 120
+# A payload item that isn't shaped like GitHub's JSON degrades a poll.
+_MALFORMED: Final = (KeyError, ValueError, TypeError, AttributeError)
 
 
 class GitHubRepoGateway:
-    """:class:`blybot.domain.ports.RepoGateway` over the GitHub REST API."""
+    """Concrete GitHub client satisfying RepoActions + RepoPoller."""
 
     def __init__(
         self,
@@ -59,17 +61,19 @@ class GitHubRepoGateway:
         # triage/push grants; accept any writing-ish permission.
         return bool(permissions.get("push") or permissions.get("triage"))
 
-    async def open_issue(self, repo: str, token: str, title: str, body: str) -> str:
-        """Create an issue in the bound repo; return its public URL."""
+    async def _request(self, method: str, url: str, token: str, **kwargs: Any) -> httpx.Response:
+        """One authenticated request; a transport failure becomes IssueTrackerError."""
         try:
-            response = await self._client.post(
-                f"{_API}/repos/{repo}/issues",
-                headers=_auth(token),
-                json={"title": title, "body": body},
-            )
+            return await self._client.request(method, url, headers=_auth(token), **kwargs)
         except httpx.HTTPError as error:
             msg = "could not reach GitHub"
             raise IssueTrackerError(msg) from error
+
+    async def open_issue(self, repo: str, token: str, title: str, body: str) -> str:
+        """Create an issue in the bound repo; return its public URL."""
+        response = await self._request(
+            "POST", f"{_API}/repos/{repo}/issues", token, json={"title": title, "body": body}
+        )
         if response.status_code != _CREATED:
             msg = f"issue creation failed: HTTP {response.status_code}"
             raise IssueTrackerError(msg)
@@ -77,16 +81,13 @@ class GitHubRepoGateway:
 
     async def open_summary(self, repo: str, token: str) -> RepoSummary:
         """Return a small open-items summary of the bound repo."""
-        try:
-            repo_response = await self._client.get(f"{_API}/repos/{repo}", headers=_auth(token))
-            issues_response = await self._client.get(
-                f"{_API}/repos/{repo}/issues",
-                headers=_auth(token),
-                params={"state": "open", "per_page": _RECENT},
-            )
-        except httpx.HTTPError as error:
-            msg = "could not reach GitHub"
-            raise IssueTrackerError(msg) from error
+        repo_response = await self._request("GET", f"{_API}/repos/{repo}", token)
+        issues_response = await self._request(
+            "GET",
+            f"{_API}/repos/{repo}/issues",
+            token,
+            params={"state": "open", "per_page": _RECENT},
+        )
         if repo_response.status_code != _OK or issues_response.status_code != _OK:
             msg = "repository summary unavailable"
             raise IssueTrackerError(msg)
@@ -121,7 +122,7 @@ class GitHubRepoGateway:
             return [], server_now
         try:
             fired, new_watermark = _collect(spec, items, watermark)
-        except (KeyError, ValueError, TypeError, AttributeError) as error:
+        except _MALFORMED as error:
             # One malformed item must degrade this poll, not kill it.
             msg = f"malformed {resource.value} payload"
             raise IssueTrackerError(msg) from error
@@ -144,15 +145,12 @@ class GitHubRepoGateway:
         server_now = watermark
         saturated = False
         for page in range(1, _PAGE_CAP + 1):
-            try:
-                response = await self._client.get(
-                    f"{_API}/repos/{repo}/{spec.path}",
-                    headers=_auth(token),
-                    params={**spec.params(watermark), "page": page},
-                )
-            except httpx.HTTPError as error:
-                msg = "could not reach GitHub"
-                raise IssueTrackerError(msg) from error
+            response = await self._request(
+                "GET",
+                f"{_API}/repos/{repo}/{spec.path}",
+                token,
+                params={**spec.params(watermark), "page": page},
+            )
             if response.status_code != _OK:
                 msg = f"{spec.path} poll failed: HTTP {response.status_code}"
                 raise IssueTrackerError(msg)
@@ -168,7 +166,7 @@ class GitHubRepoGateway:
                     and batch
                     and spec.watermark(batch[-1]) <= watermark
                 )
-            except (KeyError, ValueError, TypeError, AttributeError) as error:
+            except _MALFORMED as error:
                 msg = f"malformed {spec.path} payload"
                 raise IssueTrackerError(msg) from error
             if short or past:
@@ -265,40 +263,35 @@ def _milestone(item: dict[str, Any]) -> str:
     return str((item.get("milestone") or {}).get("title", ""))
 
 
-def _issue_events(item: dict[str, Any]) -> list[tuple[str, RepoEvent]]:
-    def make(event_type: EventType) -> RepoEvent:
-        return RepoEvent(
-            event_type=event_type,
-            title=_clip(str(item.get("title", "?"))),
-            url=str(item.get("html_url", "")),
-            author=_actor(item),
-            labels=_labels(item),
-            assignees=_assignees(item),
-            milestone=_milestone(item),
-            state=str(item.get("state", "")),
-        )
+def _common_event(item: dict[str, Any], event_type: EventType) -> RepoEvent:
+    """A RepoEvent carrying the fields issues and PRs share."""
+    return RepoEvent(
+        event_type=event_type,
+        title=_clip(str(item.get("title", "?"))),
+        url=str(item.get("html_url", "")),
+        author=_actor(item),
+        labels=_labels(item),
+        assignees=_assignees(item),
+        milestone=_milestone(item),
+        state=str(item.get("state", "")),
+    )
 
+
+def _issue_events(item: dict[str, Any]) -> list[tuple[str, RepoEvent]]:
     out: list[tuple[str, RepoEvent]] = []
     if created := str(item.get("created_at") or ""):
-        out.append((created, make(EventType.ISSUE_OPENED)))
+        out.append((created, _common_event(item, EventType.ISSUE_OPENED)))
     if (closed := str(item.get("closed_at") or "")) and item.get("state") == "closed":
-        out.append((closed, make(EventType.ISSUE_CLOSED)))
+        out.append((closed, _common_event(item, EventType.ISSUE_CLOSED)))
     return out
 
 
 def _pull_events(item: dict[str, Any]) -> list[tuple[str, RepoEvent]]:
     def make(event_type: EventType) -> RepoEvent:
-        return RepoEvent(
-            event_type=event_type,
-            title=_clip(str(item.get("title", "?"))),
-            url=str(item.get("html_url", "")),
-            author=_actor(item),
-            labels=_labels(item),
-            assignees=_assignees(item),
-            milestone=_milestone(item),
+        return replace(
+            _common_event(item, event_type),
             base_branch=str((item.get("base") or {}).get("ref", "")),
             draft=bool(item.get("draft")),
-            state=str(item.get("state", "")),
         )
 
     out: list[tuple[str, RepoEvent]] = []

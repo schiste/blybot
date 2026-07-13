@@ -14,7 +14,7 @@ from blybot.services.feedback import as_code_block, issue_title
 
 if TYPE_CHECKING:
     from blybot.domain.models import RepoSummary
-    from blybot.domain.ports import RepoGateway, TokenVault
+    from blybot.domain.ports import RepoActions, TokenVault
     from blybot.services.directory import ChannelDirectory
 
 _BODY_PREAMBLE: Final = (
@@ -35,7 +35,7 @@ class NoTokenError(Exception):
 class GroupRepoService:
     """Files issues and reads summaries with the group's own token."""
 
-    gateway: RepoGateway
+    gateway: RepoActions
     vault: TokenVault
     directory: ChannelDirectory
 

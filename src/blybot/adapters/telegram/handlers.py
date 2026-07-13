@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from telegram.ext import ContextTypes
 
     from blybot.domain.models import Session
-    from blybot.domain.ports import RepoGateway, TokenVault
+    from blybot.domain.ports import RepoActions, TokenVault
     from blybot.services.binding import TokenBinding
     from blybot.services.directory import ChannelDirectory
     from blybot.services.feedback import FeedbackService
@@ -493,7 +493,7 @@ class PrivateHandlers:
     bug_limiter: SlidingWindowLimiter
     binding: TokenBinding
     directory: ChannelDirectory
-    gateway: RepoGateway | None
+    gateway: RepoActions | None
     vault: TokenVault | None
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -122,15 +122,19 @@ class MetaWikiPublisher:
         """Release the underlying HTTP client."""
         await self._client.aclose()
 
+    async def _pause(self, attempt: int) -> None:
+        """Capped exponential backoff before a retry; counts the retry."""
+        self._counters.increment("api_retries")
+        await self._sleep(min(2.0**attempt, 16.0))
+
     async def _submit_edit(self, edit_params: dict[str, str]) -> None:
         """Perform one edit with login, retry, and backoff handling (R8)."""
         self._counters.increment("publishes_attempted")
         last_error = "unknown"
         for attempt in range(self._max_attempts):
             if attempt:
-                self._counters.increment("api_retries")
                 log_event("wiki_edit", "retry", attempt=attempt)
-                await self._sleep(min(2.0**attempt, 16.0))
+                await self._pause(attempt)
             try:
                 data = await self._edit(edit_params)
             except httpx.HTTPError:
@@ -168,8 +172,7 @@ class MetaWikiPublisher:
         data: dict[str, Any] | None = None
         for attempt in range(self._max_attempts):
             if attempt:
-                self._counters.increment("api_retries")
-                await self._sleep(min(2.0**attempt, 16.0))
+                await self._pause(attempt)
             try:
                 data = await self._post(action="parse", page=page, prop="sections")
                 break

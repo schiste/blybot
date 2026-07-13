@@ -17,6 +17,7 @@ from blybot.adapters.system import SystemClock
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
+from blybot.adapters.telegram.token_entry import TokenEntryHandler
 from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
 from blybot.config import ConfigurationError, load_config
 from blybot.domain.pseudonym import RandomPseudonymFactory
@@ -148,10 +149,13 @@ def main() -> int:
         bug_limiter=SlidingWindowLimiter(
             clock=clock, limit=config.bug_throttle_per_hour, window=timedelta(hours=1)
         ),
-        binding=binding,
-        directory=directory,
-        gateway=gateway,
-        vault=store,
+        token_entry=TokenEntryHandler(
+            binding=binding,
+            directory=directory,
+            gateway=gateway,
+            vault=store,
+            counters=counters,
+        ),
     )
 
     admin_handlers = AdminHandlers(

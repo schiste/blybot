@@ -22,7 +22,6 @@ from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 
 from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
-from blybot.adapters.telegram.admin import is_group_admin
 from blybot.domain.models import ConsentMode
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 from blybot.observability import Counters, log_event
@@ -35,9 +34,8 @@ if TYPE_CHECKING:
     from telegram import Bot, Chat, ChatMemberUpdated, Message, Update
     from telegram.ext import ContextTypes
 
+    from blybot.adapters.telegram.token_entry import TokenEntryHandler
     from blybot.domain.models import Session
-    from blybot.domain.ports import RepoActions, TokenVault
-    from blybot.services.binding import TokenBinding
     from blybot.services.directory import ChannelDirectory, ChannelSettings
     from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
@@ -94,29 +92,6 @@ REPLY_ISSUE_NO_PAT: Final = (
 REPLY_ISSUE_FAILED: Final = "Sorry, GitHub refused that — the token may have expired (/setrepo)."
 REPLY_REPO_SUMMARY: Final = (
     "{repo}: {count} open items. Recent: {titles}\nhttps://github.com/{repo}/issues"
-)
-REPLY_LINK_EXPIRED: Final = (
-    "That configuration link is no longer valid. Run /setrepo in the group again for a fresh one."
-)
-REPLY_LINK_NOT_ADMIN: Final = "Only an admin of that group can supply its token."
-REPLY_PAT_PROMPT: Final = (
-    "Paste the GitHub token for {repo} as your next message here. Use a "
-    "fine-grained PAT restricted to that repository with Issues read/write "
-    "only. I'll validate it, encrypt it, store it — and delete your message "
-    "from this chat immediately. This prompt expires in 5 minutes; while "
-    "it's active, nothing you send me is transcribed."
-)
-REPLY_PAT_NO_REPO: Final = "That group no longer has a repository bound; run /setrepo there first."
-REPLY_PAT_INVALID: Final = (
-    "GitHub rejected that token for the bound repository — check the repo "
-    "access and Issues permission, then paste it again."
-)
-REPLY_PAT_STORE_FAILED: Final = (
-    "Storing the token failed on my side — please paste it again in a moment."
-)
-REPLY_PAT_SAVED: Final = (
-    "Token validated, encrypted and stored; I've deleted your message. "
-    "/issue and /repo are live in the group; /revoke there discards the token."
 )
 NEWCOMER_PROMPT: Final = "Welcome! Tap below for a private note on how I work."
 NEWCOMER_BUTTON: Final = "What is this bot?"
@@ -479,10 +454,7 @@ class PrivateHandlers:
     issues_url: str
     feedback: FeedbackService | None
     bug_limiter: SlidingWindowLimiter
-    binding: TokenBinding
-    directory: ChannelDirectory
-    gateway: RepoActions | None
-    vault: TokenVault | None
+    token_entry: TokenEntryHandler
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Deliver the welcome (R5), or redeem a configuration deep link.
@@ -497,39 +469,10 @@ class PrivateHandlers:
             return
         payload = (context.args or [""])[0]
         if payload.startswith("cfg_"):
-            await self._redeem_configuration_link(update, context, chat.id, payload[4:])
+            await self.token_entry.redeem_link(update, context, chat.id, payload[4:])
             return
         await context.bot.send_message(chat_id=chat.id, text=self.welcome_text)
         log_event("welcome_delivered", "ok")
-
-    async def _redeem_configuration_link(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE, dm_chat_id: int, nonce: str
-    ) -> None:
-        async def reply(text: str) -> None:
-            await context.bot.send_message(chat_id=dm_chat_id, text=text)
-
-        target = self.binding.peek_link(nonce)
-        message = update.effective_message
-        user = message.from_user if message else None
-        if target is None:
-            await reply(REPLY_LINK_EXPIRED)
-            return
-        group_chat_id, thread_id = target
-        if user is None or not await is_group_admin(context.bot, group_chat_id, user.id):
-            # Deliberately NOT consumed: a non-admin tapping the public
-            # link must not burn it for the real admin.
-            await reply(REPLY_LINK_NOT_ADMIN)
-            return
-        if self.binding.redeem_link(nonce) is None:  # consumed in a race
-            await reply(REPLY_LINK_EXPIRED)
-            return
-        settings = await self.directory.resolve(group_chat_id, thread_id)
-        if not settings.repo:
-            await reply(REPLY_PAT_NO_REPO)
-            return
-        self.binding.open_entry(dm_chat_id, group_chat_id, thread_id)
-        log_event("token_entry_opened", "ok")
-        await reply(REPLY_PAT_PROMPT.format(repo=settings.repo))
 
     async def on_flush(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Discard the current pseudonym and mint a fresh one (spec 10).
@@ -610,16 +553,11 @@ class PrivateHandlers:
             return
         # An armed token entry claims the next message BEFORE anything
         # can transcribe it: a pasted secret must never reach the wiki.
-        pending = self.binding.pending_target(chat.id)
+        pending = self.token_entry.claims_next_message(chat.id)
         if pending is not None:
-            # Remove the pasted secret from the chat first — bots may
-            # delete messages in private chats, so don't rely on the
-            # admin remembering to.
-            try:
-                await context.bot.delete_message(chat_id=chat.id, message_id=message.message_id)
-            except TelegramError:
-                log_event("command_cleanup", "ignored")
-            await self._accept_token(context, chat.id, pending, message.text)
+            await self.token_entry.accept_token(
+                context, chat.id, pending, message.message_id, message.text
+            )
             return
         is_new_session = self.sessions.peek(chat.id) is None
         try:
@@ -632,41 +570,6 @@ class PrivateHandlers:
             # tell the user which identity their words appear under.
             notice = self._opened_session_notice(session)
             await context.bot.send_message(chat_id=chat.id, text=notice)
-
-    async def _accept_token(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        dm_chat_id: int,
-        target: tuple[int, int],
-        text: str,
-    ) -> None:
-        group_chat_id, thread_id = target
-
-        async def reply(reply_text: str) -> None:
-            await context.bot.send_message(chat_id=dm_chat_id, text=reply_text)
-
-        if self.gateway is None or self.vault is None:
-            self.binding.close_entry(dm_chat_id)
-            await reply(REPLY_PAT_NO_REPO)
-            return
-        settings = await self.directory.resolve(group_chat_id, thread_id)
-        if not settings.repo:
-            self.binding.close_entry(dm_chat_id)
-            await reply(REPLY_PAT_NO_REPO)
-            return
-        token = text.strip()
-        if not await self.gateway.validate_token(settings.repo, token):
-            await reply(REPLY_PAT_INVALID)  # entry stays armed for a retry
-            return
-        try:
-            await self.vault.store_token(group_chat_id, thread_id, token)
-        except StorageError:
-            await reply(REPLY_PAT_STORE_FAILED)  # entry stays armed
-            return
-        self.binding.close_entry(dm_chat_id)
-        self.counters.increment("tokens_bound")
-        log_event("token_bound", "ok")
-        await reply(REPLY_PAT_SAVED)
 
     def _opened_session_notice(self, session: Session) -> str:
         """Count and log a session opening; return the user-facing notice."""

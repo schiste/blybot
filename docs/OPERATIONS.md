@@ -102,10 +102,12 @@ chmod 600 <name>.env
 ~/blybot/deploy-instance.sh start <name>
 ```
 
-The schema bootstraps itself at startup. **What gets stored per group**:
-its chat id, chosen page/repo, consent policy, event settings, and any
-admin-supplied API token (Fernet-encrypted; the key never leaves the
-env file). Never stored: user ids, usernames, messages. Losing
+The schema bootstraps itself at startup (additive, idempotent — safe to
+redeploy over an older table). **What gets stored per group**: its chat
+id, chosen page/repo, consent policy, event notification rules, per-
+resource poll cursors, and any admin-supplied API token (Fernet-
+encrypted; the key never leaves the env file). Never stored: user ids,
+usernames, messages. Losing
 `PROFILE_ENCRYPTION_KEY` invalidates stored tokens (groups re-bind);
 back up the env file accordingly. Verify tokens are ciphertext with:
 `SELECT chat_id, LEFT(token_ciphertext, 20) FROM profiles;`
@@ -137,6 +139,9 @@ a `~/<name>.env`.
   | `event=dm_flush outcome=ok lines=N` | a DM burst landed on the wiki |
   | `event=dm_flush outcome=error` | a burst was dropped after retries |
   | `event=command_cleanup outcome=ignored` | missing the *Delete messages* admin right |
+  | `event=repo_poll outcome=ok events=N` | a group's `/rule` matches were delivered |
+  | `event=repo_poll outcome=error` | a repo poll failed for one group (others unaffected) |
+  | `event=token_bound outcome=ok` | a group admin bound a GitHub token |
   | `event=wiki_edit outcome=retry` | maxlag/transient API backoff in progress |
   | `event=wiki_login outcome=error` | BotPassword rejected — check credentials |
 

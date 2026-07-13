@@ -43,17 +43,19 @@ repo-event notifications driven by **composable rules** (`/rule`,
 (`issue.opened`, `pr.merged`, `release`, …), rich filters
 (`label:bug`, `base:main`, `author:x`, `title:/regex/`, `draft:false`,
 …), and a delivery mode (`live` or `digest`). **Forum groups get
-per-topic overrides**: a topic can publish `/log` to its own page and
-bind its own repo, inheriting anything it doesn't set from the group. Storage is one ToolsDB table holding only group-level state;
-no user identifier is ever persisted. All of v1 remains
-(spec Phases 1–3): the group `/log` flow with
-confirmation and consent policy, greet-on-entry, DM transcription with
-per-session talk-page sections and burst coalescing, the newcomer deep-link
-welcome,
-rate limiting, and a maxlag-aware MediaWiki publisher. What remains before
-going live is Phase 0 operations — BotFather registration (privacy mode ON),
-the on-wiki BotPassword, target pages, and the Toolforge outbound check —
-plus the deferred N1 consent-confirm flow. See
+per-topic overrides**: a topic can publish `/log` to its own page and bind
+its own repo, inheriting anything it doesn't set from the group. Storage is
+one ToolsDB table holding only group-level state; no user identifier is ever
+persisted.
+
+All of v1 remains (spec Phases 1–3): the group `/log` flow with confirmation
+and consent policy, greet-on-entry, DM transcription with per-session
+talk-page sections and burst coalescing, the newcomer deep-link welcome, rate
+limiting, and a maxlag-aware MediaWiki publisher.
+
+The reference instance runs as a continuous job on Toolforge; standing up a
+fresh deployment is the [Phase 0 checklist](#deployment) below. The only
+deferred feature is the N1 consent-confirm flow. See
 [docs/SPECIFICATION.md](docs/SPECIFICATION.md) for the full product spec.
 
 ## Architecture
@@ -61,20 +63,29 @@ plus the deferred N1 consent-confirm flow. See
 ```
 src/blybot/
 ├── domain/       pure business logic — no I/O, no third-party imports
-│   ├── models.py       identifier-free value objects, ConsentMode
-│   ├── ports.py        Protocols: WikiPublisher, Sanitizer, PseudonymFactory, Clock
+│   ├── models.py       identifier-free value objects: sessions, rules, events
+│   ├── ports.py        Protocols: WikiPublisher, ProfileStore, TokenVault,
+│   │                   RepoActions, RepoPoller, IssueTracker, Sanitizer, Clock …
 │   ├── sanitizer.py    wikitext neutralization (entity encoding)
+│   ├── rendering.py    talk-page section + heading formatting
 │   └── pseudonym.py    CSPRNG pseudonym minting
 ├── services/     use-cases, depend on domain ports only
 │   ├── publish.py      /log → one talk-page section per entry
-│   ├── directory.py    per-group settings: stored profile over env defaults
 │   ├── transcribe.py   DM sessions: one section each, indented discussion
 │   ├── sessions.py     volatile DM session registry (TTL, peek, reset, sweep)
-│   └── policy.py       group allowlist + supergroup migration, /log throttle
+│   ├── directory.py    per-(group, topic) settings: stored profile over defaults
+│   ├── rules.py        composable event rules: parse, describe, match, serialize
+│   ├── notify.py       poll bound repos, match rules, live + digest delivery
+│   ├── repo.py         /issue + /repo against a group's bound repository
+│   ├── feedback.py     /bug → anonymous issue on the operator's tracker
+│   ├── binding.py      short-lived config deep links + token-entry state
+│   └── policy.py       group allowlist, supergroup migration, rate limiting
 ├── adapters/     the only layer allowed to touch I/O libraries
-│   ├── telegram/       handlers (the anonymity boundary) + polling bootstrap
+│   ├── telegram/       handlers (the anonymity boundary), admin + token-entry
+│   │                   commands, shared scope helpers, polling bootstrap
 │   ├── mediawiki/      async discussion publisher: sections, maxlag, assert=user
-│   ├── toolsdb/        per-group profiles + encrypted tokens (self-service)
+│   ├── github/         per-group repo gateway + the operator's issue tracker
+│   ├── toolsdb/        per-(group, topic) profiles + encrypted tokens
 │   └── system.py       wall clock
 ├── observability.py    identifier-free event logging and counters
 ├── config.py     env-based configuration, validates without echoing secrets

@@ -148,7 +148,7 @@ Design so these remain possible without rework: quote store and `/quote` retriev
 
 ## 9. Meta-wiki publication
 
-**Client.** `mwclient` or `pywikibot` against `https://meta.wikimedia.org/w/api.php` (configurable).
+**Client.** A small async `httpx` client against `https://meta.wikimedia.org/w/api.php` (configurable via `WIKI_API_URL`). BotPassword login, CSRF token, section create/append, `assert=user`, and maxlag-aware retries — no `mwclient`/`pywikibot` dependency.
 
 **Authentication.** A dedicated on-wiki bot account. v1 uses a BotPassword with least-privilege grants; OAuth (owner-only consumer) is the P1 upgrade. Credentials live in the tool's home directory, never in the repository.
 
@@ -229,16 +229,17 @@ Loaded from the tool home directory (env or a `0600`-permission file), not the r
 
 ## 13. Architecture
 
-A single long-running asyncio process:
+A single long-running asyncio process, structured as ports-and-adapters (see the tree in the README):
 
 - **Transport:** `python-telegram-bot`, long polling.
-- **Dispatcher / handlers:** `/log` reply handler; DM message handler; `/start` (welcome), `/flush` (identity reset), `/whoami`, `/help`, and `/privacy` handlers; join handler (deep-link button); `my_chat_member` handler (greet-on-entry).
-- **Publisher:** MediaWiki module (`mwclient`/`pywikibot`), `appendtext`, maxlag-aware, retrying.
+- **Dispatcher / handlers:** `/log` reply handler; DM message handler; `/start` (welcome / config deep link), `/flush`, `/whoami`, `/help`, `/privacy`, `/bug` handlers; join handler (deep-link button); `my_chat_member` handler (greet-on-entry); the group self-service commands (`/setup`, `/setpage`, `/setconsent`, `/setrepo`, `/events`, `/rule`, `/rules`, `/revoke`, `/settings`, `/reset`) and `/issue` + `/repo`.
+- **Publisher:** MediaWiki client over `httpx` (not `mwclient`/`pywikibot`) — section create/append via the API, maxlag-aware, retrying with `assert=user`.
 - **Anonymizer:** in-memory session store with a periodic TTL sweep task.
 - **Sanitizer:** wikitext neutralization (R7), applied to all user content before publish.
+- **Self-service (v2):** a ToolsDB profile store (encrypted per-group tokens), a per-group GitHub gateway, and a rules engine that polls bound repos and delivers matched events live or as digests. All optional — absent its config keys, the bot is the pure v1 single-tenant logger.
 - **Config loader.**
 
-The process is near-stateless and idempotent to restart. Concurrency is low and `appendtext` avoids edit conflicts, so no locking layer is needed in v1.
+The process is near-stateless and idempotent to restart. Concurrency is low and section append avoids edit conflicts, so no locking layer is needed.
 
 ---
 

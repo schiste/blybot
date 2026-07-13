@@ -131,9 +131,10 @@ PRIVACY_TEXT: Final = (
     "and the wiki's public edit timestamps.\n\n"
     "How I run: as a continuous job on Wikimedia Toolforge (Kubernetes), "
     "movement-hosted infrastructure — no third-party servers or analytics. "
-    "Credentials live in a permission-restricted file on the tool account; "
-    "there is no database. I am free software (AGPL-3.0): every line, "
-    "including this message, is auditable at https://github.com/schiste/blybot"
+    "Credentials live in a permission-restricted file on the tool account, and "
+    "the only stored state is the group-config row described above. I am free "
+    "software (AGPL-3.0): every line, including this message, is auditable at "
+    "https://github.com/schiste/blybot"
 )
 
 _MEMBER_STATUSES: Final = frozenset(

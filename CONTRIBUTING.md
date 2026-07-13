@@ -50,7 +50,7 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 - **Layering** (enforced by `tests/test_architecture.py`):
   `domain` imports nothing from the app and no I/O libraries; `services`
   import `domain` only; `adapters` are the only place `python-telegram-bot`
-  or `mwclient` may appear; `__main__.py` is the sole composition root.
+  or `httpx` may appear; `__main__.py` is the sole composition root.
 - **Dependency injection over globals.** Services receive collaborators via
   constructors, typed as the Protocols in `blybot/domain/ports.py`. New
   external capability = new port + adapter, not a direct import.

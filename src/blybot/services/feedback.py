@@ -33,6 +33,11 @@ def as_code_block(text: str) -> str:
     return "\n".join(f"    {line}" for line in text.splitlines())
 
 
+def compose_issue(text: str, preamble: str) -> tuple[str, str]:
+    """Return the ``(title, body)`` for an anonymous issue from ``text``."""
+    return issue_title(text), preamble + as_code_block(text)
+
+
 @dataclass(frozen=True, slots=True)
 class FeedbackService:
     """Composes and files an anonymous issue; returns its URL."""
@@ -41,7 +46,5 @@ class FeedbackService:
 
     async def report(self, text: str) -> str:
         """File ``text`` as an anonymous issue; return the issue URL."""
-        return await self.tracker.open_issue(
-            title=issue_title(text),
-            body=_BODY_PREAMBLE + as_code_block(text),
-        )
+        title, body = compose_issue(text, _BODY_PREAMBLE)
+        return await self.tracker.open_issue(title=title, body=body)

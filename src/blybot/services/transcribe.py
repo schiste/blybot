@@ -84,10 +84,7 @@ class DmTranscriptionService:
             # identity's section before writing under the new one. A
             # failure here follows the debounced-failure policy (logged,
             # burst dropped) — it must not swallow the new message too.
-            try:
-                await self._flush(chat_id)
-            except WikiWriteError:
-                log_event("dm_flush", "error")
+            await self._flush_logged(chat_id)
             self._published_anchors.discard(buffer.anchor)
             buffer = None
         if buffer is None:
@@ -111,10 +108,7 @@ class DmTranscriptionService:
         ``_flush`` itself cancels each buffer's scheduled flusher.
         """
         for chat_id in list(self._buffers):
-            try:
-                await self._flush(chat_id)
-            except WikiWriteError:
-                log_event("dm_flush", "error")
+            await self._flush_logged(chat_id)
 
     def heading_for(self, session: Session) -> str:
         """The session's section heading: creation timestamp + pseudonym.
@@ -136,6 +130,10 @@ class DmTranscriptionService:
 
     async def _flush_later(self, chat_id: int) -> None:
         await asyncio.sleep(self.debounce_seconds)
+        await self._flush_logged(chat_id)
+
+    async def _flush_logged(self, chat_id: int) -> None:
+        """Flush a buffer, applying the debounced-failure policy (log, drop)."""
         try:
             await self._flush(chat_id)
         except WikiWriteError:

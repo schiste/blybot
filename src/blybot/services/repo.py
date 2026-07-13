@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from blybot.services.feedback import as_code_block, issue_title
+from blybot.services.feedback import compose_issue
 
 if TYPE_CHECKING:
     from blybot.domain.models import RepoSummary
@@ -42,9 +42,8 @@ class GroupRepoService:
     async def file_issue(self, chat_id: int, thread_id: int, text: str) -> str:
         """File ``text`` as an anonymous issue in the topic's repo; return its URL."""
         repo, token = await self._binding(chat_id, thread_id)
-        return await self.gateway.open_issue(
-            repo, token, title=issue_title(text), body=_BODY_PREAMBLE + as_code_block(text)
-        )
+        title, body = compose_issue(text, _BODY_PREAMBLE)
+        return await self.gateway.open_issue(repo, token, title=title, body=body)
 
     async def summary(self, chat_id: int, thread_id: int) -> RepoSummary:
         """Return the topic's repo open-items summary."""

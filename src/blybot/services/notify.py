@@ -79,11 +79,10 @@ class RepoNotifier:
         collected: list[RepoEvent] = []
         changed = False
         for resource in sorted(resources_for(profile.rules), key=lambda item: item.value):
-            events, new_cursor = await self.gateway.poll_resource(
-                repo, token, resource, cursors.get(resource.value)
-            )
+            previous = cursors.get(resource.value)
+            events, new_cursor = await self.gateway.poll_resource(repo, token, resource, previous)
             collected.extend(events)
-            if new_cursor and new_cursor != cursors.get(resource.value):
+            if new_cursor and new_cursor != previous:
                 cursors[resource.value] = new_cursor
                 changed = True
         if changed:

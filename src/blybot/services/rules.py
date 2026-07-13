@@ -120,6 +120,10 @@ _EVENT_LABELS: Final = {
 _VALID_KEYS: Final = frozenset(
     {"label", "author", "base", "assignee", "milestone", "draft", "title"}
 )
+# Filter fields whose grammar key, attribute name, and JSON key all
+# coincide and whose value is a plain string — described and serialized
+# uniformly (the label/title/draft fields need bespoke handling).
+_PLAIN_FIELDS: Final = ("author", "base", "assignee", "milestone")
 
 
 def _build_filter(conditions: dict[str, str]) -> RuleFilter:
@@ -169,13 +173,8 @@ def _describe_filter(rule_filter: RuleFilter) -> list[str]:
     parts: list[str] = []
     if rule_filter.labels:
         parts.append(f"label:{','.join(sorted(rule_filter.labels))}")
-    for name, value in (
-        ("author", rule_filter.author),
-        ("base", rule_filter.base),
-        ("assignee", rule_filter.assignee),
-        ("milestone", rule_filter.milestone),
-    ):
-        if value:
+    for name in _PLAIN_FIELDS:
+        if value := getattr(rule_filter, name):
             parts.append(f"{name}:{value}")
     if rule_filter.title_match:
         rendered = (
@@ -205,15 +204,9 @@ def _filter_to_dict(rule_filter: RuleFilter) -> dict[str, Any]:
     out: dict[str, Any] = {}
     if rule_filter.labels:
         out["labels"] = sorted(rule_filter.labels)
-    for key, value in (
-        ("author", rule_filter.author),
-        ("base", rule_filter.base),
-        ("assignee", rule_filter.assignee),
-        ("milestone", rule_filter.milestone),
-        ("title_match", rule_filter.title_match),
-    ):
-        if value:
-            out[key] = value
+    for name in (*_PLAIN_FIELDS, "title_match"):
+        if value := getattr(rule_filter, name):
+            out[name] = value
     if rule_filter.title_is_regex:
         out["title_is_regex"] = True
     if rule_filter.draft is not None:

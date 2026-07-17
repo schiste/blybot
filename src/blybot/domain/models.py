@@ -93,6 +93,40 @@ class ConsentMode(Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class LogMedia:
+    """One anonymous media attachment selected for wiki publication.
+
+    The bytes are transient and deliberately carry no Telegram file id,
+    original filename, author, or chat metadata. The publication service
+    generates the public wiki filename from the log pseudonym.
+    """
+
+    content: bytes
+    content_type: str
+
+    def __post_init__(self) -> None:
+        if not self.content:
+            msg = "LogMedia content must be non-empty"
+            raise ValueError(msg)
+        if not self.content_type:
+            msg = "LogMedia content_type must be non-empty"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class LogContent:
+    """Publishable content from a ``/log`` target: optional text plus media."""
+
+    text: str | None = None
+    media: tuple[LogMedia, ...] = ()
+
+    @property
+    def has_publishable_content(self) -> bool:
+        """Whether this log has text, media, or both."""
+        return bool((self.text and self.text.strip()) or self.media)
+
+
+@dataclass(frozen=True, slots=True)
 class GroupProfile:
     """Self-service configuration one group's admins chose from Telegram.
 

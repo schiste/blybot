@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 class _Buffer:
     anchor: str
     heading: str
+    target_page: str
     continuation: bool  # False until the session's section exists on the wiki
     lines: list[str] = field(default_factory=list)
     flusher: asyncio.Task[None] | None = None
@@ -60,9 +61,9 @@ class DmTranscriptionService:
     # one — which could otherwise target a stale section from an old
     # session that happened to mint the same pseudonym. Entries are tiny
     # pseudonym strings (no identifiers) and are pruned on rollover.
-    _published_anchors: set[str] = field(default_factory=set)
+    _published_anchors: set[tuple[str, str]] = field(default_factory=set)
 
-    async def record(self, chat_id: int, text: str) -> Session:
+    async def record(self, chat_id: int, text: str, target_page: str | None = None) -> Session:
         """Queue one DM for publication; return the session it belongs to.
 
         With a positive debounce the write happens shortly after the
@@ -71,6 +72,7 @@ class DmTranscriptionService:
         With debounce zero the write is immediate and failures propagate
         to the caller.
         """
+        page = target_page or self.target_page
         session = self.sessions.advance(chat_id)
         line = discussion_line(
             session.message_count,
@@ -79,19 +81,20 @@ class DmTranscriptionService:
         )
 
         buffer = self._buffers.get(chat_id)
-        if buffer is not None and buffer.anchor != session.anchor:
+        if buffer is not None and (buffer.anchor != session.anchor or buffer.target_page != page):
             # The session rolled over mid-buffer; close out the old
             # identity's section before writing under the new one. A
             # failure here follows the debounced-failure policy (logged,
             # burst dropped) — it must not swallow the new message too.
             await self._flush_logged(chat_id)
-            self._published_anchors.discard(buffer.anchor)
+            self._published_anchors.discard((buffer.target_page, buffer.anchor))
             buffer = None
         if buffer is None:
             buffer = _Buffer(
                 anchor=session.anchor,
                 heading=self.heading_for(session),
-                continuation=session.anchor in self._published_anchors,
+                target_page=page,
+                continuation=(page, session.anchor) in self._published_anchors,
             )
             self._buffers[chat_id] = buffer
         buffer.lines.append(line)
@@ -119,14 +122,15 @@ class DmTranscriptionService:
         stamp = timestamp(session.created_at, self.timestamp_granularity)
         return section_heading(stamp, session.pseudonym.value)
 
-    def page_for(self, session: Session) -> str:
+    def page_for(self, session: Session, target_page: str | None = None) -> str:
         """Return the page (with section anchor) this session's discussion lands on.
 
         MediaWiki turns spaces into underscores in heading anchors; the
         heading charset (timestamp, colon, hyphen, pseudonym) contains
         nothing else needing escape.
         """
-        return f"{self.target_page}#{self.heading_for(session).replace(' ', '_')}"
+        page = target_page or self.target_page
+        return f"{page}#{self.heading_for(session).replace(' ', '_')}"
 
     async def _flush_later(self, chat_id: int) -> None:
         await asyncio.sleep(self.debounce_seconds)
@@ -154,10 +158,10 @@ class DmTranscriptionService:
             else self.publisher.start_discussion
         )
         await write(
-            page=self.target_page,
+            page=buffer.target_page,
             heading=buffer.heading,
             text="\n".join(buffer.lines),
             summary=self.edit_summary,
         )
-        self._published_anchors.add(buffer.anchor)
+        self._published_anchors.add((buffer.target_page, buffer.anchor))
         log_event("dm_flush", "ok", lines=len(buffer.lines))

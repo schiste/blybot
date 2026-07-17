@@ -151,6 +151,7 @@ def build_application(
         .build()
     )
     application.add_handler(CommandHandler("log", group_handlers.on_log))
+    application.add_handler(CommandHandler("logmedia", group_handlers.on_logmedia))
     application.add_handler(CommandHandler("start", private_handlers.on_start))
     application.add_handler(CommandHandler("flush", private_handlers.on_flush))
     application.add_handler(CommandHandler("whoami", private_handlers.on_whoami))
@@ -194,6 +195,12 @@ def build_application(
     )
     application.add_handler(
         MessageHandler(filters.StatusUpdate.MIGRATE, group_handlers.on_migration)
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.StatusUpdate.CHAT_SHARED,
+            private_handlers.on_chat_shared,
+        )
     )
     application.add_handler(
         MessageHandler(

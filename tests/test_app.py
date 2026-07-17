@@ -85,12 +85,12 @@ def test_build_registers_every_handler() -> None:
     application = build()
     handlers = application.handlers[0]
     kinds = [type(handler) for handler in handlers]
-    # log, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
+    # log, logmedia, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
     # setup, setpage, setconsent, setrepo, events, rule, rules, revoke,
     # settings, reset
-    assert kinds.count(CommandHandler) == 21
+    assert kinds.count(CommandHandler) == 22
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
-    assert kinds.count(MessageHandler) == 2  # migration and DM text
+    assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
 
 
 def test_run_polling_opts_into_exactly_the_updates_privacy_mode_needs(

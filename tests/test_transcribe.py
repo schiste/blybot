@@ -181,6 +181,27 @@ async def test_flush_all_contains_write_failures() -> None:
     await service.flush_all()  # failure is logged, never raised at shutdown
 
 
+async def test_target_page_can_be_overridden_per_dm_session() -> None:
+    publisher = FakePublisher()
+    service = make_service(publisher, FakeClock())
+    session = await service.record(chat_id=1, text="hello", target_page="Project/Telegram logs")
+    await service.record(chat_id=1, text="again", target_page="Project/Telegram logs")
+
+    assert publisher.started[0][0] == "Project/Telegram logs"
+    assert publisher.continued[0][0] == "Project/Telegram logs"
+    assert service.page_for(session, "Project/Telegram logs") == ("Project/Telegram logs#Anon-1")
+
+
+async def test_target_page_change_flushes_the_previous_buffer() -> None:
+    publisher = FakePublisher()
+    service = make_service(publisher, FakeClock(), debounce_seconds=60)
+    await service.record(chat_id=1, text="one", target_page="A")
+    await service.record(chat_id=1, text="two", target_page="B")
+    await service.flush_all()
+
+    assert [entry[0] for entry in publisher.started] == ["A", "B"]
+
+
 async def test_flush_of_an_unknown_chat_is_a_quiet_noop() -> None:
     """Guards the race where a scheduled flusher fires after its buffer
     was already drained by flush_all or a rollover."""

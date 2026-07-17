@@ -38,10 +38,11 @@ DEFAULT_GROUP_GREETING: Final = (
     "explicitly marked that way — never ordinary chatter."
 )
 DEFAULT_WELCOME: Final = (
-    "Welcome! Anything you write to me here is transcribed to a public "
-    "Meta-wiki page under a random per-session pseudonym. Your Telegram "
-    "name and ID are never recorded anywhere. Send /flush at any time to "
-    "get a fresh identity, and /help for all commands."
+    "Welcome! Send me a message and I'll ask which shared group should "
+    "receive it on Meta-wiki. It will appear under a random per-session "
+    "pseudonym; your Telegram name and ID are never recorded anywhere. "
+    "Send /flush at any time to get a fresh identity, and /help for all "
+    "commands."
 )
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 
 import pytest
@@ -26,17 +25,17 @@ def test_snapshot_is_a_copy() -> None:
     assert counters.snapshot() == {"x": 1}
 
 
-def test_log_event_emits_event_outcome_and_numeric_fields(
+def test_log_event_emits_event_outcome_and_fields(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.INFO, logger="blybot"):
-        log_event("publish", "ok", attempts=2)
-    assert caplog.messages == ["event=publish outcome=ok attempts=2"]
+        log_event("publish", "ok", attempts=2, code="maxlag")
+    assert caplog.messages == ["event=publish outcome=ok attempts=2 code=maxlag"]
 
 
-def test_log_event_fields_are_typed_int_only() -> None:
-    """The signature is the privacy gate: no string field can carry content."""
-    signature = inspect.signature(log_event)
-    kwargs = signature.parameters["fields"]
-    assert kwargs.kind is inspect.Parameter.VAR_KEYWORD
-    assert kwargs.annotation in (int, "int")
+def test_log_event_keeps_machine_codes_identifier_free(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="blybot"):
+        log_event("wiki_edit", "error", code="protectedpage")
+    assert caplog.messages == ["event=wiki_edit outcome=error code=protectedpage"]

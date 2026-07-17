@@ -151,6 +151,12 @@ class WikiPublisher(Protocol):
         """Append ``text`` inside the latest section titled ``heading``, creating it if absent."""
         ...
 
+    async def upload_file(
+        self, filename: str, content: bytes, content_type: str, summary: str, description: str
+    ) -> str:
+        """Upload a file and return the canonical wiki filename."""
+        ...
+
 
 class Sanitizer(Protocol):
     """Neutralizes user-supplied text before it may touch a wiki page (spec R7)."""

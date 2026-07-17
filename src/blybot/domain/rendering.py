@@ -31,6 +31,11 @@ def discussion_line(depth: int, text: str, signature: str | None = None) -> str:
     return line
 
 
+def file_link(filename: str) -> str:
+    """Render a wiki file inclusion for a bot-uploaded file."""
+    return f"[[File:{filename}|thumb]]"
+
+
 def timestamp(moment: datetime, granularity: TimestampGranularity) -> str | None:
     """Render the section-heading timestamp, or ``None`` when disabled."""
     if granularity is TimestampGranularity.MINUTE:

@@ -19,12 +19,19 @@ class FakePublisher:
 
     started: list[tuple[str, str, str, str]] = field(default_factory=list)
     continued: list[tuple[str, str, str, str]] = field(default_factory=list)
+    uploads: list[tuple[str, bytes, str, str, str]] = field(default_factory=list)
 
     async def start_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
         self.started.append((page, heading, text, summary))
 
     async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
         self.continued.append((page, heading, text, summary))
+
+    async def upload_file(
+        self, filename: str, content: bytes, content_type: str, summary: str, description: str
+    ) -> str:
+        self.uploads.append((filename, content, content_type, summary, description))
+        return filename
 
     @property
     def wrote_nothing(self) -> bool:
@@ -33,7 +40,7 @@ class FakePublisher:
         Emptiness checks must cover both operations, or a handler
         switched to the other write path would slip past them.
         """
-        return not self.started and not self.continued
+        return not self.started and not self.continued and not self.uploads
 
 
 class FailingPublisher:
@@ -45,6 +52,12 @@ class FailingPublisher:
 
     start_discussion = _fail
     continue_discussion = _fail
+
+    async def upload_file(
+        self, filename: str, content: bytes, content_type: str, summary: str, description: str
+    ) -> str:
+        del filename, content, content_type, summary, description
+        raise WikiWriteError
 
 
 @dataclass
@@ -61,6 +74,14 @@ class FlakyPublisher:
     async def continue_discussion(self, page: str, heading: str, text: str, summary: str) -> None:
         self._maybe_fail()
         await self.recorder.continue_discussion(page, heading, text, summary)
+
+    async def upload_file(
+        self, filename: str, content: bytes, content_type: str, summary: str, description: str
+    ) -> str:
+        self._maybe_fail()
+        return await self.recorder.upload_file(
+            filename, content, content_type, summary, description
+        )
 
     def _maybe_fail(self) -> None:
         if self.failures > 0:

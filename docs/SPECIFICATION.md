@@ -14,7 +14,7 @@
 
 ## 1. Summary
 
-Blybot is a small, single-purpose Telegram bot in the spirit of the old IRC utility bots, rebuilt around a privacy-first premise. It does not journal conversations passively and keeps no statistics. It only ever ingests two things: a message a user explicitly marks with `/log`, and messages a user sends to it in a private chat. Marked messages are published, without attribution, to a predefined Meta-wiki page. Private conversations are transcribed as an anonymized discussion on Meta using a per-session pseudonym that is never persisted. The bot runs as a continuous job on Toolforge.
+Blybot is a small, single-purpose Telegram bot in the spirit of the old IRC utility bots, rebuilt around a privacy-first premise. It does not journal conversations passively and keeps no statistics. It only ever ingests two things: a message a user explicitly marks with `/log`, and messages a user sends to it in a private chat. Marked messages are published, without attribution, to a configured Meta-wiki page. Private conversations ask the user to choose a shared group, then are transcribed to that group's Meta page as an anonymized discussion using a per-session pseudonym that is never persisted. The bot runs as a continuous job on Toolforge.
 
 The design deliberately keeps the bot structurally incapable of seeing ordinary group chatter. That property is enforced by Telegram's privacy mode, not merely by application logic.
 
@@ -91,7 +91,7 @@ The bot operates with Telegram privacy mode ON (the BotFather default). It must 
 - Given the bot is added to a group, when it joins, then it posts one short greeting message. This both explains `/log` and establishes the bot as the last bot to have spoken, so bare `/log` replies are delivered reliably even before any command addressing.
 
 **R4. DM transcription with per-session pseudonym.**
-- Given a user sends the bot a private message, when no active session exists for that chat, then the bot mints a fresh random pseudonym held only in memory and starts a session (sessions are created lazily by the first transcribed message, never by `/start`).
+- Given a user sends the bot a private message, when no active destination exists for that chat, then the bot asks Telegram to let the user choose a shared group, resolves that group's configured page, mints a fresh random pseudonym held only in memory, and starts a session (sessions are created lazily by the first routed message, never by `/start`).
 - Given an active session, when the user sends further messages, then each is sanitized (R7) and appended to the session's Meta discussion under the same pseudonym.
 - Writes are incremental (per message or per debounced burst), never buffered until session end (R10, R-state).
 
@@ -156,7 +156,7 @@ Design so these remain possible without rework: quote store and `/quote` retriev
 
 **Page layout.** Output is talk-page style: **one section = one log**.
 - **Group log:** every `/log` opens its own section on the configured log talk page (`section=new`, an atomic append), heading `"YYYY-MM-DD - HH:MM UTC : Pseudonym"` at the configured granularity. The entry renders as `": message --Pseudonym"` where the pseudonym is a **one-off label minted for that single entry** — it never repeats, so it carries zero linkage (R6). After handling, the bot deletes the `/log` command message from the group (requires the "Delete messages" admin right), hiding who requested the publication.
-- **DM discussions:** each session is one section on the DM talk page, heading `"YYYY-MM-DD - HH:MM UTC : Pseudonym"` (session start time), holding the whole exchange. Each message renders as `": message --Pseudonym"`, indented one level deeper than the last (`:`, `::`, `:::`) to track the back-and-forth. Appends target the session's section by heading, so concurrent sessions never interleave (N3); if the section is missing (archived mid-session), it is recreated.
+- **DM discussions:** each session is one section on the selected group's log page, heading `"YYYY-MM-DD - HH:MM UTC : Pseudonym"` (session start time), holding the whole exchange. Each message renders as `": message --Pseudonym"`, indented one level deeper than the last (`:`, `::`, `:::`) to track the back-and-forth. Appends target the session's section by heading, so concurrent sessions never interleave (N3); if the section is missing (archived mid-session), it is recreated.
 
 **Timestamps.** Heading timestamps are configurable: `none`, `date`, or `minute` (`"YYYY-MM-DD - HH:MM UTC"`). The MediaWiki edit history records the precise edit time regardless, so minute granularity adds little correlation exposure; this residual exposure is acknowledged, not eliminated.
 
@@ -203,7 +203,7 @@ Loaded from the tool home directory (env or a `0600`-permission file), not the r
 | `WIKI_API_URL` | MediaWiki endpoint | `https://meta.wikimedia.org/w/api.php` |
 | `WIKI_USERNAME` / `WIKI_BOTPASSWORD` | On-wiki credentials (or OAuth keys) | (required) |
 | `LOG_TARGET_PAGE` | Page for group `/log` entries | (required) |
-| `DM_TARGET_BASE` | Page or subpage base for DM discussions | (required) |
+| `DM_TARGET_BASE` | Legacy/fallback page base for DM discussions | (required) |
 | `ALLOWED_GROUP_IDS` | Optional allowlist of group chat IDs | empty (allow configured) |
 | `SESSION_TTL_MINUTES` | DM session inactivity timeout | 45 |
 | `BURST_DEBOUNCE_SECONDS` | Coalesce window for DM writes | 8 |

@@ -12,6 +12,7 @@ from telegram import (
     ChatMemberLeft,
     ChatMemberMember,
     ChatMemberUpdated,
+    ChatShared,
     Message,
     Update,
     User,
@@ -72,6 +73,16 @@ def sent_calls(bot: AsyncMock) -> list[tuple[str, int | None]]:
 
 def command_update(command_message: Message) -> Update:
     return Update(update_id=1, message=command_message)
+
+
+def chat_shared_update(chat_id: int, request_id: int, chat: Chat = PRIVATE) -> Update:
+    return command_update(
+        message(
+            chat=chat,
+            from_user=ALICE,
+            chat_shared=ChatShared(request_id=request_id, chat_id=chat_id),
+        )
+    )
 
 
 def membership_update(

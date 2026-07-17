@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+import logging
+from email.parser import BytesParser
+from email.policy import default
+from typing import Any, cast
 from urllib.parse import parse_qs
 
 import httpx
@@ -20,23 +23,31 @@ class FakeWiki:
     def __init__(self) -> None:
         self.logged_in = False
         self.edits: list[dict[str, str]] = []
+        self.uploads: list[tuple[str, bytes, str, str, str]] = []
         self.edit_faults: list[str] = []  # error codes to emit before succeeding
+        self.upload_faults: list[str] = []  # error codes to emit before succeeding
         self.login_result = "Success"
         self.requests: list[dict[str, str]] = []
+        self.request_files: list[dict[str, tuple[str, bytes, str]]] = []
         self.sections: dict[str, list[str]] = {}  # page -> section headings, in order
         self.parse_faults: list[Exception] = []  # raised (as transport errors) on parse
         self.edit_exceptions: list[Exception] = []  # raised (as transport errors) on edit
+        self.upload_exceptions: list[Exception] = []  # raised (as transport errors) on upload
         self.csrf_always_anonymous = False  # simulates a broken login session
         self.login_token_missing = False
         self.transcluded_headings: list[str] = []  # parse-only entries with T- indexes
+        self.upload_warning_exists = False
 
     def handler(self, request: httpx.Request) -> httpx.Response:
-        params = {key: values[0] for key, values in parse_qs(request.content.decode()).items()}
+        params, files = _request_form(request)
         self.requests.append(params)
+        self.request_files.append(files)
         if params["action"] == "parse" and self.parse_faults:
             raise self.parse_faults.pop(0)
         if params["action"] == "edit" and self.edit_exceptions:
             raise self.edit_exceptions.pop(0)
+        if params["action"] == "upload" and self.upload_exceptions:
+            raise self.upload_exceptions.pop(0)
         return httpx.Response(200, json=self._dispatch(params))
 
     def _dispatch(self, params: dict[str, str]) -> dict[str, Any]:
@@ -45,6 +56,7 @@ class FakeWiki:
             "login": self._on_login,
             "parse": self._on_parse,
             "edit": self._on_edit,
+            "upload": self._on_upload,
         }
         action = params["action"]
         if action not in handlers:
@@ -87,6 +99,51 @@ class FakeWiki:
             self.sections.setdefault(params["title"], []).append(params["sectiontitle"])
         self.edits.append(params)
         return {"edit": {"result": "Success"}}
+
+    def _on_upload(self, params: dict[str, str]) -> dict[str, Any]:
+        if not self.logged_in or params.get("token") != "CSRF123":
+            return {"error": {"code": "badtoken"}}
+        if self.upload_faults:
+            return {"error": {"code": self.upload_faults.pop(0)}}
+        if self.upload_warning_exists:
+            return {
+                "upload": {
+                    "result": "Warning",
+                    "filename": params["filename"],
+                    "warnings": {"exists": "file exists"},
+                }
+            }
+        filename, content, content_type = self.request_files[-1]["file"]
+        assert filename == params["filename"]
+        self.uploads.append(
+            (params["filename"], content, content_type, params["comment"], params["text"])
+        )
+        return {"upload": {"result": "Success", "filename": params["filename"]}}
+
+
+def _request_form(
+    request: httpx.Request,
+) -> tuple[dict[str, str], dict[str, tuple[str, bytes, str]]]:
+    content_type = request.headers.get("content-type", "")
+    if not content_type.startswith("multipart/form-data"):
+        url_params = {key: values[0] for key, values in parse_qs(request.content.decode()).items()}
+        return url_params, {}
+
+    prefix = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+    message = BytesParser(policy=default).parsebytes(prefix + request.read())
+    params: dict[str, str] = {}
+    files: dict[str, tuple[str, bytes, str]] = {}
+    for part in message.iter_parts():
+        name = cast("str | None", part.get_param("name", header="content-disposition"))
+        if name is None:
+            continue
+        filename = part.get_filename()
+        payload = cast("bytes", part.get_payload(decode=True) or b"")
+        if filename is None:
+            params[name] = payload.decode()
+        else:
+            files[name] = (filename, payload, part.get_content_type())
+    return params, files
 
 
 class SleepRecorder:
@@ -146,6 +203,18 @@ async def test_non_retryable_error_fails_fast() -> None:
     with pytest.raises(WikiPublishError, match="protectedpage"):
         await publisher.start_discussion("Talk:Log", "h", ": x", "s")
     assert sleep.calls == []  # no pointless retry against a protected page
+    await publisher.aclose()
+
+
+async def test_failed_edit_logs_the_mediawiki_error_code(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    wiki = FakeWiki()
+    wiki.edit_faults = ["protectedpage"]
+    publisher, _ = make_publisher(wiki)
+    with caplog.at_level(logging.INFO, logger="blybot"), pytest.raises(WikiPublishError):
+        await publisher.start_discussion("Talk:Log", "h", ": x", "s")
+    assert "event=wiki_edit outcome=error code=protectedpage" in caplog.messages
     await publisher.aclose()
 
 
@@ -228,6 +297,111 @@ async def test_continue_discussion_creates_the_section_when_missing() -> None:
     assert edit["section"] == "new"
     assert edit["sectiontitle"] == "Guest-9"
     assert wiki.sections["Talk:D"] == ["Guest-9"]
+    await publisher.aclose()
+
+
+async def test_upload_file_posts_multipart_with_auth_params() -> None:
+    wiki = FakeWiki()
+    publisher, _ = make_publisher(wiki)
+    uploaded = await publisher.upload_file(
+        "Blybot_Anon_1.png",
+        b"png-bytes",
+        "image/png",
+        "Log entry via Blybot",
+        "file page description",
+    )
+
+    assert uploaded == "Blybot_Anon_1.png"
+    assert wiki.uploads == [
+        (
+            "Blybot_Anon_1.png",
+            b"png-bytes",
+            "image/png",
+            "Log entry via Blybot",
+            "file page description",
+        )
+    ]
+    upload_request = wiki.requests[-1]
+    assert upload_request["action"] == "upload"
+    assert upload_request["assert"] == "user"
+    assert upload_request["maxlag"] == "5"
+    assert upload_request["comment"] == "Log entry via Blybot"
+    assert upload_request["text"] == "file page description"
+    await publisher.aclose()
+
+
+async def test_upload_file_retries_maxlag_with_backoff() -> None:
+    wiki = FakeWiki()
+    wiki.upload_faults = ["maxlag"]
+    counters = Counters()
+    publisher, sleep = make_publisher(wiki, counters)
+    await publisher.upload_file("Blybot_Anon_1.jpg", b"jpeg", "image/jpeg", "s", "d")
+
+    assert wiki.uploads == [("Blybot_Anon_1.jpg", b"jpeg", "image/jpeg", "s", "d")]
+    assert sleep.calls == [2.0]
+    assert counters.snapshot()["uploads_succeeded"] == 1
+    await publisher.aclose()
+
+
+async def test_upload_file_treats_exists_warning_as_success() -> None:
+    wiki = FakeWiki()
+    wiki.upload_warning_exists = True
+    publisher, _ = make_publisher(wiki)
+    uploaded = await publisher.upload_file("Blybot_Anon_1.jpg", b"jpeg", "image/jpeg", "s", "d")
+
+    assert uploaded == "Blybot_Anon_1.jpg"
+    await publisher.aclose()
+
+
+async def test_upload_bad_token_refetches_csrf_and_succeeds() -> None:
+    wiki = FakeWiki()
+    publisher, _ = make_publisher(wiki)
+    await publisher.upload_file("Blybot_Anon_1.jpg", b"first", "image/jpeg", "s", "d")
+
+    wiki.logged_in = False  # cached token is now stale
+    await publisher.upload_file("Blybot_Anon_2.jpg", b"second", "image/jpeg", "s", "d")
+
+    assert wiki.uploads[-1] == ("Blybot_Anon_2.jpg", b"second", "image/jpeg", "s", "d")
+    await publisher.aclose()
+
+
+async def test_upload_assertuserfailed_relogs_and_succeeds() -> None:
+    wiki = FakeWiki()
+    publisher, _ = make_publisher(wiki)
+    await publisher.upload_file("Blybot_Anon_1.jpg", b"first", "image/jpeg", "s", "d")
+
+    wiki.logged_in = False
+    wiki.upload_faults = ["assertuserfailed"]
+    await publisher.upload_file("Blybot_Anon_2.jpg", b"second", "image/jpeg", "s", "d")
+
+    assert wiki.uploads[-1] == ("Blybot_Anon_2.jpg", b"second", "image/jpeg", "s", "d")
+    await publisher.aclose()
+
+
+async def test_upload_non_retryable_error_fails_fast() -> None:
+    wiki = FakeWiki()
+    wiki.upload_faults = ["protectedpage"]
+    publisher, sleep = make_publisher(wiki)
+
+    with pytest.raises(WikiPublishError, match="protectedpage"):
+        await publisher.upload_file("Blybot_Anon_1.jpg", b"jpeg", "image/jpeg", "s", "d")
+
+    assert sleep.calls == []
+    assert wiki.uploads == []
+    await publisher.aclose()
+
+
+async def test_upload_transport_errors_are_retried_then_fail() -> None:
+    wiki = FakeWiki()
+    wiki.upload_exceptions = [httpx.ConnectError("down")] * 10
+    counters = Counters()
+    publisher, _ = make_publisher(wiki, counters)
+
+    with pytest.raises(WikiPublishError, match="http"):
+        await publisher.upload_file("Blybot_Anon_1.jpg", b"jpeg", "image/jpeg", "s", "d")
+
+    assert counters.snapshot()["uploads_failed"] == 1
+    assert wiki.uploads == []
     await publisher.aclose()
 
 

@@ -25,6 +25,7 @@ from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging
 from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
+from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.feedback import FeedbackService
 from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
@@ -69,6 +70,7 @@ def main() -> int:
         debounce_seconds=config.burst_debounce.total_seconds(),
         timestamp_granularity=config.timestamp_granularity,
     )
+    routes = DmRouteRegistry(clock=clock, route_ttl=config.session_ttl)
     # The key was validated at load; construction can't raise on it.
     store: ToolsDbStore | None = None
     if config.profile_encryption_key:
@@ -141,6 +143,9 @@ def main() -> int:
         transcription=transcription,
         sessions=sessions,
         counters=counters,
+        directory=directory,
+        groups=group_policy,
+        routes=routes,
         welcome_text=config.welcome_text,
         dm_page_url=config.page_url(config.dm_target_base),
         maintainer=config.maintainer,

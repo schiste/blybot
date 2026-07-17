@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import Any, cast
 
 from telegram import Update, User
 from telegram.constants import ChatMemberStatus
@@ -17,8 +18,9 @@ from blybot.domain.ports import IssueTrackerError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
+from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.feedback import FeedbackService
-from blybot.services.policy import SlidingWindowLimiter
+from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests import tg
 from tests.fakes import (
     FailingPublisher,
@@ -54,15 +56,26 @@ def make_handlers(
     bug_limit: int = 100,
     store: InMemoryProfiles | None = None,
     gateway: FakeRepoGateway | None = None,
+    with_route: bool = True,
 ) -> tuple[h.PrivateHandlers, FakePublisher]:
     clock = clock or FakeClock()
     publisher = FakePublisher()
     transcription = make_service(publisher, clock)
     store = store if store is not None else InMemoryProfiles()
+    directory = ChannelDirectory(
+        store=store,
+        default_log_page="Next 25/Telegram logs",
+        default_consent=ConsentMode.IMMEDIATE,
+        default_repo="",
+        page_suffix="Telegram logs",
+    )
     handlers = h.PrivateHandlers(
         transcription=transcription,
         sessions=transcription.sessions,
         counters=Counters(),
+        directory=directory,
+        groups=GroupPolicy(allowed=set()),
+        routes=DmRouteRegistry(clock=clock, route_ttl=TTL),
         welcome_text="Welcome to Blybot.",
         dm_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Discussions",
         maintainer="Test Maintainer",
@@ -71,23 +84,26 @@ def make_handlers(
         bug_limiter=SlidingWindowLimiter(clock=clock, limit=bug_limit, window=timedelta(hours=1)),
         token_entry=TokenEntryHandler(
             binding=TokenBinding(clock=clock),
-            directory=ChannelDirectory(
-                store=store,
-                default_log_page="Next 25/Telegram logs",
-                default_consent=ConsentMode.IMMEDIATE,
-                default_repo="",
-                page_suffix="Telegram logs",
-            ),
+            directory=directory,
             gateway=gateway if gateway is not None else FakeRepoGateway(),
             vault=store,
             counters=Counters(),
         ),
     )
+    if with_route:
+        handlers.routes.save_route(tg.PRIVATE.id, tg.GROUP.id, 0, "Meta talk:Community/Discussions")
     return handlers, publisher
 
 
 def dm(text: str | None) -> Update:
     return tg.command_update(tg.message(chat=tg.PRIVATE, text=text, from_user=tg.ALICE))
+
+
+def last_destination_request_id(bot: Any) -> int:
+    request_id = (
+        bot.send_message.await_args.kwargs["reply_markup"].keyboard[0][0].request_chat.request_id
+    )
+    return cast("int", request_id)
 
 
 async def test_start_delivers_the_welcome_and_nothing_else() -> None:
@@ -139,8 +155,16 @@ async def test_private_help_lists_the_commands() -> None:
     (sent,) = tg.sent_texts(bot)
     for command in ("/whoami", "/flush", "/privacy", "/log"):
         assert command in sent
-    assert "https://meta.wikimedia.org/wiki/Meta_talk:Community/Discussions" in sent
+    assert "which shared group" in sent
     assert "maintained by Test Maintainer" in sent
+
+
+async def test_private_help_omits_maintainer_line_when_unset() -> None:
+    handlers, _ = make_handlers()
+    handlers.maintainer = ""
+    context, bot = tg.make_context()
+    await handlers.on_help(dm("/help"), context)
+    assert "maintained by" not in tg.sent_texts(bot)[0]
 
 
 async def test_privacy_statement_covers_the_guarantees() -> None:
@@ -198,10 +222,14 @@ async def test_session_rollover_mid_conversation_is_announced() -> None:
     await handlers.on_dm(dm("before"), context)
     clock.advance(TTL)
     await handlers.on_dm(dm("after"), context)
+    await handlers.token_entry.directory.set_log_page(tg.GROUP.id, 0, "Project Foo")
+    await handlers.on_chat_shared(
+        tg.chat_shared_update(tg.GROUP.id, last_destination_request_id(bot)), context
+    )
 
     texts = tg.sent_texts(bot)
-    assert len(texts) == 2
-    assert "Anon-2" in texts[1]
+    assert len(texts) == 4
+    assert "Anon-2" in texts[-1]
 
 
 async def test_group_messages_never_reach_transcription() -> None:
@@ -251,14 +279,129 @@ async def test_dm_without_text_is_ignored() -> None:
     assert tg.sent_texts(bot) == []
 
 
+async def test_first_dm_without_route_asks_for_a_group_destination() -> None:
+    handlers, publisher = make_handlers(with_route=False)
+    context, bot = tg.make_context()
+
+    await handlers.on_dm(dm("route me"), context)
+
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == [h.REPLY_DM_DESTINATION_REQUIRED]
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    button = markup.keyboard[0][0]
+    assert button.text == h.DM_DESTINATION_BUTTON
+    assert button.request_chat.bot_is_member is True
+    assert button.request_chat.chat_is_channel is False
+
+
+async def test_chat_picker_routes_the_queued_dm_to_the_selected_group_page() -> None:
+    store = InMemoryProfiles()
+    handlers, publisher = make_handlers(store=store, with_route=False)
+    await handlers.token_entry.directory.set_log_page(tg.GROUP.id, 0, "Project Foo")
+    context, bot = tg.make_context()
+    await handlers.on_dm(dm("private statement"), context)
+    request_id = last_destination_request_id(bot)
+
+    await handlers.on_chat_shared(tg.chat_shared_update(tg.GROUP.id, request_id), context)
+
+    (page, heading, text, _) = publisher.started[0]
+    assert page == "Project Foo/Telegram logs"
+    assert heading == "Anon-1"
+    assert text == ": [sanitized]private statement --Anon-1"
+    sent = tg.sent_texts(bot)
+    assert sent[1] == h.REPLY_DM_DESTINATION_SET.format(page="Project Foo/Telegram logs")
+    assert "Project Foo/Telegram logs#Anon-1" in sent[2]
+
+
+async def test_subsequent_dm_reuses_the_selected_route() -> None:
+    store = InMemoryProfiles()
+    handlers, publisher = make_handlers(store=store, with_route=False)
+    await handlers.token_entry.directory.set_log_page(tg.GROUP.id, 0, "Project Foo")
+    context, bot = tg.make_context()
+    await handlers.on_dm(dm("first"), context)
+    request_id = last_destination_request_id(bot)
+    await handlers.on_chat_shared(tg.chat_shared_update(tg.GROUP.id, request_id), context)
+
+    await handlers.on_dm(dm("second"), context)
+
+    assert len(tg.sent_texts(bot)) == 3  # no second destination prompt
+    assert publisher.continued[0][0] == "Project Foo/Telegram logs"
+    assert publisher.continued[0][2] == ":: [sanitized]second --Anon-1"
+
+
+async def test_chat_picker_without_pending_message_expires_neutrally() -> None:
+    handlers, publisher = make_handlers(with_route=False)
+    context, bot = tg.make_context()
+    await handlers.on_chat_shared(tg.chat_shared_update(tg.GROUP.id, 404), context)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == [h.REPLY_DM_DESTINATION_EXPIRED]
+
+
+async def test_chat_picker_rejects_unserved_groups() -> None:
+    handlers, publisher = make_handlers(with_route=False)
+    handlers.groups.allowed.add(-999)
+    context, bot = tg.make_context()
+    await handlers.on_dm(dm("private statement"), context)
+    request_id = last_destination_request_id(bot)
+
+    await handlers.on_chat_shared(tg.chat_shared_update(tg.GROUP.id, request_id), context)
+
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot)[-1] == h.REPLY_DM_DESTINATION_NOT_SERVED
+
+
+async def test_chat_picker_rejects_unconfigured_self_service_group() -> None:
+    handlers, publisher = make_handlers(with_route=False)
+    context, bot = tg.make_context()
+    await handlers.on_dm(dm("private statement"), context)
+    request_id = last_destination_request_id(bot)
+
+    await handlers.on_chat_shared(tg.chat_shared_update(tg.GROUP.id, request_id), context)
+
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot)[-1] == h.REPLY_NO_LOG_PAGE
+
+
+async def test_chat_picker_fails_closed_when_group_config_is_unavailable() -> None:
+    store = InMemoryProfiles()
+    handlers, publisher = make_handlers(store=store, with_route=False)
+    context, bot = tg.make_context()
+    await handlers.on_dm(dm("private statement"), context)
+    request_id = last_destination_request_id(bot)
+    store.fail = True
+
+    await handlers.on_chat_shared(tg.chat_shared_update(tg.GROUP.id, request_id), context)
+
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot)[-1] == h.REPLY_CONFIG_UNAVAILABLE
+
+
+async def test_chat_picker_outside_private_chat_is_ignored() -> None:
+    handlers, publisher = make_handlers(with_route=False)
+    context, bot = tg.make_context()
+    await handlers.on_chat_shared(tg.chat_shared_update(tg.GROUP.id, 1, chat=tg.GROUP), context)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == []
+
+
 async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() -> None:
     clock = FakeClock()
     transcription = make_service(FailingPublisher(), clock)
     store = InMemoryProfiles()
+    directory = ChannelDirectory(
+        store=store,
+        default_log_page="P",
+        default_consent=ConsentMode.IMMEDIATE,
+        default_repo="",
+        page_suffix="",
+    )
     handlers = h.PrivateHandlers(
         transcription=transcription,
         sessions=transcription.sessions,
         counters=Counters(),
+        directory=directory,
+        groups=GroupPolicy(allowed=set()),
+        routes=DmRouteRegistry(clock=clock, route_ttl=TTL),
         welcome_text="Welcome.",
         dm_page_url="https://example.org/wiki/D",
         maintainer="",
@@ -267,18 +410,13 @@ async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() ->
         bug_limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(hours=1)),
         token_entry=TokenEntryHandler(
             binding=TokenBinding(clock=clock),
-            directory=ChannelDirectory(
-                store=store,
-                default_log_page="P",
-                default_consent=ConsentMode.IMMEDIATE,
-                default_repo="",
-                page_suffix="",
-            ),
+            directory=directory,
             gateway=FakeRepoGateway(),
             vault=store,
             counters=Counters(),
         ),
     )
+    handlers.routes.save_route(tg.PRIVATE.id, tg.GROUP.id, 0, "Meta talk:Community/Discussions")
     context, bot = tg.make_context()
     await handlers.on_dm(dm("doomed"), context)
     assert tg.sent_texts(bot) == [h.REPLY_WIKI_ERROR]

@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
-from telegram import Chat, Message, Update, User
+from telegram import Chat, Document, Message, PhotoSize, Update, User
 from telegram.constants import ChatType
 from telegram.error import TelegramError
 
@@ -100,6 +101,10 @@ def log_command(target: Message | None, sender: User = tg.BOB) -> Update:
     return tg.command_update(tg.message(text="/log", from_user=sender, reply_to=target))
 
 
+def logmedia_command(target: Message | None, sender: User = tg.BOB) -> Update:
+    return tg.command_update(tg.message(text="/logmedia", from_user=sender, reply_to=target))
+
+
 async def test_log_publishes_target_text_and_confirms() -> None:
     handlers, publisher, _ = make_handlers()
     context, bot = tg.make_context()
@@ -125,8 +130,16 @@ async def test_log_without_reply_explains_usage() -> None:
     assert tg.sent_texts(bot) == [h.REPLY_USAGE]
 
 
-async def test_log_on_media_only_message_declines(  # R2: media-only
-) -> None:
+async def test_logmedia_without_reply_explains_usage() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_logmedia(logmedia_command(None), context)
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == [h.REPLY_LOGMEDIA_USAGE]
+
+
+async def test_log_on_empty_message_declines() -> None:
     handlers, publisher, _ = make_handlers()
     context, bot = tg.make_context()
     target = tg.message(text=None, from_user=tg.ALICE)
@@ -134,6 +147,204 @@ async def test_log_on_media_only_message_declines(  # R2: media-only
     assert isinstance(publisher, FakePublisher)
     assert publisher.wrote_nothing
     assert tg.sent_texts(bot) == [h.REPLY_MEDIA_DECLINED]
+
+
+async def test_log_photo_only_message_declines_without_uploading() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    target = tg.message(
+        text=None,
+        from_user=tg.ALICE,
+        photo=(
+            PhotoSize(file_id="small", file_unique_id="small-u", width=100, height=100),
+            PhotoSize(file_id="large", file_unique_id="large-u", width=1200, height=900),
+        ),
+    )
+
+    await handlers.on_log(log_command(target), context)
+
+    bot.get_file.assert_not_awaited()
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == [h.REPLY_MEDIA_DECLINED]
+
+
+async def test_logmedia_photo_only_message_uploads_image_confirms_and_dms() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    bot.get_file.return_value = SimpleNamespace(
+        download_as_bytearray=AsyncMock(return_value=bytearray(b"jpeg-bytes"))
+    )
+    target = tg.message(
+        text=None,
+        from_user=tg.ALICE,
+        photo=(
+            PhotoSize(file_id="small", file_unique_id="small-u", width=100, height=100),
+            PhotoSize(file_id="large", file_unique_id="large-u", width=1200, height=900),
+        ),
+    )
+
+    await handlers.on_logmedia(logmedia_command(target), context)
+
+    bot.get_file.assert_awaited_once_with("large")
+    assert isinstance(publisher, FakePublisher)
+    description = publisher.uploads[0][4]
+    assert publisher.uploads == [
+        (
+            "Blybot_Anon_1_1.jpg",
+            b"jpeg-bytes",
+            "image/jpeg",
+            "Log entry via Blybot",
+            description,
+        )
+    ]
+    assert f"{LOG_PAGE_URL}#Anon-1" in description
+    assert "License status is pending Telegram author review" in description
+    assert "Content must be checked by Telegram author before 2026-07-17" in description
+    assert publisher.started[0][2] == ": [[File:Blybot_Anon_1_1.jpg|thumb]] --Anon-1"
+    assert tg.sent_texts(bot) == [
+        h.REPLY_PUBLISHED.format(url=f"{LOG_PAGE_URL}#Anon-1"),
+        h.REPLY_MEDIA_REVIEW_DM.format(
+            links="https://meta.wikimedia.org/wiki/File:Blybot_Anon_1_1.jpg",
+            deadline="2026-07-17",
+        ),
+    ]
+    assert bot.send_message.await_args_list[-1].kwargs["chat_id"] == tg.BOB.id
+
+
+async def test_log_captioned_photo_publishes_caption_without_image() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    target = tg.message(
+        text=None,
+        caption="caption text",
+        from_user=tg.ALICE,
+        photo=(PhotoSize(file_id="photo", file_unique_id="photo-u", width=100, height=100),),
+    )
+
+    await handlers.on_log(log_command(target), context)
+
+    bot.get_file.assert_not_awaited()
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.uploads == []
+    assert publisher.started[0][2] == ": [sanitized]caption text --Anon-1"
+
+
+async def test_logmedia_captioned_photo_publishes_caption_and_image() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    bot.get_file.return_value = SimpleNamespace(
+        download_as_bytearray=AsyncMock(return_value=bytearray(b"jpeg"))
+    )
+    target = tg.message(
+        text=None,
+        caption="caption text",
+        from_user=tg.ALICE,
+        photo=(PhotoSize(file_id="photo", file_unique_id="photo-u", width=100, height=100),),
+    )
+
+    await handlers.on_logmedia(logmedia_command(target), context)
+
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.started[0][2] == (
+        ": [sanitized]caption text<br>[[File:Blybot_Anon_1_1.jpg|thumb]] --Anon-1"
+    )
+
+
+async def test_logmedia_text_only_publishes_without_review_dm() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    await handlers.on_logmedia(logmedia_command(tg.message(text="plain text")), context)
+
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.uploads == []
+    assert publisher.started[0][2] == ": [sanitized]plain text --Anon-1"
+    assert tg.sent_texts(bot) == [h.REPLY_PUBLISHED.format(url=f"{LOG_PAGE_URL}#Anon-1")]
+
+
+async def test_log_image_document_uploads_without_reusing_original_filename() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    bot.get_file.return_value = SimpleNamespace(
+        download_as_bytearray=AsyncMock(return_value=bytearray(b"png"))
+    )
+    target = tg.message(
+        text=None,
+        document=Document(
+            file_id="document",
+            file_unique_id="document-u",
+            file_name="revealing-local-name.png",
+            mime_type="image/png",
+        ),
+    )
+
+    await handlers.on_logmedia(logmedia_command(target), context)
+
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.uploads[0][0] == "Blybot_Anon_1_1.png"
+    assert "revealing" not in publisher.uploads[0][0]
+
+
+async def test_logmedia_review_dm_failure_does_not_undo_publication() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    telegram_file = SimpleNamespace(download_as_bytearray=AsyncMock(return_value=bytearray(b"png")))
+    bot.get_file.return_value = telegram_file
+
+    async def send_message(**kwargs: object) -> SimpleNamespace:
+        if kwargs["chat_id"] == tg.BOB.id:
+            raise TelegramError("x")
+        return SimpleNamespace(message_id=99)
+
+    bot.send_message.side_effect = send_message
+    target = tg.message(
+        text=None,
+        photo=(PhotoSize(file_id="photo", file_unique_id="photo-u", width=100, height=100),),
+    )
+
+    await handlers.on_logmedia(logmedia_command(target), context)
+
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.uploads
+    assert publisher.started
+    assert bot.send_message.await_args_list[-1].kwargs["chat_id"] == tg.BOB.id
+
+
+async def test_log_unsupported_media_without_text_declines() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    target = tg.message(
+        text=None,
+        document=Document(
+            file_id="document",
+            file_unique_id="document-u",
+            file_name="notes.pdf",
+            mime_type="application/pdf",
+        ),
+    )
+
+    await handlers.on_logmedia(logmedia_command(target), context)
+
+    bot.get_file.assert_not_awaited()
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == [h.REPLY_MEDIA_DECLINED]
+
+
+async def test_log_media_fetch_failure_reports_without_publishing() -> None:
+    handlers, publisher, _ = make_handlers()
+    context, bot = tg.make_context()
+    bot.get_file.side_effect = TelegramError("expired")
+    target = tg.message(
+        text=None,
+        photo=(PhotoSize(file_id="photo", file_unique_id="photo-u", width=100, height=100),),
+    )
+
+    await handlers.on_logmedia(logmedia_command(target), context)
+
+    assert isinstance(publisher, FakePublisher)
+    assert publisher.wrote_nothing
+    assert tg.sent_texts(bot) == [h.REPLY_MEDIA_FETCH_FAILED]
 
 
 async def test_log_in_unlisted_group_is_ignored_silently() -> None:

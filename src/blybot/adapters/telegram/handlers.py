@@ -17,15 +17,22 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestChat,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 
 from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
-from blybot.domain.models import ConsentMode
+from blybot.domain.models import ConsentMode, LogContent, LogMedia
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 from blybot.observability import Counters, log_event
-from blybot.services.publish import NothingToPublishError
+from blybot.services.publish import NothingToPublishError, PublishedLog
 from blybot.services.repo import NoRepoBoundError, NoTokenError
 
 if TYPE_CHECKING:
@@ -37,6 +44,7 @@ if TYPE_CHECKING:
     from blybot.adapters.telegram.token_entry import TokenEntryHandler
     from blybot.domain.models import Session
     from blybot.services.directory import ChannelDirectory, ChannelSettings
+    from blybot.services.dm_routing import DmRouteRegistry
     from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.publish import LogPublicationService
@@ -45,26 +53,42 @@ if TYPE_CHECKING:
     from blybot.services.transcribe import DmTranscriptionService
 
 REPLY_USAGE: Final = "Reply to a text message with /log to publish it anonymously."
+REPLY_LOGMEDIA_USAGE: Final = (
+    "Reply to a text or image message with /logmedia to upload images too."
+)
 REPLY_LOG_IS_GROUP_ONLY: Final = (
     "/log works in groups: reply there to the message you want published. "
-    "Here in private you don't need it — everything you write to me "
-    "(except commands) is already transcribed anonymously. See /help."
+    "Here in private, just send the text and I'll ask which group page "
+    "should receive it. See /help."
 )
-REPLY_MEDIA_DECLINED: Final = (
-    "That message has no text I can publish — media is not supported (yet)."
-)
+REPLY_MEDIA_DECLINED: Final = "That message has no text or supported image I can publish."
+REPLY_MEDIA_FETCH_FAILED: Final = "Sorry, I couldn't fetch that image from Telegram."
 REPLY_PUBLISHED: Final = "Published anonymously: {url}"
+REPLY_MEDIA_REVIEW_DM: Final = (
+    "Media uploaded for review:\n{links}\n\n"
+    "Please check the file description and license before {deadline}. "
+    "Past that day, unreviewed media can be safely deleted."
+)
 REPLY_THROTTLED: Final = "Rate limit reached — please try again in a minute."
 REPLY_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see details in the logs."
 REPLY_AUTHOR_ONLY: Final = "This group's consent policy only lets authors /log their own messages."
 REPLY_SESSION_INFO: Final = (
-    "You are appearing as {pseudonym}; this exchange is recorded at {page}. "
+    "You are appearing as {pseudonym}; this exchange is queued for {page}. "
     "Send /flush any time for a fresh identity."
 )
 REPLY_FLUSHED: Final = "Fresh identity minted. "
 REPLY_NO_SESSION: Final = (
     "You have no active session. Your next message will mint a fresh pseudonym automatically."
 )
+REPLY_DM_DESTINATION_REQUIRED: Final = (
+    "Where should I publish this? Choose a group and I'll queue this message there."
+)
+REPLY_DM_DESTINATION_EXPIRED: Final = (
+    "That destination request expired. Please send the message again."
+)
+REPLY_DM_DESTINATION_NOT_SERVED: Final = "I don't serve that group."
+REPLY_DM_DESTINATION_SET: Final = "Destination set: {page}"
+DM_DESTINATION_BUTTON: Final = "Choose group"
 REPLY_BUG_USAGE: Final = (
     "Describe the problem after the command, e.g.: /bug the bot ignored my /flush"
 )
@@ -96,19 +120,19 @@ REPLY_REPO_SUMMARY: Final = (
 NEWCOMER_PROMPT: Final = "Welcome! Tap below for a private note on how I work."
 NEWCOMER_BUTTON: Final = "What is this bot?"
 HELP_PRIVATE: Final = (
-    "Anything you write to me here is transcribed to a public Meta-wiki page "
-    "under a random per-session pseudonym.\n\n"
+    "Send me text here and I'll ask which shared group should receive it "
+    "on Meta-wiki. It appears under a random per-session pseudonym.\n\n"
     "/whoami — show the pseudonym you currently appear as\n"
     "/flush — discard it and mint a fresh, unlinkable one\n"
     "/privacy — what I collect and publish\n"
     "/bug — file an anonymous bug report with my maintainer\n"
     "/help — this message\n\n"
-    "In groups, reply to a message with /log to publish it anonymously."
+    "In groups, reply to a text message with /log, or use /logmedia to include images."
 )
 HELP_GROUP: Final = (
-    "Reply to a message with /log to publish it anonymously to the Meta-wiki "
-    "log. Message me privately for anonymous transcription — /help there for "
-    "details."
+    "Reply to a text message with /log to publish it anonymously to the Meta-wiki "
+    "log. Use /logmedia when the image itself should be uploaded too. "
+    "Message me privately for anonymous transcription — /help there for details."
 )
 HELP_GROUP_SELF_SERVICE: Final = (
     " /issue files a bug in this group's repo; /repo shows its status. "
@@ -142,6 +166,7 @@ _MEMBER_STATUSES: Final = frozenset(
 )
 # Errors from the bound-repo services that map to a user-facing reply.
 _REPO_ERRORS: Final = (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError)
+_SUPPORTED_IMAGE_TYPES: Final = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 
 
 def _same_author(command: Message, target: Message) -> bool:
@@ -174,6 +199,37 @@ def _repo_error_reply(error: Exception) -> str:
     if isinstance(error, IssueTrackerError):
         log_event("group_issue", "error")
     return REPLY_ISSUE_FAILED
+
+
+def _message_text(message: Message) -> str | None:
+    """Return the text-like payload Telegram exposes for a message."""
+    return message.text or message.caption
+
+
+def _media_candidate(message: Message) -> tuple[str, str] | None:
+    """Return ``(file_id, content_type)`` for one supported image, if present."""
+    if message.photo:
+        photo = max(message.photo, key=lambda item: (item.file_size or 0, item.width * item.height))
+        return photo.file_id, "image/jpeg"
+    document = message.document
+    if document is None or document.mime_type not in _SUPPORTED_IMAGE_TYPES:
+        return None
+    return document.file_id, document.mime_type
+
+
+async def _log_content_from_message(
+    bot: Bot, message: Message, *, include_media: bool
+) -> LogContent:
+    """Convert a Telegram reply target into anonymous publishable content."""
+    if not include_media:
+        return LogContent(text=_message_text(message))
+    candidate = _media_candidate(message)
+    if candidate is None:
+        return LogContent(text=_message_text(message))
+    file_id, content_type = candidate
+    telegram_file = await bot.get_file(file_id)
+    content = bytes(await telegram_file.download_as_bytearray())
+    return LogContent(text=_message_text(message), media=(LogMedia(content, content_type),))
 
 
 def _help_footer(page_url: str, maintainer: str) -> str:
@@ -209,7 +265,16 @@ class GroupHandlers:
     _cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, init=False)
 
     async def on_log(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Publish the replied-to message anonymously (R2)."""
+        """Publish the replied-to message text anonymously (R2)."""
+        await self._on_log(update, context, include_media=False)
+
+    async def on_logmedia(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Publish the replied-to message text and supported images anonymously."""
+        await self._on_log(update, context, include_media=True)
+
+    async def _on_log(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, *, include_media: bool
+    ) -> None:
         message = update.effective_message
         chat = update.effective_chat
         if message is None or chat is None:
@@ -237,7 +302,7 @@ class GroupHandlers:
 
         target = message.reply_to_message
         if target is None:
-            await reply(REPLY_USAGE)
+            await reply(REPLY_LOGMEDIA_USAGE if include_media else REPLY_USAGE)
             return
         settings = await self.directory.resolve(chat.id, thread_id)
         if (decline := self._log_decline(settings, message, target)) is not None:
@@ -245,17 +310,31 @@ class GroupHandlers:
             return
 
         try:
-            heading = await self.log_service.publish(target.text, target_page=settings.log_page)
+            content = await _log_content_from_message(
+                context.bot, target, include_media=include_media
+            )
+            page_url = self.page_url_for(settings.log_page)
+            published = await self.log_service.publish_entry(
+                content,
+                target_page=settings.log_page,
+                page_url=page_url,
+            )
         except NothingToPublishError:
             self.counters.increment("log_declined_media")
             await reply(REPLY_MEDIA_DECLINED)
+        except TelegramError:
+            log_event("telegram_media", "error")
+            await reply(REPLY_MEDIA_FETCH_FAILED)
         except WikiWriteError:
             await reply(REPLY_WIKI_ERROR)
         else:
             log_event("log_command", "ok")
-            page_url = self.page_url_for(settings.log_page)
-            section_url = f"{page_url}#{heading.replace(' ', '_')}"
+            section_url = published.section_url or (
+                f"{self.page_url_for(settings.log_page)}#{published.heading.replace(' ', '_')}"
+            )
             await reply(REPLY_PUBLISHED.format(url=section_url))
+            if include_media:
+                await self._send_media_review_dm(context.bot, message, published)
 
     def _log_decline(
         self, settings: ChannelSettings, command: Message, target: Message
@@ -293,6 +372,21 @@ class GroupHandlers:
             return
         await context.bot.send_message(chat_id=change.chat.id, text=self.group_greeting_text)
         log_event("greeting", "ok")
+
+    async def _send_media_review_dm(
+        self, bot: Bot, command: Message, published: PublishedLog
+    ) -> None:
+        if not published.media or command.from_user is None:
+            return
+        links = "\n".join(self.page_url_for(f"File:{item.filename}") for item in published.media)
+        deadline = published.media[0].review_deadline
+        try:
+            await bot.send_message(
+                chat_id=command.from_user.id,
+                text=REPLY_MEDIA_REVIEW_DM.format(links=links, deadline=deadline),
+            )
+        except TelegramError:
+            log_event("media_review_dm", "ignored")
 
     async def on_migration(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Track supergroup upgrades so the allowlist keeps working (spec 8)."""
@@ -449,6 +543,9 @@ class PrivateHandlers:
     transcription: DmTranscriptionService
     sessions: SessionRegistry
     counters: Counters
+    directory: ChannelDirectory
+    groups: GroupPolicy
+    routes: DmRouteRegistry
     welcome_text: str
     dm_page_url: str
     maintainer: str
@@ -485,7 +582,8 @@ class PrivateHandlers:
         if chat is None:
             return
         session = self.sessions.reset(chat.id)
-        notice = self._opened_session_notice(session)
+        route = self.routes.route_for(chat.id)
+        notice = self._opened_session_notice(session, route.page if route else None)
         await context.bot.send_message(chat_id=chat.id, text=f"{REPLY_FLUSHED}{notice}")
 
     async def on_whoami(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -497,8 +595,10 @@ class PrivateHandlers:
         if session is None:
             await context.bot.send_message(chat_id=chat.id, text=REPLY_NO_SESSION)
             return
+        route = self.routes.route_for(chat.id)
         info = REPLY_SESSION_INFO.format(
-            pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
+            pseudonym=session.pseudonym.value,
+            page=self.transcription.page_for(session, route.page if route else None),
         )
         await context.bot.send_message(chat_id=chat.id, text=info)
 
@@ -506,7 +606,9 @@ class PrivateHandlers:
         """List the private-chat commands and what transcription means."""
         chat = self._private_chat(update)
         if chat is not None:
-            text = HELP_PRIVATE + _help_footer(self.dm_page_url, self.maintainer)
+            text = HELP_PRIVATE
+            if self.maintainer:
+                text += f"\n\nThis bot is maintained by {self.maintainer}"
             await context.bot.send_message(chat_id=chat.id, text=text)
 
     async def on_bug(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -560,24 +662,89 @@ class PrivateHandlers:
                 context, chat.id, pending, message.message_id, message.text
             )
             return
-        is_new_session = self.sessions.peek(chat.id) is None
-        try:
-            session = await self.transcription.record(chat.id, message.text)
-        except WikiWriteError:
-            await context.bot.send_message(chat_id=chat.id, text=REPLY_WIKI_ERROR)
+        route = self.routes.route_for(chat.id)
+        if route is None:
+            request_id = self.routes.open_pending(chat.id, message.text)
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=REPLY_DM_DESTINATION_REQUIRED,
+                reply_markup=_destination_keyboard(request_id),
+            )
             return
+        await self._record_dm(chat.id, message.text, context, route.page)
+
+    async def on_chat_shared(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Route a queued private message to a user-selected group."""
+        message = update.effective_message
+        chat = self._private_chat(update)
+        shared = message.chat_shared if message else None
+        if chat is None or shared is None:
+            return
+        text = self.routes.pop_pending(chat.id, shared.request_id)
+        if text is None:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=REPLY_DM_DESTINATION_EXPIRED,
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+        if not self.groups.is_allowed(shared.chat_id):
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=REPLY_DM_DESTINATION_NOT_SERVED,
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+        settings = await self.directory.resolve(shared.chat_id, 0)
+        if (decline := self._dm_route_decline(settings)) is not None:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=decline,
+                reply_markup=ReplyKeyboardRemove(),
+            )
+            return
+        route = self.routes.save_route(chat.id, shared.chat_id, 0, settings.log_page)
+        await context.bot.send_message(
+            chat_id=chat.id,
+            text=REPLY_DM_DESTINATION_SET.format(page=route.page),
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await self._record_dm(chat.id, text, context, route.page)
+
+    async def _record_dm(
+        self,
+        chat_id: int,
+        text: str,
+        context: ContextTypes.DEFAULT_TYPE,
+        target_page: str,
+    ) -> None:
+        is_new_session = self.sessions.peek(chat_id) is None
+        try:
+            session = await self.transcription.record(chat_id, text, target_page=target_page)
+        except WikiWriteError:
+            await context.bot.send_message(chat_id=chat_id, text=REPLY_WIKI_ERROR)
+            return
+        self.routes.touch_route(chat_id)
         if is_new_session:
             # Sessions can also start (or roll over) mid-conversation;
             # tell the user which identity their words appear under.
-            notice = self._opened_session_notice(session)
-            await context.bot.send_message(chat_id=chat.id, text=notice)
+            notice = self._opened_session_notice(session, target_page)
+            await context.bot.send_message(chat_id=chat_id, text=notice)
 
-    def _opened_session_notice(self, session: Session) -> str:
+    def _dm_route_decline(self, settings: ChannelSettings) -> str | None:
+        if settings.degraded:
+            return REPLY_CONFIG_UNAVAILABLE
+        if self.directory.self_service_enabled and not settings.page_explicit:
+            return REPLY_NO_LOG_PAGE
+        return None
+
+    def _opened_session_notice(self, session: Session, target_page: str | None = None) -> str:
         """Count and log a session opening; return the user-facing notice."""
         self.counters.increment("sessions_opened")
         log_event("session_opened", "ok")
         return REPLY_SESSION_INFO.format(
-            pseudonym=session.pseudonym.value, page=self.transcription.page_for(session)
+            pseudonym=session.pseudonym.value,
+            page=self.transcription.page_for(session, target_page),
         )
 
     @staticmethod
@@ -587,3 +754,16 @@ class PrivateHandlers:
         if chat is None or chat.type != ChatType.PRIVATE:
             return None
         return chat
+
+
+def _destination_keyboard(request_id: int) -> ReplyKeyboardMarkup:
+    button = KeyboardButton(
+        text=DM_DESTINATION_BUTTON,
+        request_chat=KeyboardButtonRequestChat(
+            request_id=request_id,
+            chat_is_channel=False,
+            bot_is_member=True,
+            request_title=True,
+        ),
+    )
+    return ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)

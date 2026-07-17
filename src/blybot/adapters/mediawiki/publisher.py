@@ -118,6 +118,12 @@ class MetaWikiPublisher:
             log_event("wiki_section_recreated", "ok")
             await self.start_discussion(page, heading, text, summary)
 
+    async def upload_file(
+        self, filename: str, content: bytes, content_type: str, summary: str, description: str
+    ) -> str:
+        """Upload one file and return the canonical wiki filename."""
+        return await self._submit_upload(filename, content, content_type, summary, description)
+
     async def aclose(self) -> None:
         """Release the underlying HTTP client."""
         await self._client.aclose()
@@ -156,8 +162,52 @@ class MetaWikiPublisher:
                 break
 
         self._counters.increment("publishes_failed")
-        log_event("wiki_edit", "error")
+        log_event("wiki_edit", "error", code=last_error)
         msg = f"edit failed after retries: {last_error}"
+        raise WikiPublishError(msg, code=last_error)
+
+    async def _submit_upload(
+        self, filename: str, content: bytes, content_type: str, summary: str, description: str
+    ) -> str:
+        """Perform one upload with the same auth/retry behavior as edits."""
+        self._counters.increment("uploads_attempted")
+        last_error = "unknown"
+        for attempt in range(self._max_attempts):
+            if attempt:
+                log_event("wiki_upload", "retry", attempt=attempt)
+                await self._pause(attempt)
+            try:
+                data = await self._upload(filename, content, content_type, summary, description)
+            except httpx.HTTPError:
+                last_error = "http"
+                continue
+
+            upload = data.get("upload", {})
+            error_code = data.get("error", {}).get("code")
+            result = upload.get("result")
+            if error_code is None and result == "Success":
+                self._counters.increment("uploads_succeeded")
+                uploaded_filename = str(upload.get("filename") or filename)
+                log_event("wiki_upload", "ok", attempts=attempt + 1)
+                return uploaded_filename
+            warnings = upload.get("warnings", {})
+            if error_code is None and result == "Warning" and "exists" in warnings:
+                self._counters.increment("uploads_succeeded")
+                uploaded_filename = str(upload.get("filename") or filename)
+                log_event("wiki_upload", "ok", attempts=attempt + 1, warning="exists")
+                return uploaded_filename
+            last_error = str(error_code or result or "malformed-response")
+            if error_code == "badtoken":
+                self._csrf_token = None
+            elif error_code == "assertuserfailed":
+                self._csrf_token = None
+                await self._login()
+            elif error_code not in _RETRYABLE_API_CODES:
+                break
+
+        self._counters.increment("uploads_failed")
+        log_event("wiki_upload", "error", code=last_error)
+        msg = f"upload failed after retries: {last_error}"
         raise WikiPublishError(msg, code=last_error)
 
     async def _find_section(self, page: str, heading: str) -> str | None:
@@ -201,6 +251,22 @@ class MetaWikiPublisher:
             **edit_params,
         )
 
+    async def _upload(
+        self, filename: str, content: bytes, content_type: str, summary: str, description: str
+    ) -> dict[str, Any]:
+        token = await self._ensure_csrf_token()
+        return await self._post_with_files(
+            action="upload",
+            token=token,
+            bot="1",
+            maxlag=_MAXLAG_SECONDS,
+            **{"assert": "user"},
+            filename=filename,
+            comment=summary,
+            text=description,
+            files={"file": (filename, content, content_type)},
+        )
+
     async def _ensure_csrf_token(self) -> str:
         if self._csrf_token is None:
             token = await self._fetch_csrf_token()
@@ -237,6 +303,16 @@ class MetaWikiPublisher:
 
     async def _post(self, **params: str) -> dict[str, Any]:
         response = await self._client.post(self._api_url, data={**params, "format": "json"})
+        response.raise_for_status()
+        payload: dict[str, Any] = response.json()
+        return payload
+
+    async def _post_with_files(
+        self, files: dict[str, tuple[str, bytes, str]], **params: str
+    ) -> dict[str, Any]:
+        response = await self._client.post(
+            self._api_url, data={**params, "format": "json"}, files=files
+        )
         response.raise_for_status()
         payload: dict[str, Any] = response.json()
         return payload

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from blybot.domain.models import TimestampGranularity
+from blybot.domain.models import LogContent, LogMedia, TimestampGranularity
 from blybot.services.publish import LogPublicationService, NothingToPublishError
 from tests.fakes import FakeClock, FakePublisher, PassthroughSanitizer, SequentialPseudonyms
 
@@ -53,12 +53,53 @@ async def test_sanitizer_runs_before_publication() -> None:
 
 
 @pytest.mark.parametrize("raw", [None, "", "   \n\t "])
-async def test_media_only_messages_are_declined(raw: str | None) -> None:
-    """Media-only /log targets publish nothing (spec R2)."""
+async def test_empty_messages_are_declined(raw: str | None) -> None:
+    """Unsupported empty /log targets publish nothing."""
     publisher = FakePublisher()
     with pytest.raises(NothingToPublishError):
         await make_service(publisher).publish(raw)
     assert publisher.started == []
+
+
+async def test_media_only_messages_upload_and_publish_a_file_link() -> None:
+    publisher = FakePublisher()
+    result = await make_service(publisher).publish_entry(
+        LogContent(media=(LogMedia(content=b"image-bytes", content_type="image/png"),)),
+        page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Log",
+    )
+
+    description = publisher.uploads[0][4]
+    assert publisher.uploads == [
+        (
+            "Blybot_2026_07_10_Anon_1_1.png",
+            b"image-bytes",
+            "image/png",
+            "Log entry via Blybot",
+            description,
+        )
+    ]
+    assert result.media[0].filename == "Blybot_2026_07_10_Anon_1_1.png"
+    assert result.media[0].review_deadline == "2026-07-17"
+    assert "https://meta.wikimedia.org/wiki/Meta_talk:Community/Log#2026-07-10_:_Anon-1" in (
+        description
+    )
+    assert "License status is pending Telegram author review" in description
+    assert "Content must be checked by Telegram author before 2026-07-17" in description
+    assert publisher.started[0][2] == ": [[File:Blybot_2026_07_10_Anon_1_1.png|thumb]] --Anon-1"
+
+
+async def test_captioned_media_sanitizes_text_and_keeps_file_markup() -> None:
+    publisher = FakePublisher()
+    await make_service(publisher).publish(
+        LogContent(
+            text="{{caption}}",
+            media=(LogMedia(content=b"jpeg", content_type="image/jpeg"),),
+        )
+    )
+
+    assert publisher.started[0][2] == (
+        ": [sanitized]{{caption}}<br>[[File:Blybot_2026_07_10_Anon_1_1.jpg|thumb]] --Anon-1"
+    )
 
 
 async def test_multi_line_messages_stay_one_discussion_line() -> None:

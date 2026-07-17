@@ -1,10 +1,8 @@
 """Identifier-free operational logging and counters (spec section 16).
 
-The privacy rule for logs — event types, outcomes, and error codes only;
-never message content or Telegram identifiers — is enforced structurally:
-:func:`log_event` accepts only integer extra fields and a closed
-vocabulary of outcome strings, so there is no parameter through which a
-username or message body could flow into a log line.
+The privacy rule for logs — event types, outcomes, counts, and error
+codes only; never message content or Telegram identifiers — is enforced
+by keeping all operational logging behind :func:`log_event`.
 """
 
 from __future__ import annotations
@@ -16,6 +14,7 @@ from typing import Final, Literal
 logger: Final = logging.getLogger("blybot")
 
 Outcome = Literal["ok", "declined", "error", "ignored", "retry"]
+LogField = int | str
 
 
 class Counters:
@@ -33,12 +32,12 @@ class Counters:
         return dict(self._counts)
 
 
-def log_event(event: str, outcome: Outcome = "ok", **fields: int) -> None:
+def log_event(event: str, outcome: Outcome = "ok", **fields: LogField) -> None:
     """Log one operational event.
 
-    ``event`` names what happened (``publish``, ``session_expired``, ...),
-    ``outcome`` is drawn from a closed vocabulary, and extra ``fields``
-    are integers only — counts and durations, never strings.
+    ``event`` names what happened (``publish``, ``session_expired``,
+    ...), ``outcome`` is drawn from a closed vocabulary, and extra
+    ``fields`` are counts/durations or coarse machine error codes.
     """
     extras = "".join(f" {key}={value}" for key, value in sorted(fields.items()))
     logger.info("event=%s outcome=%s%s", event, outcome, extras)

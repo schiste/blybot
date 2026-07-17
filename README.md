@@ -10,10 +10,11 @@ and keeps no statistics. It only ever ingests two things:
 1. a group message a user **explicitly marks** by replying with `/log` —
    published to a configured Meta talk page with **no attribution**, one
    section per entry;
-2. messages sent to it in a **private chat** — transcribed to Meta as an
-   anonymized talk-page discussion (one section per session, each message
-   indented one level deeper) under a per-session pseudonym that is never
-   persisted.
+2. messages sent to it in a **private chat** — the bot asks which shared
+   group should receive them, then transcribes them to that group's Meta
+   page as an anonymized talk-page discussion (one section per session,
+   each message indented one level deeper) under a per-session pseudonym
+   that is never persisted.
 
 The bot is *structurally* incapable of seeing ordinary group chatter: it runs
 with Telegram's privacy mode **on**, so non-command messages are never even
@@ -137,8 +138,9 @@ Pre-flight checklist (spec Phase 0) before the first launch:
 2. Register the bot with BotFather and confirm **privacy mode is ON**.
 3. Create the on-wiki bot account, issue a least-privilege BotPassword,
    and ideally request the bot flag.
-4. Create the `LOG_TARGET_PAGE` and `DM_TARGET_BASE` talk pages and confirm
-   the account can edit them (every log/session becomes a section on them).
+4. Create the `LOG_TARGET_PAGE` / `DM_TARGET_BASE` talk pages and any
+   self-service group log pages, then confirm the account can edit them
+   (every log/session becomes a section on its selected page).
 5. For reliable newcomer detection (`chat_member` updates), make the bot a
    group admin; without admin, greet-on-entry still works but silent link
    joins may be missed.

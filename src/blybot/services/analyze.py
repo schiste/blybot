@@ -146,9 +146,7 @@ class PromptTransform:
         settings = self.defaults
         if self.store is not None:
             try:
-                profile = await self.store.get(
-                    context.scope.chat_id, context.scope.thread_id
-                )
+                profile = await self.store.get(context.scope.chat_id, context.scope.thread_id)
             except StorageError:
                 profile = None  # analyses still run on deployment defaults
             if profile is not None and profile.llm is not None:
@@ -210,9 +208,7 @@ class PromptTransform:
 class StatsTransform:
     """Deterministic activity statistics — pure Python, no LLM."""
 
-    async def apply(
-        self, context: ActionContext, step: StepSpec, payload: object
-    ) -> StatsReport:
+    async def apply(self, context: ActionContext, step: StepSpec, payload: object) -> StatsReport:
         """Compute a :class:`StatsReport` from the window's transcript."""
         del context, step
         if not isinstance(payload, Transcript):
@@ -246,9 +242,7 @@ class WikiSectionSink:
     edit_summary: str
     bot_name: str
 
-    async def deliver(
-        self, context: ActionContext, payload: object
-    ) -> tuple[OutboundMessage, ...]:
+    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         """Render with trusted markup (fields sanitized) and publish."""
         report = _as_report(payload)
         page = context.spec.sink.param("page") or await self.resolve_page(
@@ -287,9 +281,7 @@ class WikiSectionSink:
 class TelegramReplySink:
     """Returns the report as chat text for the transport to send."""
 
-    async def deliver(
-        self, context: ActionContext, payload: object
-    ) -> tuple[OutboundMessage, ...]:
+    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         """Render the report as one bounded chat message."""
         report = _as_report(payload)
         if isinstance(report, StatsReport):

@@ -49,6 +49,7 @@ from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import LogPublicationService
 from blybot.services.repo import GroupRepoService
+from blybot.services.schedule import ActionScheduler
 from blybot.services.sessions import SessionRegistry
 from blybot.services.transcribe import DmTranscriptionService
 
@@ -271,6 +272,8 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         capture_service=capture_service,
         llm_defaults=llm_defaults,
         llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
+        actions=store if engine is not None else None,
+        clock=clock,
     )
 
     notifier = (
@@ -278,6 +281,13 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             store=store, vault=store, gateway=gateway, groups=group_policy, counters=counters
         )
         if store
+        else None
+    )
+    scheduler = (
+        ActionScheduler(
+            store=store, engine=engine, groups=group_policy, clock=clock, counters=counters
+        )
+        if store is not None and engine is not None
         else None
     )
     bootstrap: Callable[[], Awaitable[None]] | None = None
@@ -297,6 +307,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         release=release_clients,
         bootstrap=bootstrap,
         notifier=notifier,
+        scheduler=scheduler,
         poll_interval_seconds=config.events_poll_minutes * 60,
     )
     run_polling(

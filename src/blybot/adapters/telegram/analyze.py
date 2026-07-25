@@ -66,9 +66,7 @@ class AnalysisHandlers:
         if not args:
             await self._maybe_reply(update, context, REPLY_RUN_USAGE)
             return
-        await self._run_command(
-            update, context, "run", f"prompt:{args[0]}", arg_tokens=args[1:]
-        )
+        await self._run_command(update, context, "run", f"prompt:{args[0]}", arg_tokens=args[1:])
 
     async def _run_command(
         self,

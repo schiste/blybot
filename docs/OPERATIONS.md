@@ -53,6 +53,13 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
    settings - [group] (admins) current group configuration
    revoke - [group] (admins) discard this group's stored token
    reset - [group] (admins) forget this group's configuration
+   capture - [group] (admins) archive this chat's messages for analyses
+   summarize - [group] (admins) publish a summary of recent messages
+   talkingpoints - [group] (admins) publish recent talking points
+   stats - [group] (admins) publish activity statistics
+   run - [group] (admins) run any prompt template on the archive
+   action - [group] (admins) schedule recurring analyses
+   llm - [group] (admins) this chat's model, language, parameters
    ```
 
    Telegram also supports true per-scope command menus (`setMyCommands`

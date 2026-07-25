@@ -19,6 +19,12 @@ from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_
 from blybot.domain.models import ConsentMode, LlmSettings
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
+from blybot.services.actions import (
+    MAX_ACTIONS,
+    ActionParseError,
+    describe_action,
+    parse_action,
+)
 from blybot.services.directory import (
     PageNotAllowedError,
     SelfServiceUnavailableError,
@@ -33,7 +39,7 @@ if TYPE_CHECKING:
     from telegram import Bot, Chat, Update
     from telegram.ext import ContextTypes
 
-    from blybot.domain.ports import MessageArchive, TokenVault
+    from blybot.domain.ports import ActionStore, Clock, MessageArchive, TokenVault
     from blybot.services.binding import TokenBinding
     from blybot.services.capture import CaptureService
     from blybot.services.directory import ChannelDirectory
@@ -103,6 +109,30 @@ REPLY_LLM_OFF_DEPLOY: Final = "LLM analyses aren't enabled on this deployment; a
 REPLY_LLM_SHOW: Final = "LLM settings for {scope} ({origin}):\n{line}"
 REPLY_LLM_SET: Final = "LLM settings updated for {scope}: {line}"
 REPLY_LLM_RESET: Final = "LLM settings for {scope} back to deployment defaults."
+REPLY_ACTION_USAGE: Final = (
+    "Usage:\n"
+    "/action add <schedule> <recipe> [key=value …]\n"
+    "/action remove <id>\n"
+    "/action list\n"
+    "Schedules: every:<N>h · daily@HH:MM · weekly@<dow>.HH:MM (UTC). "
+    "Recipes: summarize, talking_points, stats, prompt:<template>. "
+    "Params: window=24h|7d · page=<title> · model=default|large · "
+    "lang=<code> · temp=<0..1>"
+)
+REPLY_ACTIONS_OFF_DEPLOY: Final = (
+    "Scheduled analyses aren't enabled on this deployment; ask the operator."
+)
+REPLY_ACTION_ADDED: Final = "Scheduled for {scope}: {desc}"
+REPLY_ACTION_REMOVED: Final = "Action {id} removed from {scope}."
+REPLY_ACTION_UNKNOWN: Final = "No action {id} at {scope}. Use /action list to see them."
+REPLY_ACTIONS_NONE: Final = (
+    "No scheduled actions for {scope}. Add one, e.g. /action add daily@06:00 summarize"
+)
+REPLY_ACTIONS_LIST: Final = "Scheduled actions for {scope}:\n{lines}"
+REPLY_ACTIONS_FULL: Final = (
+    "You already have the maximum of {max} actions at {scope}; "
+    "remove one with /action remove <id>."
+)
 REPLY_CAPTURE_USAGE: Final = "Usage: /capture on | off | purge"
 REPLY_CAPTURE_OFF_DEPLOY: Final = (
     "Message capture isn't enabled on this deployment; ask the operator."
@@ -177,9 +207,12 @@ class AdminHandlers:
     # and the ingest service whose policy cache /capture must invalidate.
     archive: MessageArchive | None = None
     capture_service: CaptureService | None = None
-    # Analysis-enabled deployments only: the /llm defaults and hard cap.
+    # Analysis-enabled deployments only: the /llm defaults and hard cap,
+    # plus the action store and clock behind /action scheduling.
     llm_defaults: LlmSettings | None = None
     llm_max_tokens_ceiling: int = 4096
+    actions: ActionStore | None = None
+    clock: Clock | None = None
 
     async def on_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain the self-service commands to an admin."""
@@ -361,6 +394,64 @@ class AdminHandlers:
             # The confirmation *is* the permanent in-chat announcement.
             return CAPTURE_ANNOUNCEMENT.format(scope=scope)
         return REPLY_CAPTURE_DISABLED.format(scope=scope)
+
+    async def on_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Add, remove, or list this scope's scheduled actions (v3 phase 4)."""
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
+            return
+        chat, thread_id = resolved
+        actions, clock = self.actions, self.clock
+        if actions is None or clock is None:
+            await self._reply(context, chat.id, thread_id, REPLY_ACTIONS_OFF_DEPLOY)
+            return
+        args = list(context.args or ())
+        sub = args[0].lower() if args else ""
+        try:
+            if sub == "add" and len(args) > 1:
+                reply = await self._action_add(chat.id, thread_id, args[1:], actions, clock)
+            elif sub == "remove" and len(args) == 2:  # noqa: PLR2004 -- "remove <id>"
+                reply = await self._action_remove(chat.id, thread_id, args[1], actions)
+            elif sub == "list":
+                reply = await self._action_list(chat.id, thread_id, actions)
+            else:
+                reply = REPLY_ACTION_USAGE
+        except StorageError:
+            reply = REPLY_STORAGE_DOWN
+        await self._reply(context, chat.id, thread_id, reply)
+
+    async def _action_add(
+        self, chat_id: int, thread_id: int, tokens: list[str], actions: ActionStore, clock: Clock
+    ) -> str:
+        try:
+            spec = parse_action(" ".join(tokens), now_iso=clock.now().isoformat())
+        except ActionParseError as error:
+            return str(error)
+        current = await actions.get_actions(chat_id, thread_id)
+        if len(current) >= MAX_ACTIONS:
+            return REPLY_ACTIONS_FULL.format(max=MAX_ACTIONS, scope=_scope(thread_id))
+        await actions.set_actions(chat_id, thread_id, (*current, spec))
+        self.counters.increment("actions_configured")
+        log_event("profile_update", "ok")
+        return REPLY_ACTION_ADDED.format(scope=_scope(thread_id), desc=describe_action(spec))
+
+    async def _action_remove(
+        self, chat_id: int, thread_id: int, action_id: str, actions: ActionStore
+    ) -> str:
+        current = await actions.get_actions(chat_id, thread_id)
+        kept = tuple(spec for spec in current if spec.action_id != action_id)
+        if len(kept) == len(current):
+            return REPLY_ACTION_UNKNOWN.format(id=action_id, scope=_scope(thread_id))
+        await actions.set_actions(chat_id, thread_id, kept)
+        log_event("profile_update", "ok")
+        return REPLY_ACTION_REMOVED.format(id=action_id, scope=_scope(thread_id))
+
+    async def _action_list(self, chat_id: int, thread_id: int, actions: ActionStore) -> str:
+        current = await actions.get_actions(chat_id, thread_id)
+        if not current:
+            return REPLY_ACTIONS_NONE.format(scope=_scope(thread_id))
+        lines = "\n".join(describe_action(spec) for spec in current)
+        return REPLY_ACTIONS_LIST.format(scope=_scope(thread_id), lines=lines)
 
     async def on_llm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show, set, or reset this scope's LLM settings (v3 §2.4)."""

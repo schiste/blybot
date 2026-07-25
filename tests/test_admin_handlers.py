@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -20,13 +21,14 @@ from blybot.domain.models import (
     LlmSettings,
 )
 from blybot.observability import Counters
+from blybot.services.actions import MAX_ACTIONS, parse_action
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.rules import MAX_RULES
 from tests import tg
-from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
+from tests.fakes import FakeClock, InMemoryActions, InMemoryArchive, InMemoryProfiles
 
 if TYPE_CHECKING:
     from unittest.mock import AsyncMock
@@ -706,4 +708,103 @@ async def test_llm_requires_a_group_admin() -> None:
     handlers = make_llm_handlers()
     context, bot = admin_context(status=ChatMemberStatus.MEMBER, args=["show"])
     await handlers.on_llm(command("/llm show"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]
+
+
+def make_action_handlers(
+    store: InMemoryProfiles | None = None,
+) -> tuple[a.AdminHandlers, InMemoryActions]:
+    handlers = make_handlers(store)
+    actions = InMemoryActions()
+    handlers.actions = actions
+    handlers.clock = FakeClock()
+    return handlers, actions
+
+
+async def test_action_without_deployment_support_says_so() -> None:
+    handlers = make_handlers()  # actions/clock left unset
+    context, bot = admin_context(args=["list"])
+    await handlers.on_action(command("/action list"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_ACTIONS_OFF_DEPLOY]
+
+
+async def test_action_usage_on_bad_subcommands() -> None:
+    handlers, _actions = make_action_handlers()
+    for args in ([], ["add"], ["remove"], ["frobnicate"]):
+        context, bot = admin_context(args=args)
+        await handlers.on_action(command("/action"), context)
+        assert tg.sent_texts(bot) == [a.REPLY_ACTION_USAGE]
+
+
+async def test_action_add_stores_a_primed_spec_and_describes_it() -> None:
+    handlers, actions = make_action_handlers()
+    context, bot = admin_context(args=["add", "daily@06:00", "summarize", "model=large"])
+
+    await handlers.on_action(command("/action add daily@06:00 summarize model=large"), context)
+
+    (spec,) = actions.actions[tg.GROUP.id, 0]
+    assert spec.trigger.schedule is not None
+    assert spec.last_run == FakeClock().now()  # primed at creation
+    reply = tg.sent_texts(bot)[0]
+    assert reply.startswith("Scheduled for the group default:")
+    assert "daily@06:00" in reply
+
+
+async def test_action_add_relays_parse_errors_verbatim() -> None:
+    handlers, _actions = make_action_handlers()
+    context, bot = admin_context(args=["add", "hourly", "summarize"])
+    await handlers.on_action(command("/action add hourly summarize"), context)
+    assert "Unknown schedule" in tg.sent_texts(bot)[0]
+
+
+async def test_action_add_enforces_the_per_scope_cap() -> None:
+    handlers, actions = make_action_handlers()
+    spec = parse_action("daily@06:00 summarize")
+    actions.actions[tg.GROUP.id, 0] = tuple(
+        replace(spec, action_id=f"a{i:03d}") for i in range(MAX_ACTIONS)
+    )
+    context, bot = admin_context(args=["add", "daily@07:00", "stats"])
+
+    await handlers.on_action(command("/action add daily@07:00 stats"), context)
+
+    assert "maximum" in tg.sent_texts(bot)[0]
+    assert len(actions.actions[tg.GROUP.id, 0]) == MAX_ACTIONS
+
+
+async def test_action_remove_and_list_round_trip() -> None:
+    handlers, actions = make_action_handlers()
+    context, _bot = admin_context(args=["add", "daily@06:00", "summarize"])
+    await handlers.on_action(command("/action add daily@06:00 summarize"), context)
+    (spec,) = actions.actions[tg.GROUP.id, 0]
+
+    context, bot = admin_context(args=["list"])
+    await handlers.on_action(command("/action list"), context)
+    assert spec.action_id in tg.sent_texts(bot)[0]
+
+    context, bot = admin_context(args=["remove", spec.action_id])
+    await handlers.on_action(command(f"/action remove {spec.action_id}"), context)
+    assert "removed" in tg.sent_texts(bot)[0]
+    assert actions.actions[tg.GROUP.id, 0] == ()
+
+    context, bot = admin_context(args=["remove", "zzzz"])
+    await handlers.on_action(command("/action remove zzzz"), context)
+    assert "No action" in tg.sent_texts(bot)[0]
+
+    context, bot = admin_context(args=["list"])
+    await handlers.on_action(command("/action list"), context)
+    assert "No scheduled actions" in tg.sent_texts(bot)[0]
+
+
+async def test_action_reports_storage_outage() -> None:
+    handlers, actions = make_action_handlers()
+    actions.fail = True
+    context, bot = admin_context(args=["list"])
+    await handlers.on_action(command("/action list"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_action_requires_a_group_admin() -> None:
+    handlers, _actions = make_action_handlers()
+    context, bot = admin_context(status=ChatMemberStatus.MEMBER, args=["list"])
+    await handlers.on_action(command("/action list"), context)
     assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]

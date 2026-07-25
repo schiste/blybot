@@ -36,7 +36,9 @@ opted-in channels and groups can be archived for summaries and statistics.)
 - **No identifiers at rest.** No Telegram user ID, username, or display name
   is ever written to the wiki or to disk. Enforced by architecture and by
   tests. Captured messages store authors only as per-chat HMAC pseudonym
-  labels, unlinkable across chats and re-keyed by rotating the operator key.
+  labels, unlinkable across chats; rotating the operator key unlinkably
+  re-keys all *future* labels (already-archived rows keep theirs — the
+  identifier needed to recompute them is never stored).
 - **Unlinkable pseudonyms.** DM pseudonyms come from a CSPRNG — never derived
   from a user ID — live only in process memory, and die with the session.
 - **Sanitized output.** All published text is neutralized so it cannot alter
@@ -168,7 +170,10 @@ Pre-flight checklist (spec Phase 0) before the first launch:
 
 1. Confirm outbound HTTPS from the tool account to `api.telegram.org`
    (decides long polling vs. the webhook fallback).
-2. Register the bot with BotFather and confirm **privacy mode is ON**.
+2. Register the bot with BotFather and confirm **privacy mode is ON**
+   (v1/v2 deployments — R1 depends on it). A **capture-enabled**
+   deployment instead flips privacy mode OFF, after the announcement
+   procedure in [docs/OPERATIONS.md](docs/OPERATIONS.md#enabling-channel-capture-v3).
 3. Create the on-wiki bot account, issue a least-privilege BotPassword,
    and ideally request the bot flag.
 4. Create the `LOG_TARGET_PAGE` / `DM_TARGET_BASE` talk pages and any

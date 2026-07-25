@@ -126,8 +126,11 @@ v3 analyses. **This changes the bot's privacy posture — read this whole
 section before enabling.**
 
 1. Requires self-service (`PROFILE_ENCRYPTION_KEY`) plus
-   `ARCHIVE_PSEUDONYM_KEY` (any long random string; rotating it
-   unlinkably re-keys every archived author label).
+   `ARCHIVE_PSEUDONYM_KEY` (any long random string). Rotating the key
+   re-keys the labels of everything archived *from then on* and
+   unlinkably severs them from the old ones; already-stored rows keep
+   their old labels (they cannot be recomputed — the user id behind
+   them is never stored). To erase the old labels too, `/capture purge`.
 2. **Flip privacy mode OFF at BotFather** (`/setprivacy` → Disable).
    From that moment the bot *receives* all group chatter everywhere it
    sits — the only thing between chatter and storage is the capture

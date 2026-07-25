@@ -61,11 +61,16 @@ its own repo, inheriting anything it doesn't set from the group. Storage is
 one ToolsDB table holding only group-level state; no user identifier is ever
 persisted.
 
-**v3 (in progress):** the groundwork for channel intelligence. A reusable
-**action framework** — pipelines of `trigger → source → transforms → sink`
-stored per scope as data ([docs/ACTIONS.md](docs/ACTIONS.md)) — is in
-place; channel capture, LiftWing-powered analyses (summaries, talking
-points, stats), and the commands that use them are being built on it per
+**v3: channel intelligence.** A reusable **action framework** — pipelines
+of `trigger → source → transforms → sink` stored per scope as data
+([docs/ACTIONS.md](docs/ACTIONS.md)) — now carries the bot's behavior:
+opt-in channel/group **capture** (`/capture`, pseudonymized archive),
+**LLM analyses** on Wikimedia LiftWing's Qwen models (`/summarize`,
+`/talkingpoints`, `/stats`, `/run`, scheduled via `/action add`), per-scope
+`/llm` settings (model, output language, parameters), and a layered
+prompt-injection containment design (the model never writes wikitext).
+`/log`, `/bug`, and the repo notifier run through the same engine. Design
+and phasing:
 [docs/PLAN-V3-CHANNEL-INTELLIGENCE.md](docs/PLAN-V3-CHANNEL-INTELLIGENCE.md).
 
 All of v1 remains (spec Phases 1–3): the group `/log` flow with confirmation
@@ -85,17 +90,22 @@ src/blybot/
 ├── domain/       pure business logic — no I/O, no third-party imports
 │   ├── models.py       identifier-free value objects: sessions, rules, events
 │   ├── ports.py        Protocols: WikiPublisher, ProfileStore, TokenVault,
-│   │                   RepoActions, RepoPoller, IssueTracker, Sanitizer, Clock …
+│   │                   MessageArchive, PromptRunner, Sanitizer, Clock …
 │   ├── sanitizer.py    wikitext neutralization (entity encoding)
 │   ├── rendering.py    talk-page section + heading formatting
+│   ├── prompts.py      LLM templates, fencing, and the structured-output contract
 │   └── pseudonym.py    CSPRNG pseudonym minting
 ├── services/     use-cases, depend on domain ports only
 │   ├── actions.py      v3 action grammar: parse, describe, serialize, recipes
 │   ├── engine.py       v3 action engine: source → transforms → sink pipelines
 │   ├── schedule.py     v3 scheduler: runs each scope's due actions per tick
+│   ├── capture.py      opt-in message archiving: the policy boundary + guards
+│   ├── analyze.py      archive window → prompt/stats transforms → wiki/chat sinks
+│   ├── llmconf.py      /llm settings grammar: parse, clamp, describe
 │   ├── publish.py      /log → one talk-page section per entry
 │   ├── transcribe.py   DM sessions: one section each, indented discussion
 │   ├── sessions.py     volatile DM session registry (TTL, peek, reset, sweep)
+│   ├── dm_routing.py   DM destination choice: which group page receives it
 │   ├── directory.py    per-(group, topic) settings: stored profile over defaults
 │   ├── rules.py        composable event rules: parse, describe, match, serialize
 │   ├── notify.py       repo notifications as engine components + the tick shell
@@ -108,7 +118,8 @@ src/blybot/
 │   │                   commands, shared scope helpers, polling bootstrap
 │   ├── mediawiki/      async discussion publisher: sections, maxlag, assert=user
 │   ├── github/         per-group repo gateway + the operator's issue tracker
-│   ├── toolsdb/        per-(group, topic) profiles + encrypted tokens
+│   ├── llm/            LiftWing chat-completions client (OpenAI-shaped)
+│   ├── toolsdb/        per-(group, topic) profiles + encrypted tokens + archive
 │   └── system.py       wall clock
 ├── observability.py    identifier-free event logging and counters
 ├── config.py     env-based configuration, validates without echoing secrets
@@ -141,7 +152,7 @@ Blybot runs as a continuous job on
 [Wikimedia Toolforge](https://wikitech.wikimedia.org/wiki/Portal:Toolforge):
 
 ```sh
-toolforge jobs run blybot --command ./run.sh --image python3.13 --continuous --mem 512Mi
+toolforge jobs run blybot --command ./run.sh --image python3.13 --continuous --mem 768Mi
 ```
 
 Configuration is read from the environment (template in

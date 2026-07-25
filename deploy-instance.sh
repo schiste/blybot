@@ -62,7 +62,7 @@ start_instance() {
     chmod +x "${wrapper}"
     ensure_venv
     toolforge jobs delete "${name}" >/dev/null 2>&1 || true
-    toolforge jobs run "${name}" --command "${wrapper}" --image "${IMAGE}" --continuous --mem 512Mi
+    toolforge jobs run "${name}" --command "${wrapper}" --image "${IMAGE}" --continuous --mem 768Mi
     echo "started job '${name}' (logs: ${TOOL_HOME}/${name}.out and .err)"
 }
 

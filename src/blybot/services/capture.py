@@ -111,6 +111,10 @@ class CaptureService:
         chat_id, thread_id = key
         try:
             profile = await self.store.get(chat_id, thread_id)
+            if key not in self._denied:
+                # A fresh announced enable landed while we were reading:
+                # the revocation is cancelled, never clobber the new state.
+                return
             if profile is not None and profile.capture_enabled:
                 await self.store.upsert(replace(profile, capture_enabled=False))
         except StorageError:

@@ -252,7 +252,7 @@ toolforge jobs run blybot \
   --command ./run.sh \
   --image python3.x \
   --continuous \
-  --mem 512Mi
+  --mem 768Mi
 ```
 
 `run.sh` activates the virtualenv and execs the bot module. Logs go to stdout and are captured by the jobs framework.
@@ -369,8 +369,12 @@ the single policy boundary between the update stream and storage.
 structure, timestamps, text, and an author label that is
 HMAC-SHA256(operator key, scope‖user) — never a Telegram user id,
 username, or display name. Labels are stable within a scope (statistics
-work) and unlinkable across scopes; rotating the key unlinkably re-keys
-every author. Media bodies are not archived (a `media_note` row records
+work) and unlinkable across scopes. Rotating the key unlinkably re-keys
+every author *going forward*: already-archived rows keep their old
+labels — by design they cannot be recomputed, because the user id that
+fed the HMAC is never stored — so rotation severs the link between an
+author's past and future labels; erasing the old labels themselves is
+`/capture purge`. Media bodies are not archived (a `media_note` row records
 that media was posted). Ingest is guarded by text truncation at 4096
 chars and a per-scope per-minute ceiling.
 

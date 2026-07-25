@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Toolforge continuous-job entry point (spec section 14).
 #
-#   toolforge jobs run blybot --command ./run.sh --image python3.13 --continuous --mem 512Mi
+#   toolforge jobs run blybot --command ./run.sh --image python3.13 --continuous --mem 768Mi
 #
 # Expects:
 #   - a virtualenv at $HOME/venv (created once from a bastion:

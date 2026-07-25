@@ -162,6 +162,15 @@ Verified live on 2026-07-25 (anonymous tier):
   [Machine_Learning/LiftWing/Large_Language_Models/Wikimania_2026](https://wikitech.wikimedia.org/wiki/Machine_Learning/LiftWing/Large_Language_Models/Wikimania_2026)
   on wikitech.
 
+Operating the analyses: watch `prompts_run`, `prompt_tokens`,
+`completion_tokens` (consumption), `prompt_failures` (transport),
+`analyses_aborted` (the model violated the output contract — nothing was
+published; occasional is normal, sustained means a template or model
+regression), and `analyses_failed` (unexpected command failures). A
+scope's model/language/parameters are admin-set via `/llm` in the chat;
+`LLM_MAX_TOKENS_CEILING` and `LLM_MAX_CHUNKS_PER_RUN` are the operator
+backstops.
+
 ## Updating (all instances at once)
 
 ```sh

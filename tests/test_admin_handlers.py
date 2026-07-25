@@ -12,7 +12,13 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from blybot.adapters.telegram import admin as a
-from blybot.domain.models import CapturedMessage, ConsentMode, DeliveryMode, EventType
+from blybot.domain.models import (
+    CapturedMessage,
+    ConsentMode,
+    DeliveryMode,
+    EventType,
+    LlmSettings,
+)
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureService
@@ -625,4 +631,79 @@ async def test_capture_requires_a_group_admin() -> None:
     handlers, _store, _archive = make_capture_handlers()
     context, bot = admin_context(status=ChatMemberStatus.MEMBER, args=["on"])
     await handlers.on_capture(command("/capture on"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]
+
+
+def make_llm_handlers(store: InMemoryProfiles | None = None) -> a.AdminHandlers:
+    handlers = make_handlers(store)
+    handlers.llm_defaults = LlmSettings()
+    handlers.llm_max_tokens_ceiling = 4096
+    return handlers
+
+
+async def test_llm_without_deployment_support_says_so() -> None:
+    handlers = make_handlers()  # llm_defaults left unset
+    context, bot = admin_context(args=["show"])
+    await handlers.on_llm(command("/llm show"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_LLM_OFF_DEPLOY]
+
+
+async def test_llm_usage_on_bad_subcommands() -> None:
+    handlers = make_llm_handlers()
+    for args in ([], ["set"], ["frobnicate"]):
+        context, bot = admin_context(args=args)
+        await handlers.on_llm(command("/llm"), context)
+        assert tg.sent_texts(bot) == [a.REPLY_LLM_USAGE]
+
+
+async def test_llm_show_reports_defaults_then_scope_settings() -> None:
+    store = InMemoryProfiles()
+    handlers = make_llm_handlers(store)
+    context, bot = admin_context(args=["show"])
+    await handlers.on_llm(command("/llm show"), context)
+    assert "deployment defaults" in tg.sent_texts(bot)[0]
+    assert "model:default" in tg.sent_texts(bot)[0]
+
+    context, bot = admin_context(args=["set", "model:large", "lang:fr"])
+    await handlers.on_llm(command("/llm set model:large lang:fr"), context)
+    assert "model:large" in tg.sent_texts(bot)[0]
+    assert store.profiles[tg.GROUP.id, 0].llm == LlmSettings(model="large", lang="fr")
+
+    context, bot = admin_context(args=["show"])
+    await handlers.on_llm(command("/llm show"), context)
+    assert "set for this scope" in tg.sent_texts(bot)[0]
+
+
+async def test_llm_set_rejects_bad_values_verbatim() -> None:
+    handlers = make_llm_handlers()
+    context, bot = admin_context(args=["set", "temp:2"])
+    await handlers.on_llm(command("/llm set temp:2"), context)
+    assert "between 0 and 1" in tg.sent_texts(bot)[0]
+
+
+async def test_llm_reset_returns_to_deployment_defaults() -> None:
+    store = InMemoryProfiles()
+    handlers = make_llm_handlers(store)
+    context, _bot = admin_context(args=["set", "model:large"])
+    await handlers.on_llm(command("/llm set model:large"), context)
+
+    context, bot = admin_context(args=["reset"])
+    await handlers.on_llm(command("/llm reset"), context)
+
+    assert "deployment defaults" in tg.sent_texts(bot)[0]
+    assert store.profiles[tg.GROUP.id, 0].llm is None
+
+
+async def test_llm_reports_storage_outage() -> None:
+    store = InMemoryProfiles(fail=True)
+    handlers = make_llm_handlers(store)
+    context, bot = admin_context(args=["show"])
+    await handlers.on_llm(command("/llm show"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_llm_requires_a_group_admin() -> None:
+    handlers = make_llm_handlers()
+    context, bot = admin_context(status=ChatMemberStatus.MEMBER, args=["show"])
+    await handlers.on_llm(command("/llm show"), context)
     assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]

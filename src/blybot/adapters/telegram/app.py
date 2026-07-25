@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from telegram import Bot
 
     from blybot.adapters.telegram.admin import AdminHandlers
+    from blybot.adapters.telegram.analyze import AnalysisHandlers
     from blybot.adapters.telegram.capture import CaptureHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.observability import Counters
@@ -145,6 +146,7 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
     admin_handlers: AdminHandlers,
     lifecycle: Lifecycle,
     capture_handlers: CaptureHandlers | None = None,
+    analysis_handlers: AnalysisHandlers | None = None,
 ) -> _App:
     """Build the PTB application with every handler registered."""
     application = (
@@ -181,6 +183,7 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
         ("rule", admin_handlers.on_rule),
         ("rules", admin_handlers.on_rules),
         ("capture", admin_handlers.on_capture),
+        ("llm", admin_handlers.on_llm),
         ("revoke", admin_handlers.on_revoke),
         ("settings", admin_handlers.on_settings),
         ("reset", admin_handlers.on_reset),
@@ -212,6 +215,14 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_handlers.on_dm
         )
     )
+    if analysis_handlers is not None:
+        for name, callback in (
+            ("summarize", analysis_handlers.on_summarize),
+            ("talkingpoints", analysis_handlers.on_talkingpoints),
+            ("stats", analysis_handlers.on_stats),
+            ("run", analysis_handlers.on_run),
+        ):
+            application.add_handler(CommandHandler(name, callback, filters=filters.ChatType.GROUPS))
     if capture_handlers is not None:
         # Handler group 1: capture observes updates independently, so it
         # can never steal an update from (or be starved by) the
@@ -241,12 +252,27 @@ def run_polling(  # noqa: PLR0913 -- one handler bundle per concern
     admin_handlers: AdminHandlers,
     lifecycle: Lifecycle,
     capture_handlers: CaptureHandlers | None = None,
+    analysis_handlers: AnalysisHandlers | None = None,
 ) -> None:
     """Poll until stopped; blocks for the process lifetime."""
     application = build_application(
-        token, group_handlers, private_handlers, admin_handlers, lifecycle, capture_handlers
+        token,
+        group_handlers,
+        private_handlers,
+        admin_handlers,
+        lifecycle,
+        capture_handlers,
+        analysis_handlers,
     )
     allowed = list(_ALLOWED_UPDATES)
+    if analysis_handlers is not None:
+        for name, callback in (
+            ("summarize", analysis_handlers.on_summarize),
+            ("talkingpoints", analysis_handlers.on_talkingpoints),
+            ("stats", analysis_handlers.on_stats),
+            ("run", analysis_handlers.on_run),
+        ):
+            application.add_handler(CommandHandler(name, callback, filters=filters.ChatType.GROUPS))
     if capture_handlers is not None:
         allowed.append(Update.CHANNEL_POST)
     application.run_polling(allowed_updates=allowed)

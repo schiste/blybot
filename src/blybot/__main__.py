@@ -16,9 +16,11 @@ if TYPE_CHECKING:
 
 from blybot.adapters.github.gateway import GitHubRepoGateway
 from blybot.adapters.github.issues import GitHubIssueTracker
+from blybot.adapters.llm.liftwing import LiftWingClient
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
 from blybot.adapters.telegram.admin import AdminHandlers
+from blybot.adapters.telegram.analyze import AnalysisHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
@@ -26,13 +28,22 @@ from blybot.adapters.telegram.token_entry import TokenEntryHandler
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
 from blybot.config import ConfigurationError, load_config
+from blybot.domain.models import LlmSettings
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging
+from blybot.services.analyze import (
+    ArchiveWindowSource,
+    PromptTransform,
+    StatsTransform,
+    TelegramReplySink,
+    WikiSectionSink,
+)
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
+from blybot.services.engine import ActionEngine
 from blybot.services.feedback import FeedbackService
 from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
@@ -42,7 +53,7 @@ from blybot.services.sessions import SessionRegistry
 from blybot.services.transcribe import DmTranscriptionService
 
 
-def main() -> int:
+def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the object graph once
     """Entry point."""
     try:
         config = load_config()
@@ -83,6 +94,10 @@ def main() -> int:
     archive: ToolsDbArchive | None = None
     capture_service: CaptureService | None = None
     capture_handlers: CaptureHandlers | None = None
+    llm_client: LiftWingClient | None = None
+    engine: ActionEngine | None = None
+    analysis_handlers: AnalysisHandlers | None = None
+    llm_defaults: LlmSettings | None = None
     if config.profile_encryption_key:
         runner = PymysqlRunner(
             host=config.toolsdb_host,
@@ -148,6 +163,8 @@ def main() -> int:
         await gateway.aclose()
         if tracker is not None:
             await tracker.aclose()
+        if llm_client is not None:
+            await llm_client.aclose()
 
     private_handlers = PrivateHandlers(
         transcription=transcription,
@@ -193,6 +210,56 @@ def main() -> int:
             bot_name=config.bot_name,
         )
 
+    if store is not None and archive is not None:
+        llm_defaults = LlmSettings(lang=config.llm_default_lang)
+        llm_client = LiftWingClient(
+            api_base=config.liftwing_api_base,
+            user_agent=config.user_agent,
+            models={
+                "default": config.liftwing_model_default,
+                "large": config.liftwing_model_large,
+            },
+            timeout_seconds=config.liftwing_timeout_seconds,
+            counters=counters,
+        )
+
+        async def resolve_page(chat_id: int, thread_id: int) -> str:
+            return (await directory.resolve(chat_id, thread_id)).log_page
+
+        engine = ActionEngine(
+            sources={"archive_window": ArchiveWindowSource(archive=archive)},
+            transforms={
+                "prompt": PromptTransform(
+                    runner=llm_client,
+                    store=store,
+                    defaults=llm_defaults,
+                    max_tokens_ceiling=config.llm_max_tokens_ceiling,
+                    max_chunks=config.llm_max_chunks_per_run,
+                    counters=counters,
+                ),
+                "stats": StatsTransform(),
+            },
+            sinks={
+                "wiki_section": WikiSectionSink(
+                    publisher=publisher,
+                    sanitizer=sanitizer,
+                    resolve_page=resolve_page,
+                    page_url_for=config.page_url,
+                    edit_summary=config.edit_summary,
+                    bot_name=config.bot_name,
+                ),
+                "telegram_reply": TelegramReplySink(),
+            },
+            counters=counters,
+        )
+        analysis_handlers = AnalysisHandlers(
+            engine=engine,
+            groups=group_policy,
+            limiter=SlidingWindowLimiter(clock=clock, limit=6, window=timedelta(hours=1)),
+            clock=clock,
+            counters=counters,
+        )
+
     admin_handlers = AdminHandlers(
         directory=directory,
         groups=group_policy,
@@ -202,6 +269,8 @@ def main() -> int:
         vault=store,
         archive=archive,
         capture_service=capture_service,
+        llm_defaults=llm_defaults,
+        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
     )
 
     notifier = (
@@ -237,6 +306,7 @@ def main() -> int:
         admin_handlers=admin_handlers,
         lifecycle=lifecycle,
         capture_handlers=capture_handlers,
+        analysis_handlers=analysis_handlers,
     )
     return 0
 

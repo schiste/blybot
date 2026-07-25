@@ -48,6 +48,7 @@ _TRANSFORM_KEYS: Final = frozenset({"model", "lang", "temp"})
 
 _TIME_RE: Final = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _EVERY_RE: Final = re.compile(r"^every:(\d+)h$")
+_WINDOW_SUGAR_RE: Final = re.compile(r"^\d+[hd]$")
 
 
 class ActionParseError(Exception):
@@ -99,6 +100,27 @@ def parse_action(text: str, now_iso: str | None = None) -> ActionSpec:
         transforms=tuple(_with_params(step, params, _TRANSFORM_KEYS) for step in transforms),
         sink=_with_params(sink, params, _SINK_KEYS),
         last_run=_parse_instant(now_iso),
+    )
+
+
+def command_action(command: str, recipe: str, arg_tokens: list[str]) -> ActionSpec:
+    """Build the one-shot :class:`ActionSpec` behind an on-demand command.
+
+    ``arg_tokens`` uses the same ``key=value`` grammar as ``/action add``,
+    plus a bare leading window token (``24h``/``7d``) as sugar for
+    ``window=…``.
+    """
+    tokens = list(arg_tokens)
+    if tokens and _WINDOW_SUGAR_RE.match(tokens[0]):
+        tokens[0] = f"window={tokens[0]}"
+    source, transforms, sink = _resolve_recipe(recipe)
+    params = _parse_params(tokens)
+    return ActionSpec(
+        action_id=_mint_id(),
+        trigger=TriggerSpec(kind=TriggerKind.COMMAND, command=command),
+        source=_with_params(source, params, _SOURCE_KEYS),
+        transforms=tuple(_with_params(step, params, _TRANSFORM_KEYS) for step in transforms),
+        sink=_with_params(sink, params, _SINK_KEYS),
     )
 
 

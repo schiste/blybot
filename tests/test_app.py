@@ -15,6 +15,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler
 
 from blybot.adapters.telegram.admin import AdminHandlers
+from blybot.adapters.telegram.analyze import AnalysisHandlers
 from blybot.adapters.telegram.app import (
     Lifecycle,
     Maintenance,
@@ -29,6 +30,7 @@ from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureService
 from blybot.services.directory import ChannelDirectory
+from blybot.services.engine import ActionEngine
 from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.sessions import SessionRegistry
@@ -91,9 +93,9 @@ def test_build_registers_every_handler() -> None:
     handlers = application.handlers[0]
     kinds = [type(handler) for handler in handlers]
     # log, logmedia, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
-    # setup, setpage, setconsent, setrepo, events, rule, rules, capture,
+    # setup, setpage, setconsent, setrepo, events, rule, rules, capture, llm,
     # revoke, settings, reset
-    assert kinds.count(CommandHandler) == 23
+    assert kinds.count(CommandHandler) == 24
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
     assert 1 not in application.handlers  # no capture: group 1 stays empty
@@ -349,3 +351,46 @@ def test_run_polling_subscribes_channel_posts_only_with_capture(
     )
 
     assert Update.CHANNEL_POST in seen["allowed_updates"]
+
+
+def make_analysis_handlers() -> Any:
+    return AnalysisHandlers(
+        engine=ActionEngine(sources={}, transforms={}, sinks={}, counters=Counters()),
+        groups=GroupPolicy(allowed=set()),
+        limiter=SlidingWindowLimiter(clock=FakeClock(), limit=6, window=timedelta(hours=1)),
+        clock=FakeClock(),
+        counters=Counters(),
+    )
+
+
+def test_analysis_commands_register_when_wired(monkeypatch: pytest.MonkeyPatch) -> None:
+    group_handlers, _, _ = make_group_handlers()
+    private_handlers, _ = make_private_handlers()
+    lifecycle, _, _ = make_lifecycle()
+    application = build_application(
+        TOKEN,
+        group_handlers,
+        private_handlers,
+        make_admin_handlers(),
+        lifecycle,
+        analysis_handlers=make_analysis_handlers(),
+    )
+    kinds = [type(handler) for handler in application.handlers[0]]
+    assert kinds.count(CommandHandler) == 28  # + summarize, talkingpoints, stats, run
+
+    seen: dict[str, Any] = {}
+
+    def fake_run_polling(_self: object, **kwargs: Any) -> None:
+        seen["allowed_updates"] = kwargs["allowed_updates"]
+
+    monkeypatch.setattr(Application, "run_polling", fake_run_polling)
+    run_polling(
+        TOKEN,
+        group_handlers,
+        private_handlers,
+        make_admin_handlers(),
+        lifecycle,
+        analysis_handlers=make_analysis_handlers(),
+    )
+    # Analysis commands alone don't need channel posts; capture does.
+    assert Update.CHANNEL_POST not in seen["allowed_updates"]

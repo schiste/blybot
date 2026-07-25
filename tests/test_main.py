@@ -156,3 +156,28 @@ async def test_bootstrap_covers_both_stores(monkeypatch: pytest.MonkeyPatch) -> 
     await bootstrap()
     assert booted == ["profiles", "messages"]
     await seen["lifecycle"].release()
+
+
+async def test_capture_wiring_builds_the_analysis_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+
+    assert entry.main() == 0
+    handlers = seen["analysis_handlers"]
+    assert handlers is not None
+    engine = handlers.engine
+    assert set(engine.sources) == {"archive_window"}
+    assert set(engine.transforms) == {"prompt", "stats"}
+    assert set(engine.sinks) == {"wiki_section", "telegram_reply"}
+    # The wiki sink resolves the scope's page through the directory,
+    # degrading to the operator default when storage is unreachable.
+    sink = engine.sinks["wiki_section"]
+    assert await sink.resolve_page(-1, 0) == REQUIRED["LOG_TARGET_PAGE"]
+    assert seen["admin_handlers"].llm_defaults is not None
+    await seen["lifecycle"].release()  # also closes the LiftWing client

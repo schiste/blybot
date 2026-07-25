@@ -26,7 +26,7 @@ from blybot.domain.ports import StorageError
 from blybot.services.rules import MAX_RULES
 
 if TYPE_CHECKING:
-    from blybot.domain.models import Rule
+    from blybot.domain.models import LlmSettings, Rule
     from blybot.domain.ports import ProfileStore
 
 # Characters MediaWiki forbids in page titles (underscores are handled
@@ -146,6 +146,10 @@ class ChannelDirectory:
     async def set_capture(self, chat_id: int, thread_id: int, *, enabled: bool) -> None:
         """Switch this scope's message capture on or off (v3 plan §2.7)."""
         await self._update(chat_id, thread_id, capture_enabled=enabled)
+
+    async def set_llm(self, chat_id: int, thread_id: int, settings: LlmSettings | None) -> None:
+        """Store (or with ``None`` clear) this scope's LLM settings (v3 §2.4)."""
+        await self._update(chat_id, thread_id, llm=settings)
 
     async def enable_events(
         self, chat_id: int, thread_id: int, seed_rules: tuple[Rule, ...]

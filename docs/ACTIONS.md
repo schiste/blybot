@@ -14,11 +14,11 @@ registered once at the composition root. Adding a new capability to the
 bot usually means writing one new component and composing it, not a new
 feature module.
 
-Status: the framework core shipped in Phase 1 of the
-[v3 plan](PLAN-V3-CHANNEL-INTELLIGENCE.md) (this document). Built-in
-sources, transforms, and sinks arrive with the capture and analysis
-phases; until then the registries are empty and no user-facing command
-creates actions yet.
+Status: the framework core shipped in Phase 1 and the capture +
+analysis components in Phases 2–3 of the
+[v3 plan](PLAN-V3-CHANNEL-INTELLIGENCE.md). On-demand analyses work
+today (see the command list below); `/action add` scheduling lands with
+Phase 4.
 
 ## Concepts
 
@@ -106,3 +106,36 @@ Once components exist, a new scheduled behavior is pure configuration:
 `/action add <schedule> <recipe> [params]` from an admin in the target
 chat. The framework exists precisely so that "summarize this channel
 weekly in French to page X" is a chat command, not a pull request.
+
+## Built-in components (Phase 3)
+
+| Kind | Name | Behavior |
+|---|---|---|
+| source | `archive_window` | The scope's captured messages for `window=<N>h\|<N>d` (default 24h, max 30d); empty window ends the run quietly |
+| transform | `prompt` | Runs `template=` through the scope's LLM settings with map-reduce chunking; aborts (publishing nothing) on truncation, malformed output, or transport failure |
+| transform | `stats` | Deterministic Python: counts, participants, media, replies, busiest hour, top pseudonyms — no LLM |
+| sink | `wiki_section` | One new section on `page=` (default: the scope's `/log` page); sanitizes every model string; returns a chat confirmation with the URL |
+| sink | `telegram_reply` | Renders the report as one bounded chat message |
+
+Prompt templates (`domain/prompts.py`): `summarize`, `talking_points`,
+and `stats_narrative` (which consumes the *stats* output — numbers, never
+raw transcript). Adding a template is a data change in `TEMPLATES` plus a
+line in this table; the structured-output contract (JSON array of bounded
+strings) applies to all of them automatically.
+
+## Per-scope LLM settings
+
+`/llm show | set key:value … | reset` (group admins) controls how this
+scope's analyses run. Keys: `platform` (only `liftwing` today), `model`
+(`default` = Qwen3-14B, `large` = Qwen3.6-27B — aliases the operator can
+re-point), `lang` (pinned output language, default English), `temp`
+(0–1), and `max_tokens` (clamped by the operator ceiling). Per-action
+`model=`/`lang=`/`temp=` parameters override the scope settings for that
+action only.
+
+## On-demand commands
+
+`/summarize [24h|7d]`, `/talkingpoints [window]`, `/stats [window]`, and
+`/run <template> [window]` build one-shot actions from the same recipes.
+Admin-gated, throttled per chat, acknowledged immediately (a chunked
+analysis takes minutes), and confirmed with the published page URL.

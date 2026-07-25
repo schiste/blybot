@@ -7,7 +7,7 @@ intelligence platform*: it passively archives the content of Telegram
 broadcast channels and opted-in groups, runs configurable prompts against
 the Qwen models hosted on Wikimedia LiftWing, and publishes the results
 (summaries, talking points, statistics) to Meta-wiki. To get there without
-accreting one-off features, v3 first factors the bot's behavior into a
+piling up one-off features, v3 first factors the bot's behavior into a
 small set of reusable **actions** — `trigger → source → transforms → sink`
 — and then expresses both the new analyses and the existing features
 (`/log`, DM transcription, repo notifications) as compositions of those
@@ -75,19 +75,20 @@ requirements.
 ```
 src/blybot/
 ├── domain/
-│   ├── models.py        + CapturedMessage, Scope, ActionSpec, TriggerSpec,
-│   │                      AnalysisWindow, PromptRequest/Result (all identifier-free)
-│   ├── ports.py         + MessageArchive, PromptRunner, Source, Transform,
-│   │                      Sink, ActionStore protocols
-│   ├── actions.py       NEW: ActionSpec parsing/validation/serialization
-│   │                      (mirrors services/rules.py idioms)
+│   ├── models.py        + Schedule (due-time math), TriggerSpec, StepSpec,
+│   │                      ActionSpec, ActionScope/Context, OutboundMessage,
+│   │                      CapturedMessage, PromptRequest/Result (identifier-free)
+│   ├── ports.py         + Source, Transform, Sink, ActionStore, ActionError;
+│   │                      later MessageArchive, PromptRunner
 │   └── prompts.py       NEW: named prompt templates (summarize, talking_points,
 │                          stats_narrative, …) + transcript chunking math
 ├── services/
+│   ├── actions.py       NEW: action grammar — parse/describe/serialize + recipes
+│   │                      (mirrors services/rules.py idioms)
 │   ├── engine.py        NEW: ActionEngine — resolves an ActionSpec into
 │   │                      source → transforms → sink and runs it with
 │   │                      per-scope error isolation (RepoNotifier's contract)
-│   ├── schedule.py      NEW: due-action computation over stored schedules
+│   ├── schedule.py      NEW: due-action selection over stored schedules
 │   │                      (shares the Lifecycle tick with the notifier)
 │   ├── capture.py       NEW: ingest use-case — policy check, pseudonymize,
 │   │                      store; volume guards
@@ -211,8 +212,11 @@ page):
 POST https://api.wikimedia.org/service/lw/inference/v1/models/llm-<model>/openai/v1/chat/completions
 ```
 
-- Models: `llm-qwen3-14b` (16K context, default) and the 27B (32K context)
-  — exact larger-model id to be confirmed in Phase 0 pre-flight.
+- Models: `llm-qwen3-14b` (16K context, default) and `llm-qwen36-27b`
+  (Qwen3.6 27B, 32K context) — both ids verified live against the public
+  endpoint on 2026-07-25 (response carries OpenAI-shaped `choices`,
+  `finish_reason`, and `usage`; anonymous tier, ~2 s for tiny prompts).
+  Toolforge-tier latency/throughput still to be measured in Phase 0.
 - OpenAI-compatible request/response; no API key; effectively unlimited
   from Toolforge (where the bot already runs) vs 100 req/h anonymous.
 - Adapter: `httpx.AsyncClient`, the WMF `User-Agent` the bot already
@@ -427,7 +431,7 @@ Operator-level keys set the *defaults*; scopes override them via `/llm`
 |---|---|---|
 | `LIFTWING_API_BASE` | LiftWing inference base URL | `https://api.wikimedia.org/service/lw/inference/v1` |
 | `LIFTWING_MODEL_DEFAULT` | Concrete id behind the `default` alias | `llm-qwen3-14b` |
-| `LIFTWING_MODEL_LARGE` | Concrete id behind the `large` alias | (Phase-0 confirmed id) |
+| `LIFTWING_MODEL_LARGE` | Concrete id behind the `large` alias | `llm-qwen36-27b` |
 | `LIFTWING_TIMEOUT_SECONDS` | Per-request read timeout | 120 |
 | `LLM_DEFAULT_PLATFORM` | Platform used when a scope sets none | `liftwing` |
 | `LLM_DEFAULT_LANG` | Output language when a scope sets none | `en` |
@@ -446,55 +450,128 @@ unset, the bot has no capture handlers registered and v3 is inert.
 
 ## 4. Phasing
 
+**Definition of done — every phase, no exceptions.** A phase's PR ships
+three things together or it doesn't merge: (a) the code, (b) its tests —
+new unit tests for every new module, updated fakes, and updated
+architecture rules where a new seam appears, and (c) its documentation —
+README, `docs/SPECIFICATION.md`, `docs/OPERATIONS.md`, `.env.example`,
+and `/help`/`/privacy` command copy updated in the same PR that changes
+the behavior they describe. `make check` (lint, typecheck, tests, hooks)
+green is the merge gate, as today. Documentation is not a final phase;
+Phase 6 only *audits* that nothing drifted.
+
 **Phase 0 — pre-flight & governance (blocking, cheap)**
 1. From Toolforge: curl both LiftWing model endpoints; confirm exact model
    ids, context sizes, latency envelope, and the unthrottled-from-Toolforge
-   claim. Record in OPERATIONS.md.
+   claim. Spot-check output quality in the target channels' actual
+   languages with `lang:` pinned. Record findings in OPERATIONS.md.
 2. Estimate archive volume for the actual target channels; sanity-check
    ToolsDB quota.
 3. Write the privacy-posture change docs + announcement copy; flip
    BotFather privacy mode only when Phase 2 deploys.
 4. Confirm on-wiki norms for AI-generated content on the target pages
    (attribution line wording).
+- *Tests:* none (no code) — but the endpoint checks become the recorded
+  baseline the Phase 3 adapter tests encode (model ids, response shapes).
+- *Docs:* OPERATIONS.md "LiftWing" section; the privacy/announcement copy
+  drafted here ships with Phase 2.
 
 **Phase 1 — action framework core.** Domain models + ports (`Source`,
 `Transform`, `Sink`, `ActionSpec`, `ActionStore`), `domain/actions.py`
 parse/serialize, `ActionEngine`, scheduler service, `actions_json`
 migration, registries in the composition root. No user-visible behavior
-yet; fully unit-tested with fakes (extend `tests/fakes.py`).
+yet.
+- *Tests:* `tests/test_actions_model.py` (spec parse/describe/serialize
+  round-trips, invalid-input rejection — mirrors `test_rules_model.py`),
+  `tests/test_engine.py` (chain execution, per-scope error isolation,
+  counters), `tests/test_schedule.py` (due-time math incl. DST-free UTC
+  handling, first-run baseline), store migration test in
+  `test_toolsdb_store.py`; `tests/fakes.py` gains `FakeSource`,
+  `FakeTransform`, `FakeSink`, `FakeActionStore`; `test_architecture.py`
+  extended to the new modules (domain stays I/O-free; engine imports
+  ports only).
+- *Docs:* new `docs/ACTIONS.md` — the framework's concepts, the spec
+  grammar, and "how to add a new source/transform/sink/action" (the
+  reusability contract this whole effort exists for); README architecture
+  tree updated.
 
 **Phase 2 — capture.** Archive adapter + `messages` table, pseudonymizer,
 CaptureService + guards, channel/group handlers, `/capture on|off|purge`,
-privacy-mode flip, docs shipped from Phase 0. Deliverable: opted-in scopes
-accumulate an archive; nothing reads it yet.
+privacy-mode flip. Deliverable: opted-in scopes accumulate an archive;
+nothing reads it yet.
+- *Tests:* `test_capture.py` (policy boundary: disabled scope stores
+  nothing; guards: truncation, rate ceiling, service-message skip),
+  `test_pseudonymizer.py` (HMAC stability across restarts, divergence
+  across scopes, no raw id in output), `test_toolsdb_archive.py` (insert/
+  window-query/purge against the runner seam), handler tests for
+  `/capture` (admin gate, announcement posted) in the `tests/tg.py`
+  harness style; architecture rule: only `adapters/toolsdb/archive.py`
+  and the capture handlers may touch `from_user`/user ids.
+- *Docs:* README privacy section rewrite + SPECIFICATION v3 section
+  (supersedes non-goal 1 and R1's structural framing), `/privacy` and
+  `/help` copy, OPERATIONS: BotFather privacy-mode flip procedure,
+  announcement-copy requirement, archive metrics; `.env.example` gains
+  `ARCHIVE_PSEUDONYM_KEY`, `CAPTURE_MAX_PER_MINUTE`.
 
 **Phase 3 — LLM platform + analyses.** `PromptRunner` port + LiftWing
 platform adapter, per-scope `/llm` settings (`llm_json` migration),
 prompt template library with the structured-output contract (§2.5) and
-injection containment layers (§2.6) including the adversarial test
-fixtures, chunked map-reduce, pure-Python stats, `archive_window` source,
-`prompt`/`stats` transforms, `wiki_section` + `telegram_reply` sinks,
-on-demand commands (`/summarize`, `/talkingpoints`, `/stats`, `/run`).
-Deliverable: the headline feature, on demand. Phase-0 endpoint checks
-should also spot-check output quality in the target channels' actual
-languages with `lang:` pinned, since that is cheap to verify up front and
-expensive to discover after launch.
+injection containment layers (§2.6), chunked map-reduce, pure-Python
+stats, `archive_window` source, `prompt`/`stats` transforms,
+`wiki_section` + `telegram_reply` sinks, on-demand commands
+(`/summarize`, `/talkingpoints`, `/stats`, `/run`). Deliverable: the
+headline feature, on demand.
+- *Tests:* `test_liftwing.py` (request shape, retry/backoff on 429/5xx,
+  timeout, `finish_reason` surfaced — httpx mocked at the transport
+  seam like `test_mediawiki_publisher.py`), `test_prompts.py` (template
+  rendering, chunk math boundaries, language pinning present, random
+  fence uniqueness), `test_analyze.py` (map-reduce orchestration with
+  `FakePromptRunner`, abort-on-truncation/malformed-JSON/empty — asserts
+  the publish-nothing invariant; stats correctness on fixture rows),
+  **adversarial fixture suite** `test_injection.py` (fence spoofing,
+  role-token smuggling, wikitext payloads, language-switch demands →
+  output stays schema-shaped, sanitized, in configured language),
+  `/llm` handler tests (clamping, alias validation, admin gate).
+- *Docs:* ACTIONS.md gains the built-in template catalog and "writing a
+  new prompt template" guide; SPECIFICATION: output contract + injection
+  containment as normative requirements (new R-numbers); OPERATIONS:
+  LiftWing operations (timeouts, token counters, `injection_suspected`
+  triage); `.env.example` gains the `LIFTWING_*`/`LLM_*` block; `/help`
+  gains the new commands.
 
 **Phase 4 — scheduling.** `/action add|remove|list`, schedule triggers on
 the shared tick, per-action `last_run` watermarks (never replay on first
 run — same baseline rule as repo cursors), digest publishing. Deliverable:
 unattended daily/weekly intelligence pages.
+- *Tests:* `test_schedule.py` extended (catch-up after downtime, no
+  first-run replay, tick sharing with the notifier), `/action` handler
+  tests (grammar errors, cap per scope, admin gate), engine tests for
+  scheduled-run failure paths (retry next slot, counter increments).
+- *Docs:* ACTIONS.md scheduling section with worked examples; OPERATIONS:
+  tick tuning, what to check when a digest didn't appear.
 
 **Phase 5 — full migration.** RepoNotifier → `/log` → DM transcription →
 `/bug`, one PR each, behavior-identical, then delete the superseded
-service wiring. `tests/test_architecture.py` gains rules for the new
-seams (e.g. only `adapters/toolsdb/archive.py` may touch user ids).
+service wiring.
+- *Tests:* the *existing* suites (`test_notify.py`, `test_publish_service.py`,
+  `test_transcribe.py`, `test_feedback.py`, handler tests) are the
+  acceptance harness — they must pass unmodified against the re-homed
+  implementations before old wiring is deleted; each migration PR may
+  only *add* tests (for the new action wiring), never weaken existing
+  assertions. `test_architecture.py` rules updated as modules move.
+- *Docs:* README architecture tree and ACTIONS.md updated per migration;
+  SPECIFICATION's architecture section (13) rewritten once, in the last
+  migration PR.
 
-**Phase 6 — ops & polish.** README/SPEC v3 rewrite lands, `.env.example`,
-OPERATIONS runbook (memory: bump the job to 768Mi–1Gi for archive queries +
-LLM payloads), counters (`captures`, `archive_rows`, `prompts_run`,
-`prompt_failures`, `analyses_published`), `/help` updates, announcement to
-the communities running the reference instance.
+**Phase 6 — ops & doc audit.** Counters (`captures`, `archive_rows`,
+`prompts_run`, `prompt_failures`, `analyses_published`,
+`injection_suspected`) verified end-to-end, memory sizing (bump the job to
+768Mi–1Gi for archive queries + LLM payloads), `deploy-instance.sh`
+multi-instance check, announcement to the communities running the
+reference instance — plus a full documentation audit: every claim in
+README/SPECIFICATION/OPERATIONS/ACTIONS/.env.example verified against the
+shipped behavior (the v2 "stale implementation claims" cleanup taught this
+lesson; v3 ends with the same sweep by design).
 
 ---
 
@@ -530,15 +607,28 @@ the communities running the reference instance.
 
 ---
 
-## 6. Test strategy
+## 6. Test & documentation strategy
+
+Per-phase test and doc deliverables are enumerated in §4; these are the
+cross-cutting rules they all follow:
 
 - Every new domain/service module gets the same treatment as v2: pure unit
-  tests with fakes (`FakePromptRunner`, `FakeArchive`, `FakeSource/Sink`).
+  tests with fakes (`FakePromptRunner`, `FakeArchive`, `FakeSource/Sink`),
+  written in the same PR as the module.
 - Chunking math, action-spec parsing, and pseudonym stability get
   property-style tests (round-trip, boundary sizes, HMAC stability across
   restarts / divergence across scopes).
-- Architecture test extensions: domain stays I/O-free; user-id handling
-  confined to `adapters/toolsdb/archive.py`; `services/` may not import
-  `httpx`/`telegram`/`pymysql`.
+- Architecture test extensions land with the seam they guard: domain stays
+  I/O-free; user-id handling confined to `adapters/toolsdb/archive.py` and
+  capture handlers; `services/` may not import `httpx`/`telegram`/`pymysql`.
+- Adapters are tested at their transport seam (mocked httpx / fake query
+  runner), mirroring `test_mediawiki_publisher.py` and
+  `test_toolsdb_store.py`.
+- The adversarial injection suite (§2.6) is a permanent fixture set that
+  grows whenever a new bypass is imagined or observed — never pruned.
 - Migration phases are validated by the *existing* test suites passing
-  against the re-homed implementations before the old wiring is deleted.
+  against the re-homed implementations before the old wiring is deleted;
+  migration PRs may add tests but never weaken existing assertions.
+- Documentation is part of each phase's definition of done (§4): behavior
+  and its docs change in the same PR, and Phase 6 ends with a full audit
+  of every doc claim against shipped behavior.

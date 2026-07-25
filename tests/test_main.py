@@ -31,6 +31,9 @@ def test_missing_configuration_exits_2_without_echoing_values(
 async def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key, value)
+    # v1 mode must not depend on the ambient environment (CI runners and
+    # dev containers commonly export GITHUB_TOKEN).
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     seen: dict[str, Any] = {}
 
     def fake_run_polling(**kwargs: Any) -> None:

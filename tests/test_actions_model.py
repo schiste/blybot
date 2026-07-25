@@ -123,7 +123,7 @@ def test_step_spec_requires_a_name_and_defaults_params() -> None:
 
 def test_parse_action_routes_params_to_their_steps() -> None:
     spec = parse_action(
-        "daily@06:00 summarize window=24h page=Meta:Log model=large lang=fr",
+        "daily@06:00 summarize window=24h page=Meta:Log model=large lang=fr temp=0.4",
         now_iso=NOW.isoformat(),
     )
     assert spec.trigger.kind is TriggerKind.SCHEDULE
@@ -134,6 +134,7 @@ def test_parse_action_routes_params_to_their_steps() -> None:
     assert transform.param("template") == "summarize"
     assert transform.param("model") == "large"
     assert transform.param("lang") == "fr"
+    assert transform.param("temp") == "0.4"
     assert spec.sink == StepSpec(name="wiki_section", params=(("page", "Meta:Log"),))
     assert spec.last_run == NOW  # primed: never fires for slots before creation
 
@@ -204,3 +205,25 @@ def test_command_triggered_actions_round_trip_too() -> None:
         trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="summarize"),
     )
     assert loads_actions(dumps_actions((spec,))) == (spec,)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "daily@06:00 summarize temp=hot",
+        "daily@06:00 summarize temp=1.5",
+        "daily@06:00 summarize model=qwen99",
+        "daily@06:00 summarize window=day",
+        "daily@06:00 summarize lang=english!",
+    ],
+)
+def test_bad_param_values_are_rejected_at_add_time(text: str) -> None:
+    """A bad value must fail /action add, not explode at 06:00 tomorrow."""
+    with pytest.raises(ActionParseError):
+        parse_action(text)
+
+
+def test_stats_narrative_recipe_chains_stats_into_the_prompt() -> None:
+    spec = parse_action("daily@06:00 stats_narrative")
+    assert [step.name for step in spec.transforms] == ["stats", "prompt"]
+    assert spec.transforms[1].param("template") == "stats_narrative"

@@ -11,6 +11,7 @@ from blybot.domain.models import (
     ActionScope,
     AnalysisReport,
     CapturedMessage,
+    ConsentMode,
     GroupProfile,
     LlmSettings,
     PromptResult,
@@ -27,8 +28,10 @@ from blybot.services.analyze import (
     StatsTransform,
     TelegramReplySink,
     WikiSectionSink,
+    explicit_page_resolver,
     parse_window,
 )
+from blybot.services.directory import ChannelDirectory
 from tests.fakes import (
     FakePromptRunner,
     FakePublisher,
@@ -418,3 +421,22 @@ async def test_step_model_param_overrides_the_scope_model() -> None:
 
     (request,) = runner.requests
     assert request.model == "large"
+
+
+async def test_page_policy_requires_an_explicit_page() -> None:
+    store = InMemoryProfiles()
+    directory = ChannelDirectory(
+        store=store,
+        default_log_page="Operator default",
+        default_consent=ConsentMode.IMMEDIATE,
+        default_repo="",
+        page_suffix="Telegram logs",
+    )
+    resolve = explicit_page_resolver(directory)
+
+    # Unconfigured scope: refuse rather than use the operator default.
+    with pytest.raises(ActionError, match="/setpage"):
+        await resolve(-1, 0)
+
+    await directory.set_log_page(-1, 0, "WikiProject Foo")
+    assert await resolve(-1, 0) == "WikiProject Foo/Telegram logs"

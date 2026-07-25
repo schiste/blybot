@@ -102,6 +102,8 @@ class CaptureHandlers:
             return
         if change.new_chat_member.status != ChatMemberStatus.ADMINISTRATOR:
             return
+        if change.old_chat_member.status == ChatMemberStatus.ADMINISTRATOR:
+            return  # a permissions edit, not a promotion: don't re-announce
         try:
             await self.directory.set_capture(change.chat.id, 0, enabled=True)
         except StorageError:

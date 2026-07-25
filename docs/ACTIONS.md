@@ -46,7 +46,7 @@ waits for its next slot; it is not retried every tick.
 <schedule> <recipe> [key=value ...]
 
 schedule:  every:<N>h | daily@HH:MM | weekly@<dow>.HH:MM     (all UTC)
-recipe:    summarize | talking_points | stats | prompt:<template>
+recipe:    summarize | talking_points | stats | stats_narrative | prompt:<template>
 params:    window=<N>h|<N>d   → source
            page=<title>       → sink
            model=default|large, lang=<code>, temp=<0..1> → prompt transform
@@ -118,8 +118,9 @@ weekly in French to page X" is a chat command, not a pull request.
 | sink | `telegram_reply` | Renders the report as one bounded chat message |
 
 Prompt templates (`domain/prompts.py`): `summarize`, `talking_points`,
-and `stats_narrative` (which consumes the *stats* output — numbers, never
-raw transcript). Adding a template is a data change in `TEMPLATES` plus a
+and `stats_narrative` (the `stats_narrative` *recipe* chains the stats
+transform first, so the template consumes computed numbers — never raw
+transcript). Adding a template is a data change in `TEMPLATES` plus a
 line in this table; the structured-output contract (JSON array of bounded
 strings) applies to all of them automatically.
 

@@ -39,7 +39,7 @@ from blybot.domain.models import (
 MAX_ACTIONS: Final = 20
 
 _RECIPES: Final = ("summarize", "talking_points", "stats")
-_RECIPE_HELP: Final = ", ".join((*_RECIPES, "prompt:<template>"))
+_RECIPE_HELP: Final = ", ".join((*_RECIPES, "stats_narrative", "prompt:<template>"))
 
 # Which pipeline step each key=value parameter belongs to.
 _SOURCE_KEYS: Final = frozenset({"window"})
@@ -156,16 +156,24 @@ def _parse_time(value: str) -> dict[str, int]:
 
 def _resolve_recipe(recipe: str) -> tuple[StepSpec, tuple[StepSpec, ...], StepSpec]:
     name, sep, template = recipe.partition(":")
+    transforms: tuple[StepSpec, ...]
     if name == "prompt" and sep and template:
-        transform = StepSpec(name="prompt", params=(("template", template),))
+        transforms = (StepSpec(name="prompt", params=(("template", template),)),)
     elif recipe == "stats":
-        transform = StepSpec(name="stats")
+        transforms = (StepSpec(name="stats"),)
+    elif recipe == "stats_narrative":
+        # The narrative template consumes computed numbers, never raw
+        # transcript — so the recipe chains the stats transform first.
+        transforms = (
+            StepSpec(name="stats"),
+            StepSpec(name="prompt", params=(("template", "stats_narrative"),)),
+        )
     elif recipe in _RECIPES:
-        transform = StepSpec(name="prompt", params=(("template", recipe),))
+        transforms = (StepSpec(name="prompt", params=(("template", recipe),)),)
     else:
         msg = f"Unknown recipe {recipe!r}. Recipes: {_RECIPE_HELP}"
         raise ActionParseError(msg)
-    return StepSpec(name="archive_window"), (transform,), StepSpec(name="wiki_section")
+    return StepSpec(name="archive_window"), transforms, StepSpec(name="wiki_section")
 
 
 def _parse_params(tokens: list[str]) -> dict[str, str]:
@@ -177,8 +185,31 @@ def _parse_params(tokens: list[str]) -> dict[str, str]:
             keys = ", ".join(sorted(known))
             msg = f"Expected key=value with a key from: {keys}; got {token!r}"
             raise ActionParseError(msg)
+        _validate_param(key, value)
         params[key] = value
     return params
+
+
+def _validate_param(key: str, value: str) -> None:
+    """Reject bad values at add time, not at 06:00 tomorrow."""
+    if key == "window" and not _WINDOW_SUGAR_RE.match(value):
+        msg = f"window must look like 24h or 7d, got {value!r}"
+        raise ActionParseError(msg)
+    if key == "model" and value not in {"default", "large"}:
+        msg = "model must be default or large"
+        raise ActionParseError(msg)
+    if key == "lang" and not (value.replace("-", "").isalpha() and len(value) <= 8):  # noqa: PLR2004
+        msg = "lang must be a short language code, e.g. lang=fr"
+        raise ActionParseError(msg)
+    if key == "temp":
+        try:
+            temperature = float(value)
+        except ValueError as error:
+            msg = "temp must be a number between 0 and 1"
+            raise ActionParseError(msg) from error
+        if not 0.0 <= temperature <= 1.0:
+            msg = "temp must be between 0 and 1"
+            raise ActionParseError(msg)
 
 
 def _with_params(step: StepSpec, params: dict[str, str], keys: frozenset[str]) -> StepSpec:

@@ -15,6 +15,7 @@ from blybot.domain.models import (
     ActionContext,
     ActionScope,
     ActionSpec,
+    CapturedMessage,
     GroupProfile,
     OutboundMessage,
     Pseudonym,
@@ -89,6 +90,30 @@ class Sink(Protocol):
 
     async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         """Publish ``payload``; return any chat messages to send."""
+        ...
+
+
+class MessageArchive(Protocol):
+    """Persists captured messages for capture-enabled scopes (v3 plan §2.2).
+
+    The archive holds pseudonymized structure and text only; nothing
+    stored here can identify a Telegram account. Raising
+    :class:`StorageError` lets callers degrade without importing the
+    database adapter.
+    """
+
+    async def store(self, message: CapturedMessage) -> None:
+        """Persist one captured message (idempotent per message id)."""
+        ...
+
+    async def window(
+        self, chat_id: int, thread_id: int, since: datetime, until: datetime
+    ) -> list[CapturedMessage]:
+        """Return the scope's messages with ``since <= posted_at < until``, oldest first."""
+        ...
+
+    async def purge(self, chat_id: int, thread_id: int) -> int:
+        """Hard-delete the scope's entire archive; return the rows removed."""
         ...
 
 

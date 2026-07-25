@@ -347,6 +347,58 @@ These shape the design and one of them remains an open governance decision.
 
 ---
 
+## 21. Channel intelligence (v3)
+
+v3 extends the bot into a channel-intelligence platform per
+[PLAN-V3-CHANNEL-INTELLIGENCE.md](PLAN-V3-CHANNEL-INTELLIGENCE.md), the
+normative design for this section. Where they conflict, v3 supersedes
+two v1 statements for **capture-enabled deployments only**: non-goal 1
+("no passive logging or statistics") and R1's privacy-mode-ON framing.
+A deployment without `ARCHIVE_PSEUDONYM_KEY` remains exactly the v1/v2
+bot, privacy mode ON.
+
+**R-v3.1 — Capture is opt-in, loud, and reversible.** Message content is
+archived only for scopes with capture explicitly enabled: groups via an
+admin's `/capture on` (the confirmation is a permanent in-chat
+announcement), broadcast channels by an admin adding the bot as channel
+admin (announced with a channel post). `/capture off` stops collection;
+`/capture purge` hard-deletes the scope's archive. The enable check is
+the single policy boundary between the update stream and storage.
+
+**R-v3.2 — Pseudonymized archive.** The `messages` table stores group
+structure, timestamps, text, and an author label that is
+HMAC-SHA256(operator key, scope‖user) — never a Telegram user id,
+username, or display name. Labels are stable within a scope (statistics
+work) and unlinkable across scopes; rotating the key unlinkably re-keys
+every author. Media bodies are not archived (a `media_note` row records
+that media was posted). Ingest is guarded by text truncation at 4096
+chars and a per-scope per-minute ceiling.
+
+**R-v3.3 — Actions.** Bot behavior composes as
+`trigger → source → transforms → sink` pipelines stored per scope as
+data ([ACTIONS.md](ACTIONS.md)): schedules (`every:<N>h`, `daily@HH:MM`,
+`weekly@<dow>.HH:MM`, UTC) and commands trigger them; failures are
+isolated per action and per scope; a failed run waits for its next slot.
+
+**R-v3.4 — LLM analyses.** Prompt-driven analyses run against the Qwen
+models on Wikimedia LiftWing behind a `PromptRunner` port. The model
+never writes wikitext: templates demand structured JSON, every string
+field passes the R7 sanitizer, and all markup comes from trusted render
+code. A failed analysis publishes nothing. Published sections carry a
+scope line and a machine-generated attribution footer. Output language,
+platform, model, and sampling parameters are per-scope settings
+(`/llm`), defaulting to LiftWing, `llm-qwen3-14b`, and English.
+
+**R-v3.5 — Injection containment.** Archived chatter is adversarial
+input: instructions and data are separated with per-request random
+fencing, chat-template control tokens are scrubbed, the reduce step of a
+chunked analysis sees only model partials, and structural guarantees (no
+tool calls, destinations fixed before the model runs, R-v3.4's output
+contract) cap the worst case at a false sentence inside a labeled
+machine-generated section.
+
+---
+
 ## Appendix: naming
 
 The bot is named **Blybot**. The name is kept in config rather than hard-coded, so the greeting, edit summaries, and job name all read from a single source and a future rename stays a one-line change.

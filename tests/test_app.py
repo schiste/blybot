@@ -22,16 +22,21 @@ from blybot.adapters.telegram.app import (
     repo_notify_loop,
     run_polling,
 )
+from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
+from blybot.domain.models import ConsentMode
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
+from blybot.services.capture import CaptureService
+from blybot.services.directory import ChannelDirectory
 from blybot.services.notify import RepoNotifier
-from blybot.services.policy import GroupPolicy
+from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.sessions import SessionRegistry
 from tests.fakes import (
     FakeClock,
     FakePublisher,
     FakeRepoGateway,
+    InMemoryArchive,
     InMemoryProfiles,
     SequentialPseudonyms,
 )
@@ -86,11 +91,12 @@ def test_build_registers_every_handler() -> None:
     handlers = application.handlers[0]
     kinds = [type(handler) for handler in handlers]
     # log, logmedia, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
-    # setup, setpage, setconsent, setrepo, events, rule, rules, revoke,
-    # settings, reset
-    assert kinds.count(CommandHandler) == 22
+    # setup, setpage, setconsent, setrepo, events, rule, rules, capture,
+    # revoke, settings, reset
+    assert kinds.count(CommandHandler) == 23
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
+    assert 1 not in application.handlers  # no capture: group 1 stays empty
 
 
 def test_run_polling_opts_into_exactly_the_updates_privacy_mode_needs(
@@ -277,3 +283,69 @@ async def test_notify_loop_survives_a_crashing_collect() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls["n"] >= 2  # it kept polling after the crash
+
+
+def make_capture_handlers() -> Any:
+    store = InMemoryProfiles()
+    clock = FakeClock()
+    return CaptureHandlers(
+        service=CaptureService(
+            store=store,
+            archive=InMemoryArchive(),
+            limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
+            clock=clock,
+            counters=Counters(),
+        ),
+        masker=HmacAuthorMasker(key="k"),
+        directory=ChannelDirectory(
+            store=store,
+            default_log_page="Log",
+            default_consent=ConsentMode.IMMEDIATE,
+            default_repo="",
+            page_suffix="",
+        ),
+        groups=GroupPolicy(allowed=set()),
+        bot_name="Blybot",
+    )
+
+
+def test_capture_handlers_register_in_their_own_group() -> None:
+    group_handlers, _, _ = make_group_handlers()
+    private_handlers, _ = make_private_handlers()
+    lifecycle, _, _ = make_lifecycle()
+    application = build_application(
+        TOKEN,
+        group_handlers,
+        private_handlers,
+        make_admin_handlers(),
+        lifecycle,
+        capture_handlers=make_capture_handlers(),
+    )
+    kinds = [type(handler) for handler in application.handlers[1]]
+    # channel posts, group chatter, and the channel-admin promotion hook
+    assert kinds.count(MessageHandler) == 2
+    assert kinds.count(ChatMemberHandler) == 1
+
+
+def test_run_polling_subscribes_channel_posts_only_with_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_run_polling(_self: object, **kwargs: Any) -> None:
+        seen["allowed_updates"] = kwargs["allowed_updates"]
+
+    monkeypatch.setattr(Application, "run_polling", fake_run_polling)
+    group_handlers, _, _ = make_group_handlers()
+    private_handlers, _ = make_private_handlers()
+    lifecycle, _, _ = make_lifecycle()
+    run_polling(
+        TOKEN,
+        group_handlers,
+        private_handlers,
+        make_admin_handlers(),
+        lifecycle,
+        capture_handlers=make_capture_handlers(),
+    )
+
+    assert Update.CHANNEL_POST in seen["allowed_updates"]

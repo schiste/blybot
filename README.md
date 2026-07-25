@@ -18,13 +18,25 @@ and keeps no statistics. It only ever ingests two things:
 
 The bot is *structurally* incapable of seeing ordinary group chatter: it runs
 with Telegram's privacy mode **on**, so non-command messages are never even
-delivered to it.
+delivered to it. (Exception: a v3 **capture-enabled deployment** — see
+Privacy guarantees below — runs with privacy mode off so that explicitly
+opted-in channels and groups can be archived for summaries and statistics.)
 
 ## Privacy guarantees
 
-- **No passive collection.** Only `/log`-marked messages and DMs are processed.
-- **No identifiers at rest.** No Telegram user ID, username, or display name is
-  ever written to the wiki or to disk. Enforced by architecture and by tests.
+- **No passive collection without loud opt-in.** By default only
+  `/log`-marked messages and DMs are processed. A v3 deployment can
+  additionally **capture** the content of broadcast channels and groups —
+  but only where an admin explicitly enabled it (`/capture on`, announced
+  permanently in the chat), only on deployments whose operator set the
+  capture key, and with `/capture off` / `/capture purge` as the always-on
+  exits. On capture-enabled deployments privacy mode is OFF, so the
+  "structurally incapable" claim below becomes a policy guarantee enforced
+  in one audited code path.
+- **No identifiers at rest.** No Telegram user ID, username, or display name
+  is ever written to the wiki or to disk. Enforced by architecture and by
+  tests. Captured messages store authors only as per-chat HMAC pseudonym
+  labels, unlinkable across chats and re-keyed by rotating the operator key.
 - **Unlinkable pseudonyms.** DM pseudonyms come from a CSPRNG — never derived
   from a user ID — live only in process memory, and die with the session.
 - **Sanitized output.** All published text is neutralized so it cannot alter

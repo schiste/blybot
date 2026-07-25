@@ -9,6 +9,10 @@ from __future__ import annotations
 import sys
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 from blybot.adapters.github.gateway import GitHubRepoGateway
 from blybot.adapters.github.issues import GitHubIssueTracker
@@ -16,14 +20,17 @@ from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
+from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.adapters.telegram.token_entry import TokenEntryHandler
+from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
 from blybot.config import ConfigurationError, load_config
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging
 from blybot.services.binding import TokenBinding
+from blybot.services.capture import CaptureService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.feedback import FeedbackService
@@ -73,15 +80,18 @@ def main() -> int:
     routes = DmRouteRegistry(clock=clock, route_ttl=config.session_ttl)
     # The key was validated at load; construction can't raise on it.
     store: ToolsDbStore | None = None
+    archive: ToolsDbArchive | None = None
+    capture_service: CaptureService | None = None
+    capture_handlers: CaptureHandlers | None = None
     if config.profile_encryption_key:
-        store = ToolsDbStore(
-            runner=PymysqlRunner(
-                host=config.toolsdb_host,
-                database=config.toolsdb_name,
-                cnf_path=Path(config.toolsdb_cnf),
-            ),
-            fernet_key=config.profile_encryption_key,
+        runner = PymysqlRunner(
+            host=config.toolsdb_host,
+            database=config.toolsdb_name,
+            cnf_path=Path(config.toolsdb_cnf),
         )
+        store = ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
+        if config.archive_pseudonym_key:
+            archive = ToolsDbArchive(runner=runner)
     binding = TokenBinding(clock=clock)
     gateway = GitHubRepoGateway(user_agent=config.user_agent)
 
@@ -163,6 +173,26 @@ def main() -> int:
         ),
     )
 
+    if store is not None and archive is not None:
+        capture_service = CaptureService(
+            store=store,
+            archive=archive,
+            limiter=SlidingWindowLimiter(
+                clock=clock,
+                limit=config.capture_max_per_minute,
+                window=timedelta(minutes=1),
+            ),
+            clock=clock,
+            counters=counters,
+        )
+        capture_handlers = CaptureHandlers(
+            service=capture_service,
+            masker=HmacAuthorMasker(key=config.archive_pseudonym_key),
+            directory=directory,
+            groups=group_policy,
+            bot_name=config.bot_name,
+        )
+
     admin_handlers = AdminHandlers(
         directory=directory,
         groups=group_policy,
@@ -170,6 +200,8 @@ def main() -> int:
         page_url_for=config.page_url,
         binding=binding,
         vault=store,
+        archive=archive,
+        capture_service=capture_service,
     )
 
     notifier = (
@@ -179,11 +211,22 @@ def main() -> int:
         if store
         else None
     )
+    bootstrap: Callable[[], Awaitable[None]] | None = None
+    if store is not None:
+        profile_store, message_archive = store, archive
+
+        async def bootstrap_storage() -> None:
+            await profile_store.bootstrap()
+            if message_archive is not None:
+                await message_archive.bootstrap()
+
+        bootstrap = bootstrap_storage
+
     lifecycle = Lifecycle(
         maintenance=Maintenance(sessions=sessions, counters=counters),
         transcription=transcription,
         release=release_clients,
-        bootstrap=store.bootstrap if store else None,
+        bootstrap=bootstrap,
         notifier=notifier,
         poll_interval_seconds=config.events_poll_minutes * 60,
     )
@@ -193,6 +236,7 @@ def main() -> int:
         private_handlers=private_handlers,
         admin_handlers=admin_handlers,
         lifecycle=lifecycle,
+        capture_handlers=capture_handlers,
     )
     return 0
 

@@ -143,6 +143,10 @@ class ChannelDirectory:
         """Switch this (group, topic)'s rule-driven notifications on or off."""
         await self._update(chat_id, thread_id, events_enabled=enabled)
 
+    async def set_capture(self, chat_id: int, thread_id: int, *, enabled: bool) -> None:
+        """Switch this scope's message capture on or off (v3 plan §2.7)."""
+        await self._update(chat_id, thread_id, capture_enabled=enabled)
+
     async def enable_events(
         self, chat_id: int, thread_id: int, seed_rules: tuple[Rule, ...]
     ) -> bool:

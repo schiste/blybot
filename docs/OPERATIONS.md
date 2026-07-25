@@ -112,6 +112,32 @@ usernames, messages. Losing
 back up the env file accordingly. Verify tokens are ciphertext with:
 `SELECT chat_id, LEFT(token_ciphertext, 20) FROM profiles;`
 
+## Enabling channel capture (v3)
+
+Capture archives message content for scopes that opt in, powering the
+v3 analyses. **This changes the bot's privacy posture — read this whole
+section before enabling.**
+
+1. Requires self-service (`PROFILE_ENCRYPTION_KEY`) plus
+   `ARCHIVE_PSEUDONYM_KEY` (any long random string; rotating it
+   unlinkably re-keys every archived author label).
+2. **Flip privacy mode OFF at BotFather** (`/setprivacy` → Disable).
+   From that moment the bot *receives* all group chatter everywhere it
+   sits — the only thing between chatter and storage is the capture
+   policy check, which stores nothing for scopes that didn't opt in.
+   Announce the posture change to every community whose group has the
+   bot before flipping. Strongly consider a **separate bot account**
+   for capture deployments (`deploy-instance.sh` supports several
+   instances) so privacy-first groups keep the structural guarantee.
+3. Group admins enable per scope with `/capture on` (announced in-chat,
+   permanently); channels enable by making the bot a channel admin (it
+   posts an announcement). `/capture off` stops; `/capture purge`
+   erases.
+4. Watch the counters: `captures`, `captures_throttled`,
+   `captures_failed`. Archive growth is operator-owned — there is no
+   automatic expiry. Check size occasionally:
+   `SELECT chat_id, COUNT(*) FROM messages GROUP BY chat_id;`
+
 ## LiftWing LLM endpoints (v3 pre-flight findings)
 
 The v3 analyses ([plan](PLAN-V3-CHANNEL-INTELLIGENCE.md)) call the Qwen

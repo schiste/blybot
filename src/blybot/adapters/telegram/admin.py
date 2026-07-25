@@ -32,8 +32,9 @@ if TYPE_CHECKING:
     from telegram import Bot, Chat, Update
     from telegram.ext import ContextTypes
 
-    from blybot.domain.ports import TokenVault
+    from blybot.domain.ports import MessageArchive, TokenVault
     from blybot.services.binding import TokenBinding
+    from blybot.services.capture import CaptureService
     from blybot.services.directory import ChannelDirectory
     from blybot.services.policy import GroupPolicy
 
@@ -92,6 +93,21 @@ REPLY_RULES_LIST: Final = "Rules for {scope}:\n{lines}"
 REPLY_RULES_FULL: Final = (
     "You already have the maximum of {max} rules at {scope}; remove one with /rule remove <id>."
 )
+REPLY_CAPTURE_USAGE: Final = "Usage: /capture on | off | purge"
+REPLY_CAPTURE_OFF_DEPLOY: Final = (
+    "Message capture isn't enabled on this deployment; ask the operator."
+)
+CAPTURE_ANNOUNCEMENT: Final = (
+    "📢 Message capture is now ON for {scope}: messages here will be "
+    "archived for on-wiki summaries and statistics, with authors recorded "
+    "only as anonymous labels. An admin can stop this with /capture off "
+    "and erase the archive with /capture purge."
+)
+REPLY_CAPTURE_DISABLED: Final = (
+    "Message capture is OFF for {scope}. The existing archive is kept; "
+    "erase it with /capture purge."
+)
+REPLY_CAPTURE_PURGED: Final = "Archive erased for {scope}: {count} message(s) deleted."
 SETUP_TEXT: Final = (
     "I'm configurable by this group's admins, right here:\n\n"
     "(run a command IN a topic to set that topic; in General for the group)\n\n"
@@ -101,6 +117,7 @@ SETUP_TEXT: Final = (
     "/events on|off — turn rule-driven repo notifications on/off\n"
     "/rule add|remove|clear — composable event rules (see /rules)\n"
     "/rules — list this chat's event rules\n"
+    "/capture on|off|purge — archive this chat's messages for analyses\n"
     "/revoke — discard this group's stored GitHub token\n"
     "/settings — current configuration\n"
     "/reset — forget everything and return to defaults\n\n"
@@ -113,7 +130,8 @@ SETTINGS_TEMPLATE: Final = (
     "- consent policy: {consent}\n"
     "- GitHub repo: {repo}\n"
     "- repo token stored: {token}\n"
-    "- repo notifications: {events}"
+    "- repo notifications: {events}\n"
+    "- message capture: {capture}"
 )
 
 _ADMIN_STATUSES: Final = frozenset({ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER})
@@ -142,6 +160,10 @@ class AdminHandlers:
     page_url_for: Callable[[str], str]
     binding: TokenBinding
     vault: TokenVault | None
+    # Capture-enabled deployments only: the archive behind /capture purge
+    # and the ingest service whose policy cache /capture must invalidate.
+    archive: MessageArchive | None = None
+    capture_service: CaptureService | None = None
 
     async def on_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain the self-service commands to an admin."""
@@ -281,6 +303,49 @@ class AdminHandlers:
         log_event("profile_update", "ok")
         return REPLY_EVENTS_SEEDED if seeded else REPLY_EVENTS_SET.format(state="on")
 
+    async def on_capture(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Switch this scope's message capture on/off, or erase its archive."""
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
+            return
+        chat, thread_id = resolved
+        argument = (context.args or [""])[0].lower()
+        if argument not in {"on", "off", "purge"}:
+            await self._reply(context, chat.id, thread_id, REPLY_CAPTURE_USAGE)
+            return
+        archive, service = self.archive, self.capture_service
+        if archive is None or service is None:
+            await self._reply(context, chat.id, thread_id, REPLY_CAPTURE_OFF_DEPLOY)
+            return
+        try:
+            reply = await self._apply_capture(chat.id, thread_id, argument, archive, service)
+        except StorageError:
+            reply = REPLY_STORAGE_DOWN
+        await self._reply(context, chat.id, thread_id, reply)
+
+    async def _apply_capture(
+        self,
+        chat_id: int,
+        thread_id: int,
+        argument: str,
+        archive: MessageArchive,
+        service: CaptureService,
+    ) -> str:
+        scope = _scope(thread_id)
+        if argument == "purge":
+            count = await archive.purge(chat_id, thread_id)
+            log_event("capture_purge", "ok")
+            return REPLY_CAPTURE_PURGED.format(scope=scope, count=count)
+        enabled = argument == "on"
+        await self.directory.set_capture(chat_id, thread_id, enabled=enabled)
+        service.forget_scope(chat_id, thread_id)
+        self.counters.increment("profiles_configured")
+        log_event("profile_update", "ok")
+        if enabled:
+            # The confirmation *is* the permanent in-chat announcement.
+            return CAPTURE_ANNOUNCEMENT.format(scope=scope)
+        return REPLY_CAPTURE_DISABLED.format(scope=scope)
+
     async def on_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or clear this (group, topic)'s composable event rules."""
         resolved = await self._admin_chat(update, context)
@@ -359,6 +424,7 @@ class AdminHandlers:
             repo=settings.repo or "none",
             token="yes" if settings.has_token else "no",
             events=(f"on ({len(own.rules)} rule(s))" if own.events_enabled else "off"),
+            capture="on" if own.capture_enabled else "off",
         )
         await self._reply(context, chat.id, thread_id, text)
 

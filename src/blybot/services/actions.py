@@ -109,9 +109,7 @@ def describe_action(spec: ActionSpec) -> str:
         if spec.trigger.schedule is not None
         else f"/{spec.trigger.command}"
     )
-    steps = " → ".join(
-        _describe_step(step) for step in (spec.source, *spec.transforms, spec.sink)
-    )
+    steps = " → ".join(_describe_step(step) for step in (spec.source, *spec.transforms, spec.sink))
     return f"[{spec.action_id}] {trigger}: {steps}"
 
 

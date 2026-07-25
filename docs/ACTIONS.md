@@ -127,7 +127,7 @@ weekly in French to page X" is a chat command, not a pull request.
 | source | `archive_window` | The scope's captured messages for `window=<N>h\|<N>d` (default 24h, max 30d); empty window ends the run quietly |
 | transform | `prompt` | Runs `template=` through the scope's LLM settings with map-reduce chunking; aborts (publishing nothing) on truncation, malformed output, or transport failure |
 | transform | `stats` | Deterministic Python: counts, participants, media, replies, busiest hour, top pseudonyms — no LLM |
-| sink | `wiki_section` | One new section on `page=` (default: the scope's `/log` page); sanitizes every model string; returns a chat confirmation with the URL |
+| sink | `wiki_section` | One new section on `page=` (default: the scope's `/log` page); a `page=` override passes the same validate-and-pin-to-suffix gate as `/setpage`; sanitizes every model string; returns a chat confirmation with the URL |
 | sink | `telegram_reply` | Renders the report as one bounded chat message |
 | transform | `log_publish` | /log's sanitize-render-publish step: LogContent → PublishedLog on the step's `page=` |
 | sink | `chat_confirm` | One-line "Published anonymously" confirmation with the section URL |

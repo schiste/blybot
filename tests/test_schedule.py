@@ -165,6 +165,20 @@ async def test_scope_overflow_is_truncated_per_tick() -> None:
     assert await scheduler.collect() == [REPLY]
 
 
+async def test_capped_ticks_rotate_so_no_scope_is_permanently_starved() -> None:
+    store, clock = InMemoryActions(), FakeClock()
+    await seed(store, clock, chat_id=-1)
+    await seed(store, clock, chat_id=-2)
+    clock.advance(timedelta(hours=6))
+    scheduler, _counters = make_scheduler(store, clock, max_scopes=1)
+
+    assert await scheduler.collect() == [REPLY]  # one scope this tick...
+    assert await scheduler.collect() == [REPLY]  # ...the other on the next
+    for chat_id in (-1, -2):
+        (stored,) = store.actions[chat_id, 0]
+        assert stored.last_run == clock.now()  # both eventually served
+
+
 @dataclass
 class StampProbeSink:
     """Sink that records the *persisted* last_run at delivery time."""

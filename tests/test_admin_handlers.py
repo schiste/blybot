@@ -676,6 +676,32 @@ async def test_llm_show_reports_defaults_then_scope_settings() -> None:
     assert "set for this scope" in tg.sent_texts(bot)[0]
 
 
+async def test_llm_in_a_topic_builds_on_the_inherited_group_settings() -> None:
+    store = InMemoryProfiles()
+    handlers = make_llm_handlers(store)
+    context, _bot = admin_context(args=["set", "model:large", "lang:fr"])
+    await handlers.on_llm(command("/llm set model:large lang:fr"), context)
+
+    context, bot = admin_context(args=["show"])
+    await handlers.on_llm(command_in_topic("/llm show", 7), context)
+    assert "inherited from the group" in tg.sent_texts(bot)[0]
+    assert "model:large" in tg.sent_texts(bot)[0]
+
+    # A partial edit in the topic keeps the inherited model/lang instead
+    # of silently resetting them to deployment defaults.
+    context, _bot = admin_context(args=["set", "temp:0.4"])
+    await handlers.on_llm(command_in_topic("/llm set temp:0.4", 7), context)
+    topic = store.profiles[tg.GROUP.id, 7].llm
+    assert topic == LlmSettings(model="large", lang="fr", temperature=0.4)
+
+
+async def test_llm_topic_without_group_settings_shows_deployment_defaults() -> None:
+    handlers = make_llm_handlers(InMemoryProfiles())
+    context, bot = admin_context(args=["show"])
+    await handlers.on_llm(command_in_topic("/llm show", 7), context)
+    assert "deployment defaults" in tg.sent_texts(bot)[0]
+
+
 async def test_llm_set_rejects_bad_values_verbatim() -> None:
     handlers = make_llm_handlers()
     context, bot = admin_context(args=["set", "temp:2"])

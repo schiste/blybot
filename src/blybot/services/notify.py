@@ -13,7 +13,7 @@ stored-data migration was needed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import (
@@ -160,6 +160,9 @@ class RepoNotifier:
     groups: GroupPolicy
     engine: ActionEngine
     max_groups_per_tick: int = 200
+    # Rotates the truncation window across ticks so an overflow defers
+    # scopes instead of permanently starving whatever sorts last.
+    _offset: int = field(default=0, init=False)
 
     async def collect(self) -> list[OutboundMessage]:
         """Return the chat messages for this cycle's matched events."""
@@ -169,7 +172,9 @@ class RepoNotifier:
             return []
         if len(profiles) > self.max_groups_per_tick:
             log_event("repo_poll", "ignored", skipped=len(profiles) - self.max_groups_per_tick)
-            profiles = profiles[: self.max_groups_per_tick]
+            start = self._offset % len(profiles)
+            self._offset = start + self.max_groups_per_tick
+            profiles = (profiles[start:] + profiles[:start])[: self.max_groups_per_tick]
         messages: list[OutboundMessage] = []
         for profile in profiles:
             if not self.groups.is_allowed(profile.chat_id):

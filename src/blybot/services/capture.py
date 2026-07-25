@@ -62,7 +62,14 @@ class CaptureService:
 
     def forget_scope(self, chat_id: int, thread_id: int) -> None:
         """Drop the scope's cached policy so /capture changes apply promptly."""
-        self._enabled_cache.pop((chat_id, thread_id), None)
+        if thread_id:
+            self._enabled_cache.pop((chat_id, thread_id), None)
+            return
+        # A group-default change must reach every topic that inherited
+        # it — otherwise messages keep archiving for up to the TTL after
+        # the admin was told capture is off.
+        for key in [k for k in self._enabled_cache if k[0] == chat_id]:
+            del self._enabled_cache[key]
 
     async def _enabled(self, chat_id: int, thread_id: int) -> bool:
         key = (chat_id, thread_id)
@@ -72,14 +79,16 @@ class CaptureService:
             return cached[0]
         try:
             profile = await self.store.get(chat_id, thread_id)
-            # Forum topics inherit the group default (thread 0), the same
-            # two-tier resolution the directory applies to pages/repos —
-            # /capture on in General covers every topic.
-            if not (profile and profile.capture_enabled) and thread_id:
-                profile = await self.store.get(chat_id, 0)
+            decision = profile.capture_enabled if profile else None
+            # Forum topics inherit the group default (thread 0) only when
+            # the topic itself never decided: an explicit /capture off in
+            # a topic beats an enabled group, same as any other override.
+            if decision is None and thread_id:
+                group = await self.store.get(chat_id, 0)
+                decision = group.capture_enabled if group else None
         except StorageError:
             return False  # fail closed, and never cache an outage
-        enabled = bool(profile and profile.capture_enabled)
+        enabled = bool(decision)
         self._enabled_cache[key] = (enabled, now + self.cache_ttl)
         return enabled
 

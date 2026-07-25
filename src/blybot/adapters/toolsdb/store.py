@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     repo VARCHAR(140) NULL,
     consent_mode VARCHAR(16) NULL,
     events_enabled TINYINT(1) NOT NULL DEFAULT 0,
-    capture_enabled TINYINT(1) NOT NULL DEFAULT 0,
+    capture_enabled TINYINT(1) NULL DEFAULT NULL,
     rules_json TEXT NULL,
     llm_json TEXT NULL,
     cursors_json TEXT NULL,
@@ -96,7 +96,25 @@ MIGRATE_ADD_RULES: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS rules_
 MIGRATE_ADD_CURSORS: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS cursors_json TEXT NULL"
 MIGRATE_ADD_ACTIONS: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS actions_json TEXT NULL"
 MIGRATE_ADD_CAPTURE: Final = (
-    "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS capture_enabled TINYINT(1) NOT NULL DEFAULT 0"
+    "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS capture_enabled TINYINT(1) NULL DEFAULT NULL"
+)
+# capture_enabled began life NOT NULL DEFAULT 0, which made "never
+# decided" indistinguishable from an explicit /capture off — so a topic
+# could not opt out of an enabled group (nor inherit cleanly). Older
+# tables are converted once: the column becomes nullable and the 0s
+# (all "never decided" — the tri-state shipped with capture itself)
+# become NULL. Guarded by an information_schema check so explicit offs
+# recorded after the conversion are never wiped by a later restart.
+Q_CAPTURE_NULLABLE: Final = """
+SELECT IS_NULLABLE FROM information_schema.COLUMNS
+WHERE table_schema = DATABASE() AND table_name = 'profiles'
+  AND column_name = 'capture_enabled'
+"""
+MIGRATE_CAPTURE_NULLABLE: Final = (
+    "ALTER TABLE profiles MODIFY capture_enabled TINYINT(1) NULL DEFAULT NULL"
+)
+MIGRATE_CAPTURE_UNSET: Final = (
+    "UPDATE profiles SET capture_enabled = NULL WHERE capture_enabled = 0"
 )
 MIGRATE_ADD_LLM: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS llm_json TEXT NULL"
 Q_ACTIONS_READ: Final = f"SELECT actions_json FROM profiles WHERE {_KEY}"  # noqa: S608
@@ -189,6 +207,11 @@ class ToolsDbStore:
         await self._run(MIGRATE_ADD_ACTIONS, ())
         await self._run(MIGRATE_ADD_CAPTURE, ())
         await self._run(MIGRATE_ADD_LLM, ())
+        rows = await self._run(Q_CAPTURE_NULLABLE, ())
+        if rows and rows[0][0] == "NO":
+            await self._run(MIGRATE_CAPTURE_NULLABLE, ())
+            await self._run(MIGRATE_CAPTURE_UNSET, ())
+            log_event("storage_migrated", "ok")
         rows = await self._run(Q_THREAD_IN_PK, ())
         if rows and not int(rows[0][0]):
             await self._run(MIGRATE_REBUILD_PK, ())
@@ -210,7 +233,7 @@ class ToolsDbStore:
                 profile.repo,
                 profile.consent_mode.value if profile.consent_mode else None,
                 int(profile.events_enabled),
-                int(profile.capture_enabled),
+                None if profile.capture_enabled is None else int(profile.capture_enabled),
                 dumps_rules(profile.rules),
                 dumps_llm(profile.llm) if profile.llm is not None else None,
             ),
@@ -328,7 +351,7 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         repo=repo,
         consent_mode=ConsentMode(consent) if consent else None,
         events_enabled=bool(events_enabled),
-        capture_enabled=bool(capture_enabled),
+        capture_enabled=None if capture_enabled is None else bool(capture_enabled),
         rules=loads_rules(rules_json),
         llm=loads_llm(llm_json),
         has_token=bool(has_token),

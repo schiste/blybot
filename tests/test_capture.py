@@ -100,6 +100,38 @@ async def test_ingest_ceiling_throttles_a_flood() -> None:
     assert counters.snapshot()["captures_throttled"] == 2
 
 
+async def test_a_topic_opt_out_beats_the_enabled_group_default() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)  # group default: on
+    await store.upsert(GroupProfile(chat_id=-1, thread_id=7, capture_enabled=False))
+    service, _counters = make_service(store, archive, clock)
+
+    await service.ingest(msg(1, thread_id=7))  # explicitly opted out
+    await service.ingest(msg(2, thread_id=8))  # undecided: inherits on
+
+    assert [m.thread_id for m in archive.messages] == [8]
+
+
+async def test_group_capture_off_reaches_inheriting_topics_promptly() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)
+    service, _counters = make_service(store, archive, clock)
+    await service.ingest(msg(1, thread_id=7))  # topic decision now cached
+
+    await store.upsert(GroupProfile(chat_id=-1, capture_enabled=False))
+    service.forget_scope(-1, 0)  # what /capture off in General does
+
+    await service.ingest(msg(2, thread_id=7))  # cached True must be gone
+    assert [m.thread_id for m in archive.messages] == [7]
+    assert archive.messages[0].message_id == 1
+
+    # A topic-level change busts only that topic's entry.
+    await store.upsert(GroupProfile(chat_id=-1, thread_id=7, capture_enabled=True))
+    service.forget_scope(-1, 7)
+    await service.ingest(msg(3, thread_id=7))
+    assert [m.message_id for m in archive.messages] == [1, 3]
+
+
 async def test_one_busy_topic_never_throttles_its_siblings() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
     await enable(store)  # thread 0 covers every topic via inheritance

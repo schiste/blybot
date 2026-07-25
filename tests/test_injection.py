@@ -113,8 +113,8 @@ async def test_wikitext_smuggled_through_the_model_is_neutralized_per_item() -> 
     report = await make_transform(runner).apply(context(), prompt_step(), hostile_transcript())
     publisher = FakePublisher()
 
-    async def resolve_page(chat_id: int, thread_id: int) -> str:
-        del chat_id, thread_id
+    async def resolve_page(chat_id: int, thread_id: int, override: str | None = None) -> str:
+        del chat_id, thread_id, override
         return "Meta:Configured page"
 
     sink = WikiSectionSink(

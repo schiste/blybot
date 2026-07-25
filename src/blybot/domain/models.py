@@ -189,7 +189,10 @@ class GroupProfile:
     events_enabled: bool = False
     rules: tuple[Rule, ...] = ()
     has_token: bool = False
-    capture_enabled: bool = False
+    # Tri-state: True/False are explicit /capture decisions; None means
+    # "never decided", which lets a forum topic inherit the group default
+    # while an explicit topic-level off still beats an enabled group.
+    capture_enabled: bool | None = None
     llm: LlmSettings | None = None
 
 

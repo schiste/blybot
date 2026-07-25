@@ -18,10 +18,13 @@ from blybot.adapters.toolsdb.store import (
     MIGRATE_ADD_LLM,
     MIGRATE_ADD_RULES,
     MIGRATE_ADD_THREAD,
+    MIGRATE_CAPTURE_NULLABLE,
+    MIGRATE_CAPTURE_UNSET,
     MIGRATE_REBUILD_PK,
     Q_ACTIONS_LIST,
     Q_ACTIONS_READ,
     Q_ACTIONS_WRITE,
+    Q_CAPTURE_NULLABLE,
     Q_DELETE,
     Q_GET,
     Q_GET_CURSORS,
@@ -51,6 +54,7 @@ class FakeToolsDb:
     def __init__(self) -> None:
         self.tables: dict[tuple[int, int], dict[str, Any]] = {}
         self.thread_in_pk = False  # simulates an old (single-key) table
+        self.capture_nullable = False  # simulates the NOT NULL era column
         self.schema_migrated = False
         self.fail = False
         self.schema_created = False
@@ -63,7 +67,7 @@ class FakeToolsDb:
                 "repo": None,
                 "consent_mode": None,
                 "events_enabled": 0,
-                "capture_enabled": 0,
+                "capture_enabled": None,
                 "rules_json": None,
                 "llm_json": None,
                 "token": None,
@@ -104,6 +108,19 @@ class FakeToolsDb:
             ]
         return []  # MIGRATE_ADD_ACTIONS / write: no rows
 
+    def _run_capture_migration(self, query: str) -> list[tuple[Any, ...]]:
+        """The tri-state capture conversion, kept apart like the actions queries."""
+        if query == Q_CAPTURE_NULLABLE:
+            return [("YES" if self.capture_nullable else "NO",)]
+        if query == MIGRATE_CAPTURE_NULLABLE:
+            self.capture_nullable = True
+            self.schema_migrated = True
+            return []
+        for row in self.tables.values():  # MIGRATE_CAPTURE_UNSET
+            if row["capture_enabled"] == 0:
+                row["capture_enabled"] = None
+        return []
+
     def run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         if self.fail:
             msg = "db down"
@@ -115,6 +132,7 @@ class FakeToolsDb:
             if not self.schema_created:  # CREATE IF NOT EXISTS: no-op on old tables
                 self.schema_created = True
                 self.thread_in_pk = True  # a freshly created table has the composite key
+                self.capture_nullable = True  # ...and the nullable tri-state column
             return []
         if query in (
             MIGRATE_ADD_THREAD,
@@ -132,6 +150,8 @@ class FakeToolsDb:
             self.thread_in_pk = True
             self.schema_migrated = True
             return []
+        if query in (Q_CAPTURE_NULLABLE, MIGRATE_CAPTURE_NULLABLE, MIGRATE_CAPTURE_UNSET):
+            return self._run_capture_migration(query)
         if query == Q_MIGRATE_CLEAR:
             (chat_id,) = params
             for key in [k for k in self.tables if k[0] == chat_id]:
@@ -224,6 +244,31 @@ async def test_bootstrap_upgrades_an_old_single_key_table_in_place() -> None:
     fake.thread_in_pk = False  # ...with a single-column primary key
     await store.bootstrap()
     assert fake.schema_migrated  # primary key rebuilt, no data dropped
+
+
+async def test_bootstrap_converts_the_capture_column_to_tri_state_once() -> None:
+    store, fake = make_store()
+    fake.schema_created = True  # a table from the NOT-NULL-DEFAULT-0 era
+    fake.thread_in_pk = True
+    fake._row((-1, 0))["capture_enabled"] = 0  # "never decided" back then
+    fake._row((-2, 0))["capture_enabled"] = 1
+
+    await store.bootstrap()
+
+    assert fake.capture_nullable
+    profile = await store.get(-1, 0)
+    assert profile is not None
+    assert profile.capture_enabled is None  # 0 became "unset", not "off"
+    enabled = await store.get(-2, 0)
+    assert enabled is not None
+    assert enabled.capture_enabled is True
+
+    # Post-conversion, an explicit off survives later restarts.
+    await store.upsert(replace(profile, capture_enabled=False))
+    await store.bootstrap()
+    decided = await store.get(-1, 0)
+    assert decided is not None
+    assert decided.capture_enabled is False
 
 
 async def test_migration_into_an_occupied_destination_replaces_it() -> None:

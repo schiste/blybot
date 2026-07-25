@@ -337,6 +337,24 @@ async def test_disallowed_channel_is_never_enabled() -> None:
     bot.send_message.assert_not_awaited()
 
 
+async def test_demotion_of_a_disallowed_channel_still_revokes_consent() -> None:
+    handlers, store, _archive = make_handlers(allowed={-999})
+    await enable(store, CHANNEL.id)  # enabled back when it was allowed
+    context, bot = tg.make_context()
+
+    await handlers.on_my_chat_member(
+        admin_change(CHANNEL, ChatMemberStatus.MEMBER, old_status=ChatMemberStatus.ADMINISTRATOR),
+        context,
+    )
+
+    # The allowlist gates serving, never revocation: the stale enable
+    # must not survive to resume archiving if the channel is re-allowed.
+    profile = await store.get(CHANNEL.id, 0)
+    assert profile is not None
+    assert profile.capture_enabled is False
+    bot.send_message.assert_not_awaited()
+
+
 async def test_non_admin_capture_command_is_refused() -> None:
     # admin gate coverage for /capture lives with the other admin tests;
     # here: the group-message path skips disallowed groups and tolerates

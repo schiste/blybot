@@ -112,14 +112,16 @@ class CaptureHandlers:
         change = update.my_chat_member
         if change is None or change.chat.type != ChatType.CHANNEL:
             return
-        if not self.groups.is_allowed(change.chat.id):
-            return
         admin = ChatMemberStatus.ADMINISTRATOR
         was_admin = change.old_chat_member.status == admin
         is_admin = change.new_chat_member.status == admin
         if was_admin and not is_admin:
+            # Revocations run regardless of the serving allowlist: consent
+            # ends when admin status does, even for a channel the operator
+            # currently excludes — otherwise a stale durable enable could
+            # resume archiving if the channel is ever re-allowed.
             await self._end_channel_capture(change.chat.id)
-        elif is_admin and not was_admin:
+        elif is_admin and not was_admin and self.groups.is_allowed(change.chat.id):
             await self._begin_channel_capture(change.chat.id, context)
         # admin→admin is a permissions edit; anything else is not ours.
 

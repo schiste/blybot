@@ -27,7 +27,7 @@ from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from telegram import Message, Update
+    from telegram import ChatMemberUpdated, Message, Update
     from telegram.ext import ContextTypes
 
     from blybot.services.capture import CaptureService
@@ -100,14 +100,22 @@ class CaptureHandlers:
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Enable capture and announce it when the bot becomes a channel admin."""
         change = update.my_chat_member
-        if change is None or change.chat.type != ChatType.CHANNEL:
+        if change is None or not _is_channel_promotion(change):
             return
         if not self.groups.is_allowed(change.chat.id):
             return
-        if change.new_chat_member.status != ChatMemberStatus.ADMINISTRATOR:
+        # Read the prior state first: a re-promotion of an already-enabled
+        # channel changes nothing (it was announced when first enabled),
+        # and if the state cannot be read, claim nothing and change
+        # nothing — a failed *redundant* enable write must never produce
+        # a false "not being archived" retraction.
+        try:
+            profile = await self.directory.profile_of(change.chat.id, 0)
+        except StorageError:
+            log_event("capture_enable", "error")
             return
-        if change.old_chat_member.status == ChatMemberStatus.ADMINISTRATOR:
-            return  # a permissions edit, not a promotion: don't re-announce
+        if profile.capture_enabled:
+            return
         # Announce first: loud opt-in is a hard requirement (R-v3.1), so
         # if the channel cannot be told, capture must not start. A
         # demote + re-promote retries the whole sequence.
@@ -135,6 +143,15 @@ class CaptureHandlers:
             return
         self.service.forget_scope(change.chat.id, 0)
         log_event("capture_enable", "ok")
+
+
+def _is_channel_promotion(change: ChatMemberUpdated) -> bool:
+    """A member→admin transition in a channel; a permissions edit is not one."""
+    return (
+        change.chat.type == ChatType.CHANNEL
+        and change.new_chat_member.status == ChatMemberStatus.ADMINISTRATOR
+        and change.old_chat_member.status != ChatMemberStatus.ADMINISTRATOR
+    )
 
 
 def _as_captured(message: Message, thread_id: int, author: str) -> CapturedMessage:

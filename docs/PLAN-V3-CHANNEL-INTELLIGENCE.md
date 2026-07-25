@@ -443,21 +443,25 @@ schema-shaped, sanitized, and in the configured language.
 
 ### 2.8 Full migration of existing features (final phase)
 
-Re-homed as actions, behavior-identical, existing tests as the harness:
+Re-homed as actions, behavior-identical, existing tests as the harness.
+As shipped (component names as registered; DM transcription exempted —
+see below):
 
 | Feature | Trigger | Source | Transforms | Sink |
 |---|---|---|---|---|
-| `/log` | `command:log` | `replied_message` | sanitize → render_entry | `wiki_section` |
-| Repo notifications | `schedule:poll` | `repo_events` (gateway poll + cursors) | `rule_match` → format | `telegram_message` |
-| DM transcription | `command:*dm*` | `dm_session` | sanitize → render_indented | `wiki_section(continue)` |
-| `/bug` feedback | `command:bug` | message text | compose_issue | `issue_tracker` |
+| `/log` | `command:log` | caller-provided payload | `log_publish` | `chat_confirm` |
+| Repo notifications | `schedule:poll` | `repo_events` (gateway poll + cursors) | `rule_match` | `telegram_message` |
+| `/bug` feedback | `command:bug` | caller-provided payload | — | `issue_tracker` |
+| ~~DM transcription~~ | *exempt by design* | | | |
 
-Order within the phase: RepoNotifier first (already trigger→source→
-match→deliver in shape), then `/log`, then DM transcription (session
-registry and burst debounce stay as a service the `dm_session` source
-consumes — the framework does not try to absorb session state), `/bug`
-last. Each migration is its own PR; `notify.py`'s per-scope isolation
-contract becomes the engine's contract.
+Order within the phase was: RepoNotifier first (already trigger→source→
+match→deliver in shape), then `/log`, then `/bug`. **DM transcription
+was deliberately not migrated**, superseding this section's original
+`dm_session` row: its sessions are keyed by private chat ids, which the
+identifier-free `ActionContext` must never carry (R6) — re-homing it
+would weaken the privacy architecture for zero behavior gain, so it
+stays a directly-called service. `notify.py`'s per-scope isolation
+contract became the engine's contract.
 
 ---
 

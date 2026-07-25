@@ -1,0 +1,121 @@
+"""ActionEngine tests: pipeline execution, quiet no-ops, unknown components."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from blybot.domain.models import ActionScope, ActionSpec, OutboundMessage, StepSpec
+from blybot.domain.ports import ActionError
+from blybot.observability import Counters
+from blybot.services.actions import parse_action
+from blybot.services.engine import ActionEngine
+from tests.fakes import FakeSink, FakeSource, SuffixTransform
+
+NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
+SCOPE = ActionScope(chat_id=-1)
+
+
+def make_engine(
+    source: FakeSource | None = None,
+    transform: SuffixTransform | None = None,
+    sink: FakeSink | None = None,
+) -> tuple[ActionEngine, Counters]:
+    counters = Counters()
+    engine = ActionEngine(
+        sources={"archive_window": source or FakeSource(payload="hello")},
+        transforms={"prompt": transform or SuffixTransform(), "stats": SuffixTransform(tag="+s")},
+        sinks={"wiki_section": sink or FakeSink()},
+        counters=counters,
+    )
+    return engine, counters
+
+
+def spec_for(text: str = "daily@06:00 summarize") -> ActionSpec:
+    return parse_action(text, now_iso=NOW.isoformat())
+
+
+async def test_engine_threads_payload_through_the_chain_to_the_sink() -> None:
+    sink = FakeSink(messages=(OutboundMessage(chat_id=-1, thread_id=0, text="done"),))
+    transform = SuffixTransform()
+    engine, counters = make_engine(transform=transform, sink=sink)
+
+    messages = await engine.run(SCOPE, spec_for("daily@06:00 summarize model=large"), NOW)
+
+    assert messages == sink.messages
+    ((step, payload),) = transform.applied
+    assert payload == "hello"
+    assert step.param("model") == "large"  # each occurrence sees its own params
+    ((context, delivered),) = sink.delivered
+    assert delivered == "hello+t"
+    assert context.scope == SCOPE
+    assert context.now == NOW
+    assert counters.snapshot()["actions_run"] == 1
+
+
+async def test_empty_source_ends_the_run_quietly() -> None:
+    sink = FakeSink()
+    engine, counters = make_engine(source=FakeSource(payload=None), sink=sink)
+
+    assert await engine.run(SCOPE, spec_for(), NOW) == ()
+    assert sink.delivered == []
+    assert counters.snapshot() == {"actions_empty": 1}
+
+
+async def test_dropping_transform_ends_the_run_quietly() -> None:
+    sink = FakeSink()
+    engine, counters = make_engine(transform=SuffixTransform(drop=True), sink=sink)
+
+    assert await engine.run(SCOPE, spec_for(), NOW) == ()
+    assert sink.delivered == []
+    assert counters.snapshot() == {"actions_empty": 1}
+
+
+async def test_unknown_source_raises_a_named_action_error() -> None:
+    engine = ActionEngine(sources={}, transforms={}, sinks={}, counters=Counters())
+    with pytest.raises(ActionError, match="unknown source 'archive_window'"):
+        await engine.run(SCOPE, spec_for(), NOW)
+
+
+async def test_unknown_transform_and_sink_name_the_missing_component() -> None:
+    source = FakeSource(payload="hello")
+    engine = ActionEngine(
+        sources={"archive_window": source},
+        transforms={},
+        sinks={},
+        counters=Counters(),
+    )
+    with pytest.raises(ActionError, match="unknown transform 'prompt'"):
+        await engine.run(SCOPE, spec_for(), NOW)
+    assert source.fetched == []  # still resolved eagerly, no I/O happened
+
+    engine = ActionEngine(
+        sources={"archive_window": source},
+        transforms={"prompt": SuffixTransform()},
+        sinks={},
+        counters=Counters(),
+    )
+    with pytest.raises(ActionError, match="unknown sink 'wiki_section'"):
+        await engine.run(SCOPE, spec_for(), NOW)
+    assert source.fetched == []
+
+
+async def test_chain_order_is_the_spec_order() -> None:
+    spec = ActionSpec(
+        action_id="ab12",
+        trigger=spec_for().trigger,
+        source=StepSpec(name="archive_window"),
+        transforms=(
+            StepSpec(name="prompt", params=(("tag", "+1"),)),
+            StepSpec(name="prompt", params=(("tag", "+2"),)),
+        ),
+        sink=StepSpec(name="wiki_section"),
+    )
+    sink = FakeSink()
+    engine, _counters = make_engine(sink=sink)
+
+    await engine.run(SCOPE, spec, NOW)
+
+    ((_context, delivered),) = sink.delivered
+    assert delivered == "hello+1+2"

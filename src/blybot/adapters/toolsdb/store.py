@@ -20,13 +20,16 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import pymysql
 from cryptography.fernet import Fernet, InvalidToken
 
-from blybot.domain.models import ConsentMode, GroupProfile
+from blybot.domain.models import ActionScope, ConsentMode, GroupProfile
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
+from blybot.services.actions import dumps_actions, loads_actions
 from blybot.services.rules import dumps_rules, loads_rules
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from blybot.domain.models import ActionSpec
 
 SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS profiles (
@@ -85,6 +88,17 @@ MIGRATE_REBUILD_PK: Final = (
 # left in place on old tables — unused and harmless.)
 MIGRATE_ADD_RULES: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS rules_json TEXT NULL"
 MIGRATE_ADD_CURSORS: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS cursors_json TEXT NULL"
+MIGRATE_ADD_ACTIONS: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS actions_json TEXT NULL"
+Q_ACTIONS_READ: Final = f"SELECT actions_json FROM profiles WHERE {_KEY}"  # noqa: S608
+Q_ACTIONS_WRITE: Final = """
+INSERT INTO profiles (chat_id, thread_id, actions_json) VALUES (%s, %s, %s)
+ON DUPLICATE KEY UPDATE actions_json = VALUES(actions_json)
+"""
+# Scopes with an empty stored list ("[]") have no actions to schedule.
+Q_ACTIONS_LIST: Final = (
+    "SELECT chat_id, thread_id, actions_json FROM profiles "
+    "WHERE actions_json IS NOT NULL AND actions_json != '[]'"
+)
 Q_THREAD_IN_PK: Final = """
 SELECT COUNT(*) FROM information_schema.STATISTICS
 WHERE table_schema = DATABASE() AND table_name = 'profiles'
@@ -144,7 +158,7 @@ class PymysqlRunner:
 
 
 class ToolsDbStore:
-    """ProfileStore + TokenVault backed by one ToolsDB table."""
+    """ProfileStore + TokenVault + ActionStore backed by one ToolsDB table."""
 
     def __init__(self, runner: SqlRunner, fernet_key: str) -> None:
         self._runner = runner
@@ -162,6 +176,7 @@ class ToolsDbStore:
         await self._run(MIGRATE_ADD_THREAD, ())
         await self._run(MIGRATE_ADD_RULES, ())
         await self._run(MIGRATE_ADD_CURSORS, ())
+        await self._run(MIGRATE_ADD_ACTIONS, ())
         rows = await self._run(Q_THREAD_IN_PK, ())
         if rows and not int(rows[0][0]):
             await self._run(MIGRATE_REBUILD_PK, ())
@@ -245,6 +260,25 @@ class ToolsDbStore:
     async def delete_token(self, chat_id: int, thread_id: int) -> None:
         """Discard the (group, topic) token."""
         await self._run(Q_VAULT_CLEAR, (chat_id, thread_id))
+
+    async def get_actions(self, chat_id: int, thread_id: int) -> tuple[ActionSpec, ...]:
+        """Return the (group, topic) actions, empty when none are configured."""
+        rows = await self._run(Q_ACTIONS_READ, (chat_id, thread_id))
+        return loads_actions(rows[0][0] if rows else None)
+
+    async def set_actions(
+        self, chat_id: int, thread_id: int, actions: tuple[ActionSpec, ...]
+    ) -> None:
+        """Replace the (group, topic) actions (state included) wholesale."""
+        await self._run(Q_ACTIONS_WRITE, (chat_id, thread_id, dumps_actions(actions)))
+
+    async def list_scheduled(self) -> list[tuple[ActionScope, tuple[ActionSpec, ...]]]:
+        """Return every scope that has at least one action configured."""
+        rows = await self._run(Q_ACTIONS_LIST, ())
+        return [
+            (ActionScope(chat_id=int(row[0]), thread_id=int(row[1])), loads_actions(row[2]))
+            for row in rows
+        ]
 
     async def _run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         try:

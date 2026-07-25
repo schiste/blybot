@@ -5,7 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import GroupProfile, Pseudonym, RepoEvent, RepoSummary, Resource
+from blybot.domain.models import (
+    ActionContext,
+    ActionScope,
+    ActionSpec,
+    GroupProfile,
+    OutboundMessage,
+    Pseudonym,
+    RepoEvent,
+    RepoSummary,
+    Resource,
+    StepSpec,
+)
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 
 
@@ -257,3 +268,81 @@ class FakeRepoGateway:
             return [], next_cursor
         wanted = [event for event in self.events if event.event_type.resource is resource]
         return wanted, next_cursor
+
+
+@dataclass
+class FakeSource:
+    """Source fake: returns a scripted payload, records each fetch."""
+
+    payload: object | None = None
+    fetched: list[ActionContext] = field(default_factory=list)
+
+    async def fetch(self, context: ActionContext) -> object | None:
+        self.fetched.append(context)
+        return self.payload
+
+
+@dataclass
+class SuffixTransform:
+    """Transform fake: appends its tag (or a step param) to a str payload."""
+
+    tag: str = "+t"
+    drop: bool = False  # simulate "nothing left to do"
+    fail: bool = False
+    applied: list[tuple[StepSpec, object]] = field(default_factory=list)
+
+    async def apply(self, context: ActionContext, step: StepSpec, payload: object) -> object | None:
+        del context
+        if self.fail:
+            msg = "transform exploded"
+            raise RuntimeError(msg)
+        self.applied.append((step, payload))
+        if self.drop:
+            return None
+        return f"{payload}{step.param('tag', self.tag)}"
+
+
+@dataclass
+class FakeSink:
+    """Sink fake: records deliveries, answers with scripted messages."""
+
+    messages: tuple[OutboundMessage, ...] = ()
+    fail: bool = False
+    delivered: list[tuple[ActionContext, object]] = field(default_factory=list)
+
+    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+        if self.fail:
+            msg = "sink exploded"
+            raise RuntimeError(msg)
+        self.delivered.append((context, payload))
+        return self.messages
+
+
+@dataclass
+class InMemoryActions:
+    """ActionStore fake keyed by (chat_id, thread_id)."""
+
+    actions: dict[tuple[int, int], tuple[ActionSpec, ...]] = field(default_factory=dict)
+    fail: bool = False
+    fail_writes_for: set[tuple[int, int]] = field(default_factory=set)
+
+    async def get_actions(self, chat_id: int, thread_id: int) -> tuple[ActionSpec, ...]:
+        if self.fail:
+            raise StorageError
+        return self.actions.get((chat_id, thread_id), ())
+
+    async def set_actions(
+        self, chat_id: int, thread_id: int, actions: tuple[ActionSpec, ...]
+    ) -> None:
+        if self.fail or (chat_id, thread_id) in self.fail_writes_for:
+            raise StorageError
+        self.actions[chat_id, thread_id] = actions
+
+    async def list_scheduled(self) -> list[tuple[ActionScope, tuple[ActionSpec, ...]]]:
+        if self.fail:
+            raise StorageError
+        return [
+            (ActionScope(chat_id=chat_id, thread_id=thread_id), specs)
+            for (chat_id, thread_id), specs in self.actions.items()
+            if specs
+        ]

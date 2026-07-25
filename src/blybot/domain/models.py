@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
+from typing import Final
 
 
 class TimestampGranularity(Enum):
@@ -236,6 +237,161 @@ class RepoSummary:
     repo: str
     open_count: int
     recent_titles: tuple[str, ...]
+
+
+WEEKDAY_TOKENS: Final = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+_HOURS_PER_DAY: Final = 24
+_MINUTES_PER_HOUR: Final = 60
+_DAYS_PER_WEEK: Final = 7
+
+
+class TriggerKind(Enum):
+    """How an action starts: an explicit chat command or the schedule tick."""
+
+    COMMAND = "command"
+    SCHEDULE = "schedule"
+
+
+@dataclass(frozen=True, slots=True)
+class Schedule:
+    """When a scheduled action is due. Pure aware-UTC math, no I/O.
+
+    The three kinds mirror the ``/action`` grammar: ``every:<N>h``,
+    ``daily@HH:MM``, and ``weekly@<dow>.HH:MM``. ``weekday`` follows
+    :meth:`datetime.date.weekday` (0 = Monday).
+    """
+
+    kind: str  # "every" | "daily" | "weekly"
+    interval_hours: int = 0
+    hour: int = 0
+    minute: int = 0
+    weekday: int = 0
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"every", "daily", "weekly"}:
+            msg = f"unknown schedule kind: {self.kind!r}"
+            raise ValueError(msg)
+        if self.kind == "every" and self.interval_hours <= 0:
+            msg = "every-schedules need a positive hour interval"
+            raise ValueError(msg)
+        if not (0 <= self.hour < _HOURS_PER_DAY and 0 <= self.minute < _MINUTES_PER_HOUR):
+            msg = "schedule time must be a valid HH:MM"
+            raise ValueError(msg)
+        if not 0 <= self.weekday < _DAYS_PER_WEEK:
+            msg = "schedule weekday must be 0 (mon) through 6 (sun)"
+            raise ValueError(msg)
+
+    @property
+    def token(self) -> str:
+        """The grammar token this schedule round-trips to."""
+        if self.kind == "every":
+            return f"every:{self.interval_hours}h"
+        if self.kind == "daily":
+            return f"daily@{self.hour:02d}:{self.minute:02d}"
+        return f"weekly@{WEEKDAY_TOKENS[self.weekday]}.{self.hour:02d}:{self.minute:02d}"
+
+    def is_due(self, now: datetime, last_run: datetime) -> bool:
+        """Whether a run is owed at ``now`` given the previous ``last_run``.
+
+        ``every`` measures elapsed time; ``daily``/``weekly`` fire once
+        per slot — due when the most recent slot falls after the last
+        run. A missed slot (downtime) is made up exactly once, never
+        replayed per-slot.
+        """
+        if self.kind == "every":
+            return now - last_run >= timedelta(hours=self.interval_hours)
+        return last_run < self._latest_slot(now) <= now
+
+    def _latest_slot(self, now: datetime) -> datetime:
+        candidate = now.replace(hour=self.hour, minute=self.minute, second=0, microsecond=0)
+        if self.kind == "daily":
+            return candidate if candidate <= now else candidate - timedelta(days=1)
+        candidate -= timedelta(days=(now.weekday() - self.weekday) % _DAYS_PER_WEEK)
+        return candidate if candidate <= now else candidate - timedelta(days=_DAYS_PER_WEEK)
+
+
+@dataclass(frozen=True, slots=True)
+class TriggerSpec:
+    """What starts an action: a command name or a :class:`Schedule`."""
+
+    kind: TriggerKind
+    command: str = ""
+    schedule: Schedule | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind is TriggerKind.COMMAND and not self.command:
+            msg = "command triggers need a command name"
+            raise ValueError(msg)
+        if self.kind is TriggerKind.SCHEDULE and self.schedule is None:
+            msg = "schedule triggers need a schedule"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class StepSpec:
+    """One named pipeline step (source, transform, or sink) plus its params.
+
+    ``params`` is an ordered tuple of ``(key, value)`` pairs so the spec
+    stays hashable and round-trips deterministically.
+    """
+
+    name: str
+    params: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            msg = "StepSpec name must be non-empty"
+            raise ValueError(msg)
+
+    def param(self, key: str, default: str = "") -> str:
+        """Return the value of ``key``, or ``default`` when unset."""
+        for name, value in self.params:
+            if name == key:
+                return value
+        return default
+
+
+@dataclass(frozen=True, slots=True)
+class ActionSpec:
+    """A reusable pipeline an admin configured: trigger → source → transforms → sink.
+
+    ``last_run`` is per-action scheduler state (stamped in UTC); it
+    travels with the spec so a scope's actions persist as one document.
+    """
+
+    action_id: str
+    trigger: TriggerSpec
+    source: StepSpec
+    transforms: tuple[StepSpec, ...] = ()
+    sink: StepSpec = field(default_factory=lambda: StepSpec(name="telegram_reply"))
+    last_run: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActionScope:
+    """The (group, topic) a pipeline runs for — group structure only, never a user."""
+
+    chat_id: int
+    thread_id: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ActionContext:
+    """Everything a pipeline step may know about the run it is part of."""
+
+    scope: ActionScope
+    spec: ActionSpec
+    now: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class OutboundMessage:
+    """One chat message a pipeline asks the transport layer to send."""
+
+    chat_id: int
+    thread_id: int
+    text: str
 
 
 @dataclass(frozen=True, slots=True)

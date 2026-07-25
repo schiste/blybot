@@ -49,8 +49,9 @@ the Qwen models hosted on Wikimedia LiftWing, and publishes the results
 piling up one-off features, v3 first factors the bot's behavior into a
 small set of reusable **actions** — `trigger → source → transforms → sink`
 — and then expresses both the new analyses and the existing features
-(`/log`, DM transcription, repo notifications) as compositions of those
-parts.
+(`/log`, `/bug`, repo notifications) as compositions of those parts.
+(DM transcription was originally in this list; as shipped it is exempt
+by design — see §2.8.)
 
 Product decisions already made (owner: operator):
 
@@ -59,7 +60,7 @@ Product decisions already made (owner: operator):
 | Capture scope | Broadcast channels **and** opted-in groups, from day one |
 | Retention | Full archive (no automatic expiry) |
 | Analysis triggering | Scheduled digests **and** on-demand admin commands |
-| Refactor depth | Full migration — existing features re-homed onto the action framework |
+| Refactor depth | Full migration — existing features re-homed onto the action framework (as shipped: all but DM transcription, exempted for R6 — §2.8) |
 
 ---
 
@@ -593,9 +594,10 @@ unattended daily/weekly intelligence pages.
 - *Docs:* ACTIONS.md scheduling section with worked examples; OPERATIONS:
   tick tuning, what to check when a digest didn't appear.
 
-**Phase 5 — full migration.** RepoNotifier → `/log` → DM transcription →
-`/bug`, one PR each, behavior-identical, then delete the superseded
-service wiring.
+**Phase 5 — full migration.** RepoNotifier → `/log` → `/bug`,
+behavior-identical, then delete the superseded service wiring. (As
+originally planned this list included DM transcription; as shipped it is
+exempt by design — R6, see §2.8 — and stays a directly-called service.)
 
 *Implementation note (post-Phase-4):* the first slice shipped — both
 background producers now speak `OutboundMessage` through one

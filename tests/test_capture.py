@@ -132,6 +132,48 @@ async def test_group_capture_off_reaches_inheriting_topics_promptly() -> None:
     assert [m.message_id for m in archive.messages] == [1, 3]
 
 
+async def test_denied_scope_never_archives_and_converges_the_disable() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)  # durable True that a failed revocation left behind
+    service, _counters = make_service(store, archive, clock)
+
+    store.fail = True  # the outage during which consent was revoked
+    service.deny_scope(-1, 0)
+    await service.ingest(msg(1))  # storage still down: denied, retry fails
+    store.fail = False
+    await service.ingest(msg(2))  # storage back: still denied, disable lands
+
+    assert archive.messages == []  # nothing archived at any point
+    profile = await store.get(-1, 0)
+    assert profile is not None
+    assert profile.capture_enabled is False  # the retry made it durable
+    await service.ingest(msg(3))  # tombstone gone; durable state now rules
+    assert archive.messages == []
+
+
+async def test_clear_denial_restores_normal_policy_reads() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)
+    service, _counters = make_service(store, archive, clock)
+    service.deny_scope(-1, 0)
+
+    service.clear_denial(-1, 0)  # e.g. a fresh announced enable landed
+
+    await service.ingest(msg(1))
+    assert len(archive.messages) == 1
+
+
+async def test_retry_disable_with_no_stale_row_just_lifts_the_denial() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    service, _counters = make_service(store, archive, clock)
+    service.deny_scope(-99, 0)  # no profile row exists for this scope
+
+    await service.ingest(msg(1, chat_id=-99))  # nothing to disable: converged
+    await service.ingest(msg(2, chat_id=-99))  # denial lifted; policy says off
+
+    assert archive.messages == []
+
+
 async def test_one_busy_topic_never_throttles_its_siblings() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
     await enable(store)  # thread 0 covers every topic via inheritance

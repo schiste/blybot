@@ -143,8 +143,14 @@ section before enabling.**
    permanently); channels enable by making the bot a channel admin (it
    posts an announcement first — if it cannot post, capture does not
    start) and disable by demoting or removing it. Re-promoting the bot
-   re-announces: a fresh loud opt-in, never a silent resumption. In
-   groups `/capture off` stops; `/capture purge`
+   re-announces: a fresh loud opt-in, never a silent resumption. A
+   demotion during a ToolsDB outage is held fail-closed in memory and
+   made durable at the next opportunity; the one accepted residual is a
+   bot *restart during that same outage*, which can lose the pending
+   revocation (a revocation cannot be durably recorded while the
+   durable store is down) — after any outage-plus-restart incident,
+   check `capture_enabled` rows against current channel admin status.
+   In groups `/capture off` stops; `/capture purge`
    erases (`/capture purge before:YYYY-MM-DD` trims only older rows).
    Set `CAPTURE_REANNOUNCE_DAYS` to re-post the announcement on a
    cadence. Note: the archive keeps the first version of each message —

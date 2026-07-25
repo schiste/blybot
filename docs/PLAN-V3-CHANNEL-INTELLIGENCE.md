@@ -1,6 +1,13 @@
 # Plan v3: Channel intelligence on an action framework
 
-**Status: draft for review — nothing in this document is implemented yet.**
+**Status: Phases 1–4 shipped** (framework core, capture, LiftWing
+analyses with per-scope `/llm`, `/action` scheduling), plus the Phase 5
+delivery unification (one `MessageCollector` loop serves the repo
+notifier and the action scheduler). Remaining: the Phase 0 governance
+items (community announcement, on-wiki norms sign-off, Toolforge-tier
+latency measurement), the rest of Phase 5 (re-homing `/log`, DM
+transcription, and `/bug` onto the framework — see the note in §4), and
+the Phase 6 pre-deploy audit.
 
 Blybot v3 turns the bot from a *marked-message logger* into a *channel
 intelligence platform*: it passively archives the content of Telegram
@@ -553,6 +560,17 @@ unattended daily/weekly intelligence pages.
 **Phase 5 — full migration.** RepoNotifier → `/log` → DM transcription →
 `/bug`, one PR each, behavior-identical, then delete the superseded
 service wiring.
+
+*Implementation note (post-Phase-4):* the first slice shipped — both
+background producers now speak `OutboundMessage` through one
+`MessageCollector` delivery loop. Two findings for the remaining
+re-homes: (a) the notifier's configuration lives in `rules_json` with
+its own `/rule` UX, so a full ActionSpec re-home implies a stored-data
+migration and command rework, not just code movement — plan that as its
+own change with a data-migration step; (b) the interactive flows need
+the engine to accept a caller-provided initial payload (media bytes
+cannot ride in StepSpec string params) — extend `ActionEngine.run` with
+an optional `payload=` before starting the `/log` re-home.
 - *Tests:* the *existing* suites (`test_notify.py`, `test_publish_service.py`,
   `test_transcribe.py`, `test_feedback.py`, handler tests) are the
   acceptance harness — they must pass unmodified against the re-homed

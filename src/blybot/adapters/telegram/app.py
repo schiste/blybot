@@ -17,13 +17,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters
 
 from blybot.adapters.telegram._common import send_threaded
+from blybot.domain.models import OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
@@ -106,11 +107,11 @@ class Lifecycle:
         self._maintenance_task = loop.create_task(self.maintenance.run_forever())
         if self.notifier is not None:
             self._notify_task = loop.create_task(
-                repo_notify_loop(app.bot, self.notifier, self.poll_interval_seconds)
+                message_loop(app.bot, self.notifier, self.poll_interval_seconds, "repo_poll")
             )
         if self.scheduler is not None:
             self._actions_task = loop.create_task(
-                action_tick_loop(app.bot, self.scheduler, self.poll_interval_seconds)
+                message_loop(app.bot, self.scheduler, self.poll_interval_seconds, "action_tick")
             )
         log_event("startup", "ok")
 
@@ -130,40 +131,36 @@ class Lifecycle:
         log_event("shutdown", "ok")
 
 
-async def repo_notify_loop(bot: Bot, notifier: RepoNotifier, interval_seconds: float) -> None:
-    """Poll bound repositories and deliver digests until cancelled."""
+class MessageCollector(Protocol):
+    """Anything the background tick can poll for outbound chat messages.
+
+    Both the repo notifier and the action scheduler implement this —
+    one delivery loop serves every collector (v3 phase 5 unification).
+    """
+
+    async def collect(self) -> list[OutboundMessage]:
+        """Return this cycle's messages; called once per tick."""
+        ...
+
+
+async def message_loop(
+    bot: Bot, collector: MessageCollector, interval_seconds: float, label: str
+) -> None:
+    """Poll ``collector`` and deliver its messages until cancelled."""
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            digests = await notifier.collect()
+            messages = await collector.collect()
         except Exception:
-            log_event("repo_poll", "error")
-            continue
-        for chat_id, thread_id, digest in digests:
-            try:
-                await send_threaded(bot, chat_id, thread_id, digest)
-            except TelegramError:
-                # Kicked from the group, muted, etc. — that group's
-                # digest is lost, everyone else's still goes out.
-                log_event("repo_digest", "ignored")
-
-
-async def action_tick_loop(bot: Bot, scheduler: ActionScheduler, interval_seconds: float) -> None:
-    """Run due scheduled actions and deliver their messages until cancelled."""
-    while True:
-        await asyncio.sleep(interval_seconds)
-        try:
-            messages = await scheduler.collect()
-        except Exception:
-            log_event("action_tick", "error")
+            log_event(label, "error")
             continue
         for message in messages:
             try:
                 await send_threaded(bot, message.chat_id, message.thread_id, message.text)
             except TelegramError:
-                # Kicked, muted, etc. — this scope's confirmation is
-                # lost; every other scope's still goes out.
-                log_event("action_delivery", "ignored")
+                # Kicked from the group, muted, etc. — that scope's
+                # message is lost, every other scope's still goes out.
+                log_event(f"{label}_delivery", "ignored")
 
 
 def build_application(  # noqa: PLR0913 -- one handler bundle per concern

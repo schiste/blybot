@@ -13,7 +13,12 @@ from telegram.error import TelegramError
 
 from blybot.adapters.telegram import handlers as h
 from blybot.adapters.telegram._common import thread_of
-from blybot.domain.models import ConsentMode, GroupProfile, TimestampGranularity
+from blybot.domain.models import (
+    CapturedMessage,
+    ConsentMode,
+    GroupProfile,
+    TimestampGranularity,
+)
 from blybot.observability import Counters
 from blybot.services.directory import ChannelDirectory
 from blybot.services.engine import ActionEngine
@@ -30,6 +35,7 @@ from tests.fakes import (
     FakeClock,
     FakePublisher,
     FakeRepoGateway,
+    InMemoryArchive,
     InMemoryProfiles,
     PassthroughSanitizer,
     SequentialPseudonyms,
@@ -55,6 +61,7 @@ def make_handlers(
     gateway: FakeRepoGateway | None = None,
     with_repo_service: bool = True,
     configure_page: bool = True,
+    archive: InMemoryArchive | None = None,
 ) -> tuple[h.GroupHandlers, FakePublisher | FailingPublisher, GroupPolicy]:
     publisher = publisher if publisher is not None else FakePublisher()
     policy = GroupPolicy(allowed=allowed if allowed is not None else set())
@@ -106,6 +113,7 @@ def make_handlers(
             if with_repo_service
             else None
         ),
+        archive=archive,
         cleanup_delay_seconds=cleanup_delay_seconds,
         reply_cleanup_delay_seconds=reply_cleanup_delay_seconds,
     )
@@ -761,6 +769,34 @@ async def test_migration_storage_failure_is_logged_not_raised() -> None:
     store = InMemoryProfiles()
     handlers, _, _ = make_handlers(store=store)
     store.fail = True
+    context, _ = tg.make_context()
+    service_message = tg.message(text=None, migrate_to_chat_id=-100999)
+    await handlers.on_migration(tg.command_update(service_message), context)  # no raise
+
+
+async def test_migration_carries_the_captured_archive() -> None:
+    archive = InMemoryArchive(
+        messages=[
+            CapturedMessage(
+                chat_id=tg.GROUP.id,
+                thread_id=7,
+                message_id=1,
+                posted_at=FakeClock().now(),
+                author="abc123",
+                text="hi",
+            )
+        ]
+    )
+    handlers, _, _ = make_handlers(archive=archive)
+    context, _ = tg.make_context()
+    service_message = tg.message(text=None, migrate_to_chat_id=-100999)
+    await handlers.on_migration(tg.command_update(service_message), context)
+    # Every topic's messages follow the group to its new chat id.
+    assert [(m.chat_id, m.thread_id) for m in archive.messages] == [(-100999, 7)]
+
+
+async def test_migration_archive_failure_is_logged_not_raised() -> None:
+    handlers, _, _ = make_handlers(archive=InMemoryArchive(fail=True))
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)  # no raise

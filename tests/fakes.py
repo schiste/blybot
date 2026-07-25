@@ -400,6 +400,15 @@ class InMemoryArchive:
             raise StorageError
         return len(self.messages)
 
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        if self.fail:
+            raise StorageError
+        self.messages = [
+            replace(m, chat_id=new_chat_id) if m.chat_id == old_chat_id else m
+            for m in self.messages
+            if m.chat_id != new_chat_id  # new id wins, like the adapter's clear
+        ]
+
 
 @dataclass
 class FakePromptRunner:

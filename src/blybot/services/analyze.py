@@ -167,6 +167,11 @@ class PromptTransform:
         if self.store is not None:
             try:
                 profile = await self.store.get(context.scope.chat_id, context.scope.thread_id)
+                # Topic override → group default → operator default: a forum
+                # topic without its own /llm settings inherits thread 0's,
+                # the same two-tier resolution pages and capture follow.
+                if (profile is None or profile.llm is None) and context.scope.thread_id:
+                    profile = await self.store.get(context.scope.chat_id, 0)
             except StorageError:
                 profile = None  # analyses still run on deployment defaults
             if profile is not None and profile.llm is not None:

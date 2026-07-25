@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from datetime import timedelta
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
 
-from blybot.domain.models import OutboundMessage, TriggerKind
+from blybot.domain.models import ActionContext, OutboundMessage, TriggerKind
 from blybot.observability import Counters
 from blybot.services.actions import parse_action
 from blybot.services.engine import ActionEngine
@@ -163,3 +163,57 @@ async def test_scope_overflow_is_truncated_per_tick() -> None:
     scheduler, _counters = make_scheduler(store, clock, max_scopes=1)
 
     assert await scheduler.collect() == [REPLY]
+
+
+@dataclass
+class StampProbeSink:
+    """Sink that records the *persisted* last_run at delivery time."""
+
+    store: InMemoryActions
+    stamped: list[datetime | None] = field(default_factory=list)
+
+    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+        del context, payload
+        (stored,) = self.store.actions[-1, 0]
+        self.stamped.append(stored.last_run)
+        return (REPLY,)
+
+
+async def test_watermark_is_persisted_before_the_pipeline_runs() -> None:
+    """A publish followed by a crash must read as "already ran": the
+    stamp reaches storage before the pipeline can touch the wiki, so a
+    restart skips the slot instead of duplicating the section."""
+    store, clock = InMemoryActions(), FakeClock()
+    await seed(store, clock)
+    clock.advance(timedelta(hours=6))
+    probe = StampProbeSink(store=store)
+    counters = Counters()
+    engine = ActionEngine(
+        sources={"archive_window": FakeSource(payload="hello")},
+        transforms={"prompt": SuffixTransform()},
+        sinks={"wiki_section": probe},
+        counters=counters,
+        clock=clock,
+    )
+    scheduler = ActionScheduler(
+        store=store,
+        engine=engine,
+        groups=GroupPolicy(allowed=set()),
+        clock=clock,
+        counters=counters,
+    )
+
+    assert await scheduler.collect() == [REPLY]
+    assert probe.stamped == [clock.now()]  # already durable when the sink ran
+
+
+async def test_failed_stamp_write_skips_the_runs_rather_than_risk_duplicates() -> None:
+    store, clock = InMemoryActions(), FakeClock()
+    await seed(store, clock)
+    clock.advance(timedelta(hours=6))
+    store.fail_writes_for = {(-1, 0)}
+    sink = FakeSink(messages=(REPLY,))
+    scheduler, _counters = make_scheduler(store, clock, sink=sink)
+
+    assert await scheduler.collect() == []
+    assert sink.delivered == []  # nothing published without a durable stamp

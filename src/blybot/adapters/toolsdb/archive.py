@@ -56,6 +56,12 @@ Q_PURGE_BEFORE: Final = f"DELETE FROM messages WHERE {_KEY} AND posted_at < %s" 
 Q_COUNT: Final = f"SELECT COUNT(*) FROM messages WHERE {_KEY}"  # noqa: S608
 Q_COUNT_BEFORE: Final = f"SELECT COUNT(*) FROM messages WHERE {_KEY} AND posted_at < %s"  # noqa: S608
 Q_TOTAL: Final = "SELECT COUNT(*) FROM messages"
+# Same shape as the profile store's migration: clear anything already
+# recorded under the new id (a race can capture there first), then
+# re-key. The old id never resolves again, so orphans must not exist —
+# they would be invisible to analyses and unreachable by /capture purge.
+Q_MIGRATE_CLEAR: Final = "DELETE FROM messages WHERE chat_id = %s"
+Q_MIGRATE: Final = "UPDATE messages SET chat_id = %s WHERE chat_id = %s"
 
 
 class ToolsDbArchive:
@@ -116,6 +122,11 @@ class ToolsDbArchive:
         """Return the archive's total row count (operator metric)."""
         rows = await self._run(Q_TOTAL, ())
         return int(rows[0][0]) if rows else 0
+
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        """Re-key every topic's messages after a group→supergroup upgrade."""
+        await self._run(Q_MIGRATE_CLEAR, (new_chat_id,))
+        await self._run(Q_MIGRATE, (new_chat_id, old_chat_id))
 
     async def _run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         try:

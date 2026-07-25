@@ -216,6 +216,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         repo_service=(
             GroupRepoService(gateway=gateway, vault=store, directory=directory) if store else None
         ),
+        archive=archive,
         cleanup_delay_seconds=config.log_cleanup_seconds,
         reply_cleanup_delay_seconds=config.reply_cleanup_seconds,
     )

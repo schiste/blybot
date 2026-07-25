@@ -41,9 +41,18 @@ class CaptureService:
     _enabled_cache: dict[tuple[int, int], tuple[bool, datetime]] = field(
         default_factory=dict, init=False
     )
+    # Fail-closed tombstones: scopes whose consent was revoked but whose
+    # durable disable write failed (e.g. a channel demotion during a
+    # ToolsDB outage). A denied scope is never archived, and each of its
+    # messages retries the durable disable until one lands.
+    _denied: set[tuple[int, int]] = field(default_factory=set, init=False)
 
     async def ingest(self, message: CapturedMessage) -> None:
         """Archive ``message`` iff its scope opted in; never raises."""
+        key = (message.chat_id, message.thread_id)
+        if key in self._denied:
+            await self._retry_disable(key)
+            return  # a denied scope is never archived, converged or not
         if not await self._enabled(message.chat_id, message.thread_id):
             return
         # Throttle per (chat, topic) — the documented per-scope ceiling.
@@ -70,6 +79,33 @@ class CaptureService:
         # the admin was told capture is off.
         for key in [k for k in self._enabled_cache if k[0] == chat_id]:
             del self._enabled_cache[key]
+
+    def deny_scope(self, chat_id: int, thread_id: int) -> None:
+        """Force the scope off in memory until a durable disable lands.
+
+        For consent revocations whose storage write failed: the stale
+        durable ``True`` must not resume archiving when storage recovers,
+        so the scope is tombstoned and every subsequent message retries
+        the disable instead of being stored.
+        """
+        self._denied.add((chat_id, thread_id))
+        self.forget_scope(chat_id, thread_id)
+
+    def clear_denial(self, chat_id: int, thread_id: int) -> None:
+        """Lift a tombstone after a durable, verified state transition."""
+        self._denied.discard((chat_id, thread_id))
+        self.forget_scope(chat_id, thread_id)
+
+    async def _retry_disable(self, key: tuple[int, int]) -> None:
+        """Try to make a denied scope's disable durable; keep denying on failure."""
+        chat_id, thread_id = key
+        try:
+            profile = await self.store.get(chat_id, thread_id)
+            if profile is not None and profile.capture_enabled:
+                await self.store.upsert(replace(profile, capture_enabled=False))
+        except StorageError:
+            return  # storage still down: the tombstone stays
+        self._denied.discard(key)
 
     async def _enabled(self, chat_id: int, thread_id: int) -> bool:
         key = (chat_id, thread_id)

@@ -125,15 +125,17 @@ class CaptureHandlers:
 
     async def _end_channel_capture(self, chat_id: int) -> None:
         """Demotion revokes the structural opt-in: capture must not survive it."""
-        self.service.forget_scope(chat_id, 0)
         try:
             await self.directory.set_capture(chat_id, 0, enabled=False)
         except StorageError:
-            # The bot receives nothing from a channel it is not admin of,
-            # so nothing is archived meanwhile; a later re-promotion runs
-            # the full announce-and-enable sequence either way.
+            # A demoted bot still *receives* channel posts (it stays a
+            # member), so the stale durable True must not resume once
+            # storage recovers: tombstone the scope — denied in memory,
+            # with each incoming post retrying the durable disable.
+            self.service.deny_scope(chat_id, 0)
             log_event("capture_enable", "error")
             return
+        self.service.clear_denial(chat_id, 0)
         log_event("capture_enable", "ok", enabled=0)
 
     async def _begin_channel_capture(
@@ -159,7 +161,7 @@ class CaptureHandlers:
             log_event("capture_enable", "error")
             await self._retract_if_verifiably_off(chat_id, context)
             return
-        self.service.forget_scope(chat_id, 0)
+        self.service.clear_denial(chat_id, 0)  # fresh announced consent
         log_event("capture_enable", "ok")
 
     async def _retract_if_verifiably_off(
@@ -175,13 +177,14 @@ class CaptureHandlers:
         standing announcement then over-warns (claims archiving that may
         not happen), which is the privacy-safe direction to be wrong in.
         """
-        self.service.forget_scope(chat_id, 0)
         try:
             await self.directory.set_capture(chat_id, 0, enabled=False)
         except StorageError:
+            # Unknowable durable state: tombstone it fail-closed.
+            self.service.deny_scope(chat_id, 0)
             log_event("capture_enable", "error")
             return
-        self.service.forget_scope(chat_id, 0)
+        self.service.clear_denial(chat_id, 0)
         try:
             await context.bot.send_message(
                 chat_id=chat_id,

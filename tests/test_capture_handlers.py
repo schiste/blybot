@@ -207,6 +207,22 @@ async def test_failed_announcement_means_capture_never_starts() -> None:
     assert profile is None or not profile.capture_enabled
 
 
+async def test_failed_announcement_also_clears_stale_enabled_state() -> None:
+    handlers, store, _archive = make_handlers()
+    # A demotion during a storage outage can leave capture_enabled=True
+    # behind; a later re-promotion whose announcement fails must clear
+    # it rather than let the stale opt-in resume un-announced.
+    await enable(store, CHANNEL.id)
+    context, bot = tg.make_context()
+    bot.send_message.side_effect = TelegramError("muted")
+
+    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
+
+    profile = await store.get(CHANNEL.id, 0)
+    assert profile is not None
+    assert profile.capture_enabled is False
+
+
 class EnableWriteFails(InMemoryProfiles):
     """Fails only capture-*enabling* upserts: the disable verification succeeds."""
 

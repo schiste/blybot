@@ -146,9 +146,12 @@ class CaptureHandlers:
                 text=CHANNEL_ANNOUNCEMENT.format(bot_name=self.bot_name),
             )
         except TelegramError:
-            # The channel cannot be told, so capture must not start. A
-            # demote + re-promote retries the whole sequence.
+            # The channel cannot be told, so capture must not start — and
+            # any stale enabled state (a demotion the store never
+            # recorded) must not survive either. A demote + re-promote
+            # retries the whole sequence.
             log_event("capture_announce", "error")
+            await self._end_channel_capture(chat_id)
             return
         try:
             await self.directory.set_capture(chat_id, 0, enabled=True)

@@ -11,7 +11,7 @@ from blybot.domain.ports import ActionError
 from blybot.observability import Counters
 from blybot.services.actions import parse_action
 from blybot.services.engine import ActionEngine
-from tests.fakes import FakeSink, FakeSource, SuffixTransform
+from tests.fakes import FakeClock, FakeSink, FakeSource, SuffixTransform
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
 SCOPE = ActionScope(chat_id=-1)
@@ -28,6 +28,7 @@ def make_engine(
         transforms={"prompt": transform or SuffixTransform(), "stats": SuffixTransform(tag="+s")},
         sinks={"wiki_section": sink or FakeSink()},
         counters=counters,
+        clock=FakeClock(),
     )
     return engine, counters
 
@@ -41,9 +42,9 @@ async def test_engine_threads_payload_through_the_chain_to_the_sink() -> None:
     transform = SuffixTransform()
     engine, counters = make_engine(transform=transform, sink=sink)
 
-    messages = await engine.run(SCOPE, spec_for("daily@06:00 summarize model=large"), NOW)
+    outcome = await engine.run(SCOPE, spec_for("daily@06:00 summarize model=large"), NOW)
 
-    assert messages == sink.messages
+    assert outcome.messages == sink.messages
     ((step, payload),) = transform.applied
     assert payload == "hello"
     assert step.param("model") == "large"  # each occurrence sees its own params
@@ -58,7 +59,9 @@ async def test_empty_source_ends_the_run_quietly() -> None:
     sink = FakeSink()
     engine, counters = make_engine(source=FakeSource(payload=None), sink=sink)
 
-    assert await engine.run(SCOPE, spec_for(), NOW) == ()
+    outcome = await engine.run(SCOPE, spec_for(), NOW)
+    assert outcome.messages == ()
+    assert outcome.payload is None
     assert sink.delivered == []
     assert counters.snapshot() == {"actions_empty": 1}
 
@@ -67,13 +70,17 @@ async def test_dropping_transform_ends_the_run_quietly() -> None:
     sink = FakeSink()
     engine, counters = make_engine(transform=SuffixTransform(drop=True), sink=sink)
 
-    assert await engine.run(SCOPE, spec_for(), NOW) == ()
+    outcome = await engine.run(SCOPE, spec_for(), NOW)
+    assert outcome.messages == ()
+    assert outcome.payload is None
     assert sink.delivered == []
     assert counters.snapshot() == {"actions_empty": 1}
 
 
 async def test_unknown_source_raises_a_named_action_error() -> None:
-    engine = ActionEngine(sources={}, transforms={}, sinks={}, counters=Counters())
+    engine = ActionEngine(
+        sources={}, transforms={}, sinks={}, counters=Counters(), clock=FakeClock()
+    )
     with pytest.raises(ActionError, match="unknown source 'archive_window'"):
         await engine.run(SCOPE, spec_for(), NOW)
 
@@ -85,6 +92,7 @@ async def test_unknown_transform_and_sink_name_the_missing_component() -> None:
         transforms={},
         sinks={},
         counters=Counters(),
+        clock=FakeClock(),
     )
     with pytest.raises(ActionError, match="unknown transform 'prompt'"):
         await engine.run(SCOPE, spec_for(), NOW)
@@ -95,6 +103,7 @@ async def test_unknown_transform_and_sink_name_the_missing_component() -> None:
         transforms={"prompt": SuffixTransform()},
         sinks={},
         counters=Counters(),
+        clock=FakeClock(),
     )
     with pytest.raises(ActionError, match="unknown sink 'wiki_section'"):
         await engine.run(SCOPE, spec_for(), NOW)
@@ -127,9 +136,10 @@ async def test_caller_provided_payloads_replace_the_source() -> None:
     source = FakeSource(payload="from the source")
     engine, counters = make_engine(source=source, sink=sink)
 
-    messages = await engine.run(SCOPE, spec_for(), NOW, payload="provided by the caller")
+    outcome = await engine.run(SCOPE, spec_for(), NOW, payload="provided by the caller")
 
-    assert messages == sink.messages
+    assert outcome.messages == sink.messages
+    assert outcome.payload == "provided by the caller+t"  # the sink's input, readable
     assert source.fetched == []  # the source never ran
     ((_context, delivered),) = sink.delivered
     assert delivered == "provided by the caller+t"
@@ -142,6 +152,7 @@ async def test_provided_payloads_skip_source_resolution_entirely() -> None:
         transforms={"prompt": SuffixTransform(), "stats": SuffixTransform()},
         sinks={"wiki_section": FakeSink()},
         counters=Counters(),
+        clock=FakeClock(),
     )
     # Would raise "unknown source" without a provided payload; with one it runs.
     await engine.run(SCOPE, spec_for(), NOW, payload="direct")

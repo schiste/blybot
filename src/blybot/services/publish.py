@@ -15,11 +15,21 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
-from blybot.domain.models import LogContent
+from blybot.domain.models import (
+    ActionSpec,
+    LogContent,
+    OutboundMessage,
+    StepSpec,
+    TriggerKind,
+    TriggerSpec,
+)
+from blybot.domain.ports import ActionError
 from blybot.domain.rendering import discussion_line, file_link, section_heading, timestamp
 
 if TYPE_CHECKING:
-    from blybot.domain.models import TimestampGranularity
+    from collections.abc import Callable
+
+    from blybot.domain.models import ActionContext, TimestampGranularity
     from blybot.domain.ports import Clock, PseudonymFactory, Sanitizer, WikiPublisher
 
 _EXTENSION_BY_CONTENT_TYPE: Final = {
@@ -149,3 +159,68 @@ def _upload_description(section_url: str | None, upload_date: str, review_deadli
         f"Content must be checked by Telegram author before {review_deadline}; "
         "past that day media can be safely deleted."
     )
+
+
+CONFIRMATION_TEMPLATE: Final = "Published anonymously: {url}"
+
+
+def log_action(page: str) -> ActionSpec:
+    """The /log pipeline for one invocation, targeting ``page``.
+
+    The handler provides the payload (the replied-to message's
+    :class:`~blybot.domain.models.LogContent`), the ``log_publish``
+    transform writes the section, and ``chat_confirm`` renders the
+    group confirmation.
+    """
+    return ActionSpec(
+        action_id="log",
+        trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="log"),
+        source=StepSpec(name="provided"),
+        transforms=(StepSpec(name="log_publish", params=(("page", page),)),),
+        sink=StepSpec(name="chat_confirm"),
+    )
+
+
+@dataclass(eq=False)
+class LogPublishTransform:
+    """The ``log_publish`` transform: LogContent → :class:`PublishedLog`.
+
+    Wraps :class:`LogPublicationService` so /log's sanitize-render-
+    publish step is a reusable pipeline component; the target page comes
+    from the step's ``page`` parameter.
+    """
+
+    service: LogPublicationService
+    page_url_for: Callable[[str], str]
+
+    async def apply(self, context: ActionContext, step: StepSpec, payload: object) -> PublishedLog:
+        """Publish the payload anonymously; return the section + media facts."""
+        del context
+        if not isinstance(payload, LogContent):
+            msg = "log publication needs the message's content to publish"
+            raise ActionError(msg)
+        page = step.param("page")
+        if not page:
+            msg = "log publication needs a page parameter"
+            raise ActionError(msg)
+        return await self.service.publish_entry(
+            payload, target_page=page, page_url=self.page_url_for(page)
+        )
+
+
+@dataclass(eq=False)
+class ChatConfirmSink:
+    """The ``chat_confirm`` sink: a one-line confirmation for the scope."""
+
+    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+        """Render the published-log confirmation with its section URL."""
+        if not isinstance(payload, PublishedLog):
+            msg = "the confirmation sink needs a published log to confirm"
+            raise ActionError(msg)
+        url = payload.section_url or payload.heading
+        confirmation = OutboundMessage(
+            chat_id=context.scope.chat_id,
+            thread_id=context.scope.thread_id,
+            text=CONFIRMATION_TEMPLATE.format(url=url),
+        )
+        return (confirmation,)

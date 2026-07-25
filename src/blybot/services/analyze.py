@@ -379,10 +379,7 @@ def _title(report: AnalysisReport | StatsReport) -> str:
 
 def _scope_line(report: AnalysisReport | StatsReport) -> str:
     window = f"{report.since:%Y-%m-%d %H:%M} → {report.until:%Y-%m-%d %H:%M} UTC"
-    return (
-        f"{report.message_count} messages from {report.participant_count} "
-        f"participants, {window}"
-    )
+    return f"{report.message_count} messages from {report.participant_count} participants, {window}"
 
 
 def _stats_lines(report: StatsReport) -> list[str]:

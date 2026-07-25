@@ -85,7 +85,7 @@ class ActionScheduler:
             updated[index] = replace(spec, last_run=now)
             changed = True
             try:
-                messages.extend(await self.engine.run(scope, spec, now))
+                messages.extend((await self.engine.run(scope, spec, now)).messages)
             except Exception:
                 # Per-action isolation: one failing pipeline (bad page,
                 # unknown component, adapter outage) must not block the

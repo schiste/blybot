@@ -441,6 +441,28 @@ class OutboundMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class RunOutcome:
+    """What one engine run produced.
+
+    ``payload`` is the final value handed to the sink (``None`` when the
+    run ended quietly) — interactive callers read their results from it;
+    ``messages`` are the sink's chat messages for the transport to send.
+    """
+
+    payload: object | None
+    messages: tuple[OutboundMessage, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RepoEventsBatch:
+    """One poll cycle's fresh events for a scope, with the rules to match."""
+
+    repo: str
+    rules: tuple[Rule, ...]
+    events: tuple[RepoEvent, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LlmSettings:
     """Per-scope LLM configuration (v3 plan §2.4).
 

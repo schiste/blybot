@@ -30,6 +30,7 @@ def make_scheduler(
         transforms={"prompt": transform or SuffixTransform(), "stats": SuffixTransform()},
         sinks={"wiki_section": sink or FakeSink(messages=(REPLY,))},
         counters=counters,
+        clock=clock,
     )
     scheduler = ActionScheduler(
         store=store,

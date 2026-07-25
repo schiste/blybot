@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from blybot.domain.ports import Sink, Source, Transform
+
 from blybot.adapters.github.gateway import GitHubRepoGateway
 from blybot.adapters.github.issues import GitHubIssueTracker
 from blybot.adapters.llm.liftwing import LiftWingClient
@@ -46,9 +48,18 @@ from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.engine import ActionEngine
 from blybot.services.feedback import FeedbackService
-from blybot.services.notify import RepoNotifier
+from blybot.services.notify import (
+    ChatMessagesSink,
+    RepoEventsSource,
+    RepoNotifier,
+    RuleMatchTransform,
+)
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
-from blybot.services.publish import LogPublicationService
+from blybot.services.publish import (
+    ChatConfirmSink,
+    LogPublicationService,
+    LogPublishTransform,
+)
 from blybot.services.repo import GroupRepoService
 from blybot.services.schedule import ActionScheduler
 from blybot.services.sessions import SessionRegistry
@@ -97,7 +108,6 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
     capture_service: CaptureService | None = None
     capture_handlers: CaptureHandlers | None = None
     llm_client: LiftWingClient | None = None
-    engine: ActionEngine | None = None
     analysis_handlers: AnalysisHandlers | None = None
     llm_defaults: LlmSettings | None = None
     if config.profile_encryption_key:
@@ -111,6 +121,15 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             archive = ToolsDbArchive(runner=runner)
     binding = TokenBinding(clock=clock)
     gateway = GitHubRepoGateway(user_agent=config.user_agent)
+    tracker = (
+        GitHubIssueTracker(
+            repo=config.github_repo,
+            token=config.github_token,
+            user_agent=config.user_agent,
+        )
+        if config.github_token
+        else None
+    )
 
     group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
     directory = ChannelDirectory(
@@ -122,16 +141,66 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         default_repo="",
         page_suffix=config.wiki_page_suffix,
     )
-    group_handlers = GroupHandlers(
-        log_service=LogPublicationService(
+    log_service = LogPublicationService(
+        publisher=publisher,
+        sanitizer=sanitizer,
+        pseudonyms=pseudonyms,
+        clock=clock,
+        target_page=config.log_target_page,
+        edit_summary=config.edit_summary,
+        timestamp_granularity=config.timestamp_granularity,
+    )
+    # One engine for every deployment tier: the registries grow with the
+    # features this deployment enables (v3 phase 5 — every pipeline-shaped
+    # behavior runs through the same seam).
+    feedback = FeedbackService(tracker) if tracker else None
+    sources: dict[str, Source] = {}
+    transforms: dict[str, Transform] = {
+        "log_publish": LogPublishTransform(service=log_service, page_url_for=config.page_url),
+    }
+    sinks: dict[str, Sink] = {"chat_confirm": ChatConfirmSink()}
+    if feedback is not None:
+        sinks["issue_tracker"] = feedback
+    if store is not None:
+        sources["repo_events"] = RepoEventsSource(store=store, vault=store, gateway=gateway)
+        transforms["rule_match"] = RuleMatchTransform(counters=counters)
+        sinks["telegram_message"] = ChatMessagesSink()
+    if store is not None and archive is not None:
+        llm_defaults = LlmSettings(lang=config.llm_default_lang)
+        llm_client = LiftWingClient(
+            api_base=config.liftwing_api_base,
+            user_agent=config.user_agent,
+            models={
+                "default": config.liftwing_model_default,
+                "large": config.liftwing_model_large,
+            },
+            timeout_seconds=config.liftwing_timeout_seconds,
+            counters=counters,
+        )
+        sources["archive_window"] = ArchiveWindowSource(archive=archive)
+        transforms["prompt"] = PromptTransform(
+            runners={"liftwing": llm_client},
+            store=store,
+            defaults=llm_defaults,
+            max_tokens_ceiling=config.llm_max_tokens_ceiling,
+            max_chunks=config.llm_max_chunks_per_run,
+            counters=counters,
+        )
+        transforms["stats"] = StatsTransform()
+        sinks["wiki_section"] = WikiSectionSink(
             publisher=publisher,
             sanitizer=sanitizer,
-            pseudonyms=pseudonyms,
-            clock=clock,
-            target_page=config.log_target_page,
+            resolve_page=explicit_page_resolver(directory),
+            page_url_for=config.page_url,
             edit_summary=config.edit_summary,
-            timestamp_granularity=config.timestamp_granularity,
-        ),
+            bot_name=config.bot_name,
+        )
+        sinks["telegram_reply"] = TelegramReplySink()
+    engine = ActionEngine(
+        sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock
+    )
+    group_handlers = GroupHandlers(
+        engine=engine,
         groups=group_policy,
         limiter=SlidingWindowLimiter(
             clock=clock,
@@ -149,15 +218,6 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         ),
         cleanup_delay_seconds=config.log_cleanup_seconds,
         reply_cleanup_delay_seconds=config.reply_cleanup_seconds,
-    )
-    tracker = (
-        GitHubIssueTracker(
-            repo=config.github_repo,
-            token=config.github_token,
-            user_agent=config.user_agent,
-        )
-        if config.github_token
-        else None
     )
 
     async def release_clients() -> None:
@@ -179,7 +239,8 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         dm_page_url=config.page_url(config.dm_target_base),
         maintainer=config.maintainer,
         issues_url=f"https://github.com/{config.github_repo}/issues",
-        feedback=FeedbackService(tracker) if tracker else None,
+        engine=engine,
+        feedback=feedback,
         bug_limiter=SlidingWindowLimiter(
             clock=clock, limit=config.bug_throttle_per_hour, window=timedelta(hours=1)
         ),
@@ -213,44 +274,6 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         )
 
     if store is not None and archive is not None:
-        llm_defaults = LlmSettings(lang=config.llm_default_lang)
-        llm_client = LiftWingClient(
-            api_base=config.liftwing_api_base,
-            user_agent=config.user_agent,
-            models={
-                "default": config.liftwing_model_default,
-                "large": config.liftwing_model_large,
-            },
-            timeout_seconds=config.liftwing_timeout_seconds,
-            counters=counters,
-        )
-
-        engine = ActionEngine(
-            sources={"archive_window": ArchiveWindowSource(archive=archive)},
-            transforms={
-                "prompt": PromptTransform(
-                    runners={"liftwing": llm_client},
-                    store=store,
-                    defaults=llm_defaults,
-                    max_tokens_ceiling=config.llm_max_tokens_ceiling,
-                    max_chunks=config.llm_max_chunks_per_run,
-                    counters=counters,
-                ),
-                "stats": StatsTransform(),
-            },
-            sinks={
-                "wiki_section": WikiSectionSink(
-                    publisher=publisher,
-                    sanitizer=sanitizer,
-                    resolve_page=explicit_page_resolver(directory),
-                    page_url_for=config.page_url,
-                    edit_summary=config.edit_summary,
-                    bot_name=config.bot_name,
-                ),
-                "telegram_reply": TelegramReplySink(),
-            },
-            counters=counters,
-        )
         analysis_handlers = AnalysisHandlers(
             engine=engine,
             groups=group_policy,
@@ -270,22 +293,16 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         capture_service=capture_service,
         llm_defaults=llm_defaults,
         llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
-        actions=store if engine is not None else None,
+        actions=store if analysis_handlers is not None else None,
         clock=clock,
     )
 
-    notifier = (
-        RepoNotifier(
-            store=store, vault=store, gateway=gateway, groups=group_policy, counters=counters
-        )
-        if store
-        else None
-    )
+    notifier = RepoNotifier(store=store, groups=group_policy, engine=engine) if store else None
     scheduler = (
         ActionScheduler(
             store=store, engine=engine, groups=group_policy, clock=clock, counters=counters
         )
-        if store is not None and engine is not None
+        if store is not None and archive is not None
         else None
     )
     bootstrap: Callable[[], Awaitable[None]] | None = None

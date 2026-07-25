@@ -36,6 +36,7 @@ def make_handlers(
         transforms={"prompt": SuffixTransform(), "stats": SuffixTransform()},
         sinks={"wiki_section": sink or FakeSink(messages=(CONFIRMATION,))},
         counters=Counters(),
+        clock=clock,
     )
     return a.AnalysisHandlers(
         engine=engine,

@@ -131,8 +131,7 @@ REPLY_ACTIONS_NONE: Final = (
 )
 REPLY_ACTIONS_LIST: Final = "Scheduled actions for {scope}:\n{lines}"
 REPLY_ACTIONS_FULL: Final = (
-    "You already have the maximum of {max} actions at {scope}; "
-    "remove one with /action remove <id>."
+    "You already have the maximum of {max} actions at {scope}; remove one with /action remove <id>."
 )
 REPLY_CAPTURE_USAGE: Final = "Usage: /capture on | off | purge [before:YYYY-MM-DD]"
 REPLY_CAPTURE_OFF_DEPLOY: Final = (

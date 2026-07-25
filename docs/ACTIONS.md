@@ -15,10 +15,16 @@ bot usually means writing one new component and composing it, not a new
 feature module.
 
 Status: fully operational. The framework core (Phase 1), capture and
-analysis components (Phases 2–3), and `/action add` scheduling (Phase 4)
-of the [v3 plan](PLAN-V3-CHANNEL-INTELLIGENCE.md) have all shipped;
-scheduled actions run on the shared background tick
-(`EVENTS_POLL_MINUTES`).
+analysis components (Phases 2–3), `/action add` scheduling (Phase 4),
+and the Phase 5 re-homes have all shipped per the
+[v3 plan](PLAN-V3-CHANNEL-INTELLIGENCE.md): one engine serves every
+deployment tier, and `/log`, `/bug`, and the repo notifier run through
+it as pipelines. Interactive flows enter via the engine's
+caller-provided payload; scheduled actions run on the shared background
+tick (`EVENTS_POLL_MINUTES`). The one deliberate exception is DM
+transcription: its sessions are keyed by private chat ids, which the
+identifier-free `ActionContext` must never carry (R6), so it stays a
+directly-called service by design.
 
 ## Concepts
 
@@ -112,7 +118,7 @@ Once components exist, a new scheduled behavior is pure configuration:
 chat. The framework exists precisely so that "summarize this channel
 weekly in French to page X" is a chat command, not a pull request.
 
-## Built-in components (Phase 3)
+## Built-in components
 
 | Kind | Name | Behavior |
 |---|---|---|
@@ -121,6 +127,12 @@ weekly in French to page X" is a chat command, not a pull request.
 | transform | `stats` | Deterministic Python: counts, participants, media, replies, busiest hour, top pseudonyms — no LLM |
 | sink | `wiki_section` | One new section on `page=` (default: the scope's `/log` page); sanitizes every model string; returns a chat confirmation with the URL |
 | sink | `telegram_reply` | Renders the report as one bounded chat message |
+| transform | `log_publish` | /log's sanitize-render-publish step: LogContent → PublishedLog on the step's `page=` |
+| sink | `chat_confirm` | One-line "Published anonymously" confirmation with the section URL |
+| sink | `issue_tracker` | Files the payload text as an anonymous tracker issue; confirms with its URL |
+| source | `repo_events` | The scope's fresh bound-repo events (cursor watermarks, repo guard) with its rules |
+| transform | `rule_match` | Matches events against the scope's rules; renders live lines + a digest block |
+| sink | `telegram_message` | One chat message per payload line, addressed to the run's scope |
 
 Prompt templates (`domain/prompts.py`): `summarize`, `talking_points`,
 and `stats_narrative` (the `stats_narrative` *recipe* chains the stats

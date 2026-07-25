@@ -16,8 +16,13 @@ from blybot.adapters.telegram._common import thread_of
 from blybot.domain.models import ConsentMode, GroupProfile, TimestampGranularity
 from blybot.observability import Counters
 from blybot.services.directory import ChannelDirectory
+from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
-from blybot.services.publish import LogPublicationService
+from blybot.services.publish import (
+    ChatConfirmSink,
+    LogPublicationService,
+    LogPublishTransform,
+)
 from blybot.services.repo import GroupRepoService
 from tests import tg
 from tests.fakes import (
@@ -68,16 +73,26 @@ def make_handlers(
         default_repo="",
         page_suffix="Telegram logs",
     )
+    log_service = LogPublicationService(
+        publisher=publisher,
+        sanitizer=PassthroughSanitizer(),
+        pseudonyms=SequentialPseudonyms(),
+        clock=FakeClock(),
+        target_page=LOG_PAGE,
+        edit_summary="Log entry via Blybot",
+        timestamp_granularity=TimestampGranularity.NONE,
+    )
+    engine = ActionEngine(
+        sources={},
+        transforms={
+            "log_publish": LogPublishTransform(service=log_service, page_url_for=page_url_for)
+        },
+        sinks={"chat_confirm": ChatConfirmSink()},
+        counters=Counters(),
+        clock=FakeClock(),
+    )
     handlers = h.GroupHandlers(
-        log_service=LogPublicationService(
-            publisher=publisher,
-            sanitizer=PassthroughSanitizer(),
-            pseudonyms=SequentialPseudonyms(),
-            clock=FakeClock(),
-            target_page=LOG_PAGE,
-            edit_summary="Log entry via Blybot",
-            timestamp_granularity=TimestampGranularity.NONE,
-        ),
+        engine=engine,
         groups=policy,
         limiter=SlidingWindowLimiter(clock=FakeClock(), limit=limit, window=timedelta(minutes=1)),
         directory=directory,

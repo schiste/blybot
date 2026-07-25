@@ -16,15 +16,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
-from blybot.domain.models import ActionContext
+from blybot.domain.models import ActionContext, RunOutcome
 from blybot.domain.ports import ActionError
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
 
-    from blybot.domain.models import ActionScope, ActionSpec, OutboundMessage
-    from blybot.domain.ports import Sink, Source, Transform
+    from blybot.domain.models import ActionScope, ActionSpec
+    from blybot.domain.ports import Clock, Sink, Source, Transform
     from blybot.observability import Counters
 
 _ComponentT = TypeVar("_ComponentT")
@@ -38,15 +38,16 @@ class ActionEngine:
     transforms: Mapping[str, Transform]
     sinks: Mapping[str, Sink]
     counters: Counters
+    clock: Clock
 
     async def run(
         self,
         scope: ActionScope,
         spec: ActionSpec,
-        now: datetime,
+        now: datetime | None = None,
         payload: object | None = None,
-    ) -> tuple[OutboundMessage, ...]:
-        """Run one action; return any chat messages for the transport to send.
+    ) -> RunOutcome:
+        """Run one action; return the final payload plus any chat messages.
 
         A caller-provided ``payload`` replaces the source step entirely —
         the seam interactive flows (a replied-to message, a DM) use to
@@ -64,7 +65,7 @@ class ActionEngine:
         ]
         sink = self._resolve(self.sinks, spec.sink.name, "sink")
 
-        context = ActionContext(scope=scope, spec=spec, now=now)
+        context = ActionContext(scope=scope, spec=spec, now=now or self.clock.now())
         if source is not None:
             payload = await source.fetch(context)
         for step, transform in chain:
@@ -73,10 +74,10 @@ class ActionEngine:
             payload = await transform.apply(context, step, payload)
         if payload is None:
             self.counters.increment("actions_empty")
-            return ()
+            return RunOutcome(payload=None)
         messages = await sink.deliver(context, payload)
         self.counters.increment("actions_run")
-        return messages
+        return RunOutcome(payload=payload, messages=messages)
 
     @staticmethod
     def _resolve(registry: Mapping[str, _ComponentT], name: str, kind: str) -> _ComponentT:

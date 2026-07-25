@@ -98,7 +98,7 @@ src/blybot/
 │   ├── sessions.py     volatile DM session registry (TTL, peek, reset, sweep)
 │   ├── directory.py    per-(group, topic) settings: stored profile over defaults
 │   ├── rules.py        composable event rules: parse, describe, match, serialize
-│   ├── notify.py       poll bound repos, match rules, live + digest delivery
+│   ├── notify.py       repo notifications as engine components + the tick shell
 │   ├── repo.py         /issue + /repo against a group's bound repository
 │   ├── feedback.py     /bug → anonymous issue on the operator's tracker
 │   ├── binding.py      short-lived config deep links + token-entry state

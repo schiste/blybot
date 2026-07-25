@@ -10,11 +10,12 @@ never make the bot lag its interactive commands.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
-from blybot.domain.models import OutboundMessage
+from blybot.domain.models import GroupProfile, OutboundMessage
 from blybot.domain.ports import StorageError
 
 if TYPE_CHECKING:
@@ -46,6 +47,10 @@ class CaptureService:
     # ToolsDB outage). A denied scope is never archived, and each of its
     # messages retries the durable disable until one lands.
     _denied: set[tuple[int, int]] = field(default_factory=set, init=False)
+    # Serializes consent transitions (enable_scope vs. the tombstone
+    # retries): a stale in-flight disable must never overwrite a freshly
+    # announced enable, and a check-then-write guard alone is TOCTOU.
+    _transition_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     async def ingest(self, message: CapturedMessage) -> None:
         """Archive ``message`` iff its scope opted in; never raises."""
@@ -96,6 +101,23 @@ class CaptureService:
         self._denied.discard((chat_id, thread_id))
         self.forget_scope(chat_id, thread_id)
 
+    async def enable_scope(self, chat_id: int, thread_id: int) -> None:
+        """Durably enable capture, serialized against pending disable retries.
+
+        Holding the transition lock guarantees no stale tombstone retry
+        is mid-write when the fresh consent lands, and the write itself
+        cancels any pending revocation. Raises :class:`StorageError` on
+        failure, with the tombstone (if any) left in place — the caller
+        decides how to fail safely.
+        """
+        async with self._transition_lock:
+            profile = await self.store.get(chat_id, thread_id) or GroupProfile(
+                chat_id=chat_id, thread_id=thread_id
+            )
+            await self.store.upsert(replace(profile, capture_enabled=True))
+            self._denied.discard((chat_id, thread_id))
+        self.forget_scope(chat_id, thread_id)
+
     async def retry_denied(self) -> None:
         """Converge every tombstoned scope's disable (maintenance tick).
 
@@ -109,17 +131,18 @@ class CaptureService:
     async def _retry_disable(self, key: tuple[int, int]) -> None:
         """Try to make a denied scope's disable durable; keep denying on failure."""
         chat_id, thread_id = key
-        try:
-            profile = await self.store.get(chat_id, thread_id)
+        async with self._transition_lock:
             if key not in self._denied:
-                # A fresh announced enable landed while we were reading:
-                # the revocation is cancelled, never clobber the new state.
+                # A fresh announced enable landed first: the revocation
+                # is cancelled, never clobber the new state.
                 return
-            if profile is not None and profile.capture_enabled:
-                await self.store.upsert(replace(profile, capture_enabled=False))
-        except StorageError:
-            return  # storage still down: the tombstone stays
-        self._denied.discard(key)
+            try:
+                profile = await self.store.get(chat_id, thread_id)
+                if profile is not None and profile.capture_enabled:
+                    await self.store.upsert(replace(profile, capture_enabled=False))
+            except StorageError:
+                return  # storage still down: the tombstone stays
+            self._denied.discard(key)
 
     async def _enabled(self, chat_id: int, thread_id: int) -> bool:
         key = (chat_id, thread_id)

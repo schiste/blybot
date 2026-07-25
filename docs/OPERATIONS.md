@@ -195,7 +195,14 @@ a `~/<name>.env`.
 - Logs in `~/<name>.err` are **event-only by design** (spec §16): event
   names, outcomes, and counts — never message content or Telegram
   identifiers. A `heartbeat` line with counter totals appears roughly
-  every 15 minutes.
+  every 15 minutes. v3 counters to know: `captures[_throttled|_failed]`
+  (archive ingest), `prompts_run`/`prompt_tokens`/`completion_tokens`/
+  `prompt_failures` (LiftWing), `analyses_aborted` (output-contract
+  violations — nothing published), `analyses_failed`, `actions_run`/
+  `actions_empty`/`actions_failed`/`actions_configured` (scheduler).
+- Capture + analyses raise the memory floor: run v3 instances with
+  `--mem 768Mi` (archive window queries plus LLM payloads) instead of
+  the v1/v2 512Mi.
 - Useful greps:
 
   | Log line | Meaning |

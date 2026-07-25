@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from blybot.domain.models import DeliveryMode
+from blybot.domain.models import DeliveryMode, OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 from blybot.services.rules import format_event, resources_for
@@ -41,8 +41,8 @@ class RepoNotifier:
     counters: Counters
     max_groups_per_tick: int = 200
 
-    async def collect(self) -> list[tuple[int, int, str]]:
-        """Return ``(chat_id, thread_id, text)`` messages for matched events."""
+    async def collect(self) -> list[OutboundMessage]:
+        """Return the chat messages for this cycle's matched events."""
         try:
             profiles = await self.store.list_event_enabled()
         except StorageError:
@@ -50,7 +50,7 @@ class RepoNotifier:
         if len(profiles) > self.max_groups_per_tick:
             log_event("repo_poll", "ignored", skipped=len(profiles) - self.max_groups_per_tick)
             profiles = profiles[: self.max_groups_per_tick]
-        messages: list[tuple[int, int, str]] = []
+        messages: list[OutboundMessage] = []
         for profile in profiles:
             if not self.groups.is_allowed(profile.chat_id):
                 continue  # never push into groups the operator excluded
@@ -64,7 +64,7 @@ class RepoNotifier:
                 log_event("repo_poll", "error")
         return messages
 
-    async def _for_scope(self, profile: GroupProfile) -> list[tuple[int, int, str]]:
+    async def _for_scope(self, profile: GroupProfile) -> list[OutboundMessage]:
         if not profile.repo or not profile.rules:
             return []
         repo = profile.repo
@@ -91,7 +91,7 @@ class RepoNotifier:
 
     def _deliver(
         self, profile: GroupProfile, repo: str, events: list[RepoEvent]
-    ) -> list[tuple[int, int, str]]:
+    ) -> list[OutboundMessage]:
         live: list[str] = []
         digest: list[str] = []
         for event in events:
@@ -112,13 +112,15 @@ class RepoNotifier:
     @staticmethod
     def _render(
         profile: GroupProfile, repo: str, live: list[str], digest: list[str]
-    ) -> list[tuple[int, int, str]]:
-        scope = (profile.chat_id, profile.thread_id)
-        messages = [(*scope, f"{repo} — {line}") for line in live[:_LIVE_CAP]]
+    ) -> list[OutboundMessage]:
+        def out(text: str) -> OutboundMessage:
+            return OutboundMessage(chat_id=profile.chat_id, thread_id=profile.thread_id, text=text)
+
+        messages = [out(f"{repo} — {line}") for line in live[:_LIVE_CAP]]
         if len(live) > _LIVE_CAP:
-            messages.append((*scope, f"{repo}: …and {len(live) - _LIVE_CAP} more live events"))
+            messages.append(out(f"{repo}: …and {len(live) - _LIVE_CAP} more live events"))
         if digest:
-            messages.append((*scope, _format_digest(repo, digest)))
+            messages.append(out(_format_digest(repo, digest)))
         return messages
 
 

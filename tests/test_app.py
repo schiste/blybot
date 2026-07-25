@@ -19,9 +19,8 @@ from blybot.adapters.telegram.analyze import AnalysisHandlers
 from blybot.adapters.telegram.app import (
     Lifecycle,
     Maintenance,
-    action_tick_loop,
     build_application,
-    repo_notify_loop,
+    message_loop,
     run_polling,
 )
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
@@ -230,11 +229,14 @@ async def test_repo_notify_loop_delivers_digests_and_survives_send_failures() ->
                 raise TelegramError("kicked")
             sent.append((chat_id, text, message_thread_id))
 
-    async def fake_collect() -> list[tuple[int, int, str]]:
-        return [(-13, 0, "lost"), (-1, 7, "x/y:\n- Release")]
+    async def fake_collect() -> list[OutboundMessage]:
+        return [
+            OutboundMessage(chat_id=-13, thread_id=0, text="lost"),
+            OutboundMessage(chat_id=-1, thread_id=7, text="x/y:\n- Release"),
+        ]
 
     notifier.collect = fake_collect  # type: ignore[method-assign]
-    task = asyncio.ensure_future(repo_notify_loop(cast("Any", Recorder()), notifier, 0))
+    task = asyncio.ensure_future(message_loop(cast("Any", Recorder()), notifier, 0, "repo_poll"))
     for _ in range(20):
         await asyncio.sleep(0)
     task.cancel()
@@ -275,13 +277,13 @@ async def test_notify_loop_survives_a_crashing_collect() -> None:
     )
     calls = {"n": 0}
 
-    async def exploding_collect() -> list[tuple[int, int, str]]:
+    async def exploding_collect() -> list[OutboundMessage]:
         calls["n"] += 1
         msg = "schema drift"
         raise RuntimeError(msg)
 
     notifier.collect = exploding_collect  # type: ignore[method-assign]
-    task = asyncio.ensure_future(repo_notify_loop(cast("Any", None), notifier, 0))
+    task = asyncio.ensure_future(message_loop(cast("Any", None), notifier, 0, "repo_poll"))
     for _ in range(30):
         await asyncio.sleep(0)
     task.cancel()
@@ -428,7 +430,7 @@ async def test_action_tick_loop_delivers_messages_and_survives_failures() -> Non
         ]
 
     scheduler.collect = fake_collect
-    task = asyncio.ensure_future(action_tick_loop(cast("Any", Recorder()), scheduler, 0))
+    task = asyncio.ensure_future(message_loop(cast("Any", Recorder()), scheduler, 0, "action_tick"))
     for _ in range(20):
         await asyncio.sleep(0)
     task.cancel()
@@ -447,7 +449,7 @@ async def test_action_tick_loop_survives_a_crashing_collect() -> None:
         raise RuntimeError(msg)
 
     scheduler.collect = exploding_collect
-    task = asyncio.ensure_future(action_tick_loop(cast("Any", None), scheduler, 0))
+    task = asyncio.ensure_future(message_loop(cast("Any", None), scheduler, 0, "action_tick"))
     for _ in range(30):
         await asyncio.sleep(0)
     task.cancel()

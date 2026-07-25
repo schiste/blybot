@@ -57,7 +57,8 @@ async def test_digest_carries_only_matching_events() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
     gateway.events = [RELEASE, MERGE, ISSUE]
     await enable(store)  # release + pr.merged digest rules (issues never polled)
-    ((chat_id, _thread, digest),) = await make_notifier(store, gateway).collect()
+    (message,) = await make_notifier(store, gateway).collect()
+    chat_id, digest = message.chat_id, message.text
     assert chat_id == -1
     assert "Release 1.0" in digest
     assert "fix" in digest
@@ -70,14 +71,14 @@ async def test_live_emits_one_message_per_event_prefixed_with_repo() -> None:
     await enable(store, specs=("issue.opened live",))
     messages = await make_notifier(store, gateway).collect()
     assert len(messages) == 2
-    assert all(text.startswith("x/y — Issue opened: bug") for _c, _t, text in messages)
+    assert all(m.text.startswith("x/y — Issue opened: bug") for m in messages)
 
 
 async def test_an_event_in_both_modes_is_delivered_live_and_in_digest() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
     gateway.events = [RELEASE]
     await enable(store, specs=("release live", "release digest"))
-    messages = [text for _c, _t, text in await make_notifier(store, gateway).collect()]
+    messages = [m.text for m in await make_notifier(store, gateway).collect()]
     assert sum(text.startswith("x/y — ") for text in messages) == 1  # one live line, not two
     assert sum(text.startswith("x/y:") for text in messages) == 1  # one digest
 
@@ -115,7 +116,8 @@ async def test_one_broken_scope_never_blocks_the_others() -> None:
     gateway.events = [RELEASE]
     await enable(store, chat_id=-1, token="ghp_bad")  # noqa: S106 -- rejected by gateway
     await enable(store, chat_id=-2)
-    ((chat_id, _thread, _text),) = await make_notifier(store, gateway).collect()
+    (message,) = await make_notifier(store, gateway).collect()
+    chat_id = message.chat_id
     assert chat_id == -2
 
 
@@ -133,7 +135,8 @@ async def test_a_bad_stored_regex_in_one_scope_never_blocks_the_others() -> None
     await store.store_token(-1, 0, "ghp_ok")
     await store.set_cursors(-1, 0, {r.value: "seed" for r in Resource}, "x/y")
     await enable(store, chat_id=-2, specs=("release digest",))  # healthy scope
-    ((chat_id, _thread, _text),) = await make_notifier(store, gateway).collect()
+    (message,) = await make_notifier(store, gateway).collect()
+    chat_id = message.chat_id
     assert chat_id == -2  # the broken scope was isolated, the healthy one delivered
 
 
@@ -156,7 +159,8 @@ async def test_digest_truncates_beyond_five_lines() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
     gateway.events = [RELEASE] * 7
     await enable(store, specs=("release digest",))
-    ((_c, _t, digest),) = await make_notifier(store, gateway).collect()
+    (message,) = await make_notifier(store, gateway).collect()
+    digest = message.text
     assert digest.count("Release 1.0") == 5
     assert "…and 2 more" in digest
 
@@ -167,7 +171,7 @@ async def test_live_messages_are_capped_with_a_summary() -> None:
     await enable(store, specs=("issue.opened live",))
     messages = await make_notifier(store, gateway).collect()
     assert len(messages) == 11  # 10 individual + one summary
-    assert messages[-1][2] == "x/y: …and 3 more live events"
+    assert messages[-1].text == "x/y: …and 3 more live events"
 
 
 async def test_unchanged_cursor_is_not_rewritten() -> None:

@@ -155,17 +155,14 @@ class CaptureHandlers:
             log_event("capture_announce", "error")
             await self._end_channel_capture(chat_id)
             return
-        # Cancel any pending revocation *before* writing the enable, so a
-        # concurrent tombstone retry on the maintenance tick can never
-        # clobber the freshly announced consent with a stale disable.
-        self.service.clear_denial(chat_id, 0)
         try:
-            await self.directory.set_capture(chat_id, 0, enabled=True)
+            # Serialized against the tombstone retries: a stale in-flight
+            # disable can never overwrite this freshly announced consent.
+            await self.service.enable_scope(chat_id, 0)
         except StorageError:
             log_event("capture_enable", "error")
             await self._retract_if_verifiably_off(chat_id, context)
             return
-        self.service.forget_scope(chat_id, 0)
         log_event("capture_enable", "ok")
 
     async def _retract_if_verifiably_off(

@@ -190,14 +190,39 @@ async def test_pending_retry_never_clobbers_a_fresh_enable() -> None:
     service.deny_scope(-1, 0)
 
     retry = asyncio.ensure_future(service.retry_denied())
-    await asyncio.sleep(0)  # the retry is now parked inside its read
-    service.clear_denial(-1, 0)  # a fresh announced enable cancels the revocation
+    await asyncio.sleep(0)  # the retry holds the transition lock, parked in its read
+    enable = asyncio.ensure_future(service.enable_scope(-1, 0))
+    for _ in range(3):
+        await asyncio.sleep(0)  # the fresh consent queues behind the lock
     store.gate.set()
+    await retry
+    await enable
+
+    profile = await store.get(-1, 0)
+    assert profile is not None
+    assert profile.capture_enabled is True  # the fresh consent always wins
+    await service.ingest(msg(1))
+    assert len(archive.messages) == 1  # and the scope is no longer denied
+
+
+async def test_a_queued_retry_aborts_once_the_enable_wins_the_lock() -> None:
+    store, archive, clock = GatedGetProfiles(), InMemoryArchive(), FakeClock()
+    await InMemoryProfiles.upsert(store, GroupProfile(chat_id=-1, capture_enabled=True))
+    service, _counters = make_service(store, archive, clock)
+    service.deny_scope(-1, 0)
+
+    enable = asyncio.ensure_future(service.enable_scope(-1, 0))
+    await asyncio.sleep(0)  # the enable holds the transition lock, parked in its read
+    retry = asyncio.ensure_future(service.retry_denied())
+    for _ in range(3):
+        await asyncio.sleep(0)  # the retry queues behind the lock
+    store.gate.set()
+    await enable
     await retry
 
     profile = await store.get(-1, 0)
     assert profile is not None
-    assert profile.capture_enabled is True  # the stale retry aborted, not clobbered
+    assert profile.capture_enabled is True  # the cancelled revocation aborted
 
 
 async def test_clear_denial_restores_normal_policy_reads() -> None:

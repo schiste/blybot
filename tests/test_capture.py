@@ -151,6 +151,24 @@ async def test_denied_scope_never_archives_and_converges_the_disable() -> None:
     assert archive.messages == []
 
 
+async def test_retry_denied_converges_quiet_scopes_without_a_message() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)  # durable True that a failed revocation left behind
+    service, _counters = make_service(store, archive, clock)
+    store.fail = True
+    service.deny_scope(-1, 0)
+
+    await service.retry_denied()  # storage still down: tombstone stays
+    store.fail = False
+    await service.retry_denied()  # recovery tick: disable becomes durable
+
+    profile = await store.get(-1, 0)
+    assert profile is not None
+    assert profile.capture_enabled is False  # no message needed to converge
+    await service.ingest(msg(1))
+    assert archive.messages == []
+
+
 async def test_clear_denial_restores_normal_policy_reads() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
     await enable(store)

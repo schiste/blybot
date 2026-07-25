@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.domain.ports import MessageArchive
     from blybot.observability import Counters
+    from blybot.services.capture import CaptureService
     from blybot.services.notify import RepoNotifier
     from blybot.services.schedule import ActionScheduler
     from blybot.services.sessions import SessionRegistry
@@ -57,6 +58,10 @@ class Maintenance:
     counters: Counters
     # Capture deployments: the archive whose size each heartbeat reports.
     archive: MessageArchive | None = None
+    # Capture deployments: pending consent revocations converge here, so
+    # a quiet channel's disable becomes durable within one tick of a
+    # storage recovery — independent of message arrival.
+    capture: CaptureService | None = None
     interval_seconds: float = 60
     heartbeat_every_ticks: int = 15  # one liveness line roughly every 15 minutes
 
@@ -67,6 +72,8 @@ class Maintenance:
             await asyncio.sleep(self.interval_seconds)
             ticks += 1
             self.tick(ticks)
+            if self.capture is not None:
+                await self.capture.retry_denied()
             if self.archive is not None and ticks % self.heartbeat_every_ticks == 0:
                 await _archive_heartbeat(self.archive)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 
 from blybot.domain.models import CapturedMessage, GroupProfile
@@ -167,6 +168,36 @@ async def test_retry_denied_converges_quiet_scopes_without_a_message() -> None:
     assert profile.capture_enabled is False  # no message needed to converge
     await service.ingest(msg(1))
     assert archive.messages == []
+
+
+class GatedGetProfiles(InMemoryProfiles):
+    """Parks every get() on an event, to interleave tasks deterministically."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+
+    async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
+        result = await super().get(chat_id, thread_id)
+        await self.gate.wait()
+        return result
+
+
+async def test_pending_retry_never_clobbers_a_fresh_enable() -> None:
+    store, archive, clock = GatedGetProfiles(), InMemoryArchive(), FakeClock()
+    await InMemoryProfiles.upsert(store, GroupProfile(chat_id=-1, capture_enabled=True))
+    service, _counters = make_service(store, archive, clock)
+    service.deny_scope(-1, 0)
+
+    retry = asyncio.ensure_future(service.retry_denied())
+    await asyncio.sleep(0)  # the retry is now parked inside its read
+    service.clear_denial(-1, 0)  # a fresh announced enable cancels the revocation
+    store.gate.set()
+    await retry
+
+    profile = await store.get(-1, 0)
+    assert profile is not None
+    assert profile.capture_enabled is True  # the stale retry aborted, not clobbered
 
 
 async def test_clear_denial_restores_normal_policy_reads() -> None:

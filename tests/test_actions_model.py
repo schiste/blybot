@@ -30,8 +30,17 @@ def test_schedule_tokens_round_trip(token: str) -> None:
 
 @pytest.mark.parametrize(
     "token",
-    ["every:0h", "every:h", "daily@25:00", "daily@0600", "weekly@xyz.10:00", "weekly@mon",
-     "hourly", "daily", ""],
+    [
+        "every:0h",
+        "every:h",
+        "daily@25:00",
+        "daily@0600",
+        "weekly@xyz.10:00",
+        "weekly@mon",
+        "hourly",
+        "daily",
+        "",
+    ],
 )
 def test_bad_schedule_tokens_are_rejected_with_guidance(token: str) -> None:
     with pytest.raises(ActionParseError):

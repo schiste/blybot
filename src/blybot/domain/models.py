@@ -145,6 +145,7 @@ class GroupProfile:
     events_enabled: bool = False
     rules: tuple[Rule, ...] = ()
     has_token: bool = False
+    capture_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,6 +393,36 @@ class OutboundMessage:
     chat_id: int
     thread_id: int
     text: str
+
+
+CAPTURE_KINDS: Final = frozenset({"text", "media_note"})
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedMessage:
+    """One archived channel/group message, pseudonymized at the boundary.
+
+    ``author`` is a short per-scope pseudonym label the capture boundary
+    derives (HMAC) — never a Telegram user id, username, or display
+    name; a broadcast channel post has no author (``""``). ``kind`` is
+    ``text`` or ``media_note`` (media itself is not archived; the note
+    only feeds activity stats). ``chat_id``/``thread_id`` are group
+    structure, which the profile store already persists (spec 11).
+    """
+
+    chat_id: int
+    thread_id: int
+    message_id: int
+    posted_at: datetime
+    author: str = ""
+    kind: str = "text"
+    text: str = ""
+    reply_to: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in CAPTURE_KINDS:
+            msg = f"unknown captured-message kind: {self.kind!r}"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)

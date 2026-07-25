@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     repo VARCHAR(140) NULL,
     consent_mode VARCHAR(16) NULL,
     events_enabled TINYINT(1) NOT NULL DEFAULT 0,
+    capture_enabled TINYINT(1) NOT NULL DEFAULT 0,
     rules_json TEXT NULL,
     cursors_json TEXT NULL,
     token_ciphertext BLOB NULL,
@@ -49,18 +50,19 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 _PROFILE_COLUMNS: Final = (
     "chat_id, thread_id, log_page, repo, consent_mode, events_enabled, "
-    "rules_json, token_ciphertext IS NOT NULL"
+    "capture_enabled, rules_json, token_ciphertext IS NOT NULL"
 )
 _KEY: Final = "chat_id = %s AND thread_id = %s"
 Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_LIST_EVENT_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE events_enabled = 1"  # noqa: S608
 Q_UPSERT: Final = """
 INSERT INTO profiles
-    (chat_id, thread_id, log_page, repo, consent_mode, events_enabled, rules_json)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+    (chat_id, thread_id, log_page, repo, consent_mode, events_enabled,
+     capture_enabled, rules_json)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE log_page = VALUES(log_page), repo = VALUES(repo),
     consent_mode = VALUES(consent_mode), events_enabled = VALUES(events_enabled),
-    rules_json = VALUES(rules_json)
+    capture_enabled = VALUES(capture_enabled), rules_json = VALUES(rules_json)
 """
 Q_DELETE: Final = f"DELETE FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_GET_CURSORS: Final = f"SELECT cursors_json FROM profiles WHERE {_KEY}"  # noqa: S608
@@ -89,6 +91,9 @@ MIGRATE_REBUILD_PK: Final = (
 MIGRATE_ADD_RULES: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS rules_json TEXT NULL"
 MIGRATE_ADD_CURSORS: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS cursors_json TEXT NULL"
 MIGRATE_ADD_ACTIONS: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS actions_json TEXT NULL"
+MIGRATE_ADD_CAPTURE: Final = (
+    "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS " "capture_enabled TINYINT(1) NOT NULL DEFAULT 0"
+)
 Q_ACTIONS_READ: Final = f"SELECT actions_json FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_ACTIONS_WRITE: Final = """
 INSERT INTO profiles (chat_id, thread_id, actions_json) VALUES (%s, %s, %s)
@@ -177,6 +182,7 @@ class ToolsDbStore:
         await self._run(MIGRATE_ADD_RULES, ())
         await self._run(MIGRATE_ADD_CURSORS, ())
         await self._run(MIGRATE_ADD_ACTIONS, ())
+        await self._run(MIGRATE_ADD_CAPTURE, ())
         rows = await self._run(Q_THREAD_IN_PK, ())
         if rows and not int(rows[0][0]):
             await self._run(MIGRATE_REBUILD_PK, ())
@@ -198,6 +204,7 @@ class ToolsDbStore:
                 profile.repo,
                 profile.consent_mode.value if profile.consent_mode else None,
                 int(profile.events_enabled),
+                int(profile.capture_enabled),
                 dumps_rules(profile.rules),
             ),
         )
@@ -297,6 +304,7 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         repo,
         consent,
         events_enabled,
+        capture_enabled,
         rules_json,
         has_token,
     ) = row
@@ -307,6 +315,7 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         repo=repo,
         consent_mode=ConsentMode(consent) if consent else None,
         events_enabled=bool(events_enabled),
+        capture_enabled=bool(capture_enabled),
         rules=loads_rules(rules_json),
         has_token=bool(has_token),
     )

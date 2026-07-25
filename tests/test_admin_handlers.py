@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -11,14 +12,15 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from blybot.adapters.telegram import admin as a
-from blybot.domain.models import ConsentMode, DeliveryMode, EventType
+from blybot.domain.models import CapturedMessage, ConsentMode, DeliveryMode, EventType
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
+from blybot.services.capture import CaptureService
 from blybot.services.directory import ChannelDirectory
-from blybot.services.policy import GroupPolicy
+from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.rules import MAX_RULES
 from tests import tg
-from tests.fakes import FakeClock, InMemoryProfiles
+from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
 
 if TYPE_CHECKING:
     from unittest.mock import AsyncMock
@@ -521,3 +523,106 @@ async def test_rules_configure_the_topic_they_run_in() -> None:
     (_sent, thread) = tg.sent_calls(bot)[0]
     assert thread == 42
     assert "this topic" in tg.sent_texts(bot)[0]
+
+
+def make_capture_handlers(
+    store: InMemoryProfiles | None = None,
+    archive: InMemoryArchive | None = None,
+) -> tuple[a.AdminHandlers, InMemoryProfiles, InMemoryArchive]:
+    store = store if store is not None else InMemoryProfiles()
+    archive = archive if archive is not None else InMemoryArchive()
+    handlers = make_handlers(store)
+    clock = FakeClock()
+    handlers.archive = archive
+    handlers.capture_service = CaptureService(
+        store=store,
+        archive=archive,
+        limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
+        clock=clock,
+        counters=Counters(),
+    )
+    return handlers, store, archive
+
+
+async def test_capture_without_deployment_support_says_so() -> None:
+    handlers = make_handlers()  # archive/capture_service left unset
+    context, bot = admin_context(args=["on"])
+    await handlers.on_capture(command("/capture on"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_CAPTURE_OFF_DEPLOY]
+
+
+async def test_capture_usage_on_bad_arguments() -> None:
+    handlers, _store, _archive = make_capture_handlers()
+    context, bot = admin_context(args=["maybe"])
+    await handlers.on_capture(command("/capture maybe"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_CAPTURE_USAGE]
+
+
+async def test_capture_on_enables_and_announces_permanently() -> None:
+    handlers, store, _archive = make_capture_handlers()
+    context, bot = admin_context(args=["on"])
+
+    await handlers.on_capture(command("/capture on"), context)
+
+    assert store.profiles[tg.GROUP.id, 0].capture_enabled
+    (announcement,) = tg.sent_texts(bot)
+    assert "archived" in announcement
+    assert "/capture off" in announcement  # the off-ramp is in the announcement
+
+
+async def test_capture_off_keeps_the_archive() -> None:
+    handlers, store, archive = make_capture_handlers()
+    archive.messages.append(
+        CapturedMessage(
+            chat_id=tg.GROUP.id, thread_id=0, message_id=1, posted_at=tg.NOW, author="x"
+        )
+    )
+    context, bot = admin_context(args=["off"])
+
+    await handlers.on_capture(command("/capture off"), context)
+
+    assert not store.profiles[tg.GROUP.id, 0].capture_enabled
+    assert len(archive.messages) == 1  # kept until an explicit purge
+    assert "purge" in tg.sent_texts(bot)[0]
+
+
+async def test_capture_purge_erases_the_scope_archive() -> None:
+    handlers, _store, archive = make_capture_handlers()
+    archive.messages.append(
+        CapturedMessage(
+            chat_id=tg.GROUP.id, thread_id=0, message_id=1, posted_at=tg.NOW, author="x"
+        )
+    )
+    context, bot = admin_context(args=["purge"])
+
+    await handlers.on_capture(command("/capture purge"), context)
+
+    assert archive.messages == []
+    assert "1 message(s) deleted" in tg.sent_texts(bot)[0]
+
+
+async def test_capture_reports_storage_outage() -> None:
+    store = InMemoryProfiles()
+    handlers, _store, _archive = make_capture_handlers(store)
+    store.fail_upserts = True
+    context, bot = admin_context(args=["on"])
+    await handlers.on_capture(command("/capture on"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
+async def test_settings_reports_capture_state() -> None:
+    store = InMemoryProfiles()
+    handlers, _store, _archive = make_capture_handlers(store)
+    context, bot = admin_context(args=["on"])
+    await handlers.on_capture(command("/capture on"), context)
+
+    context, bot = admin_context()
+    await handlers.on_settings(command("/settings"), context)
+    assert "message capture: on" in tg.sent_texts(bot)[0]
+
+
+async def test_capture_requires_a_group_admin() -> None:
+    handlers, _store, _archive = make_capture_handlers()
+    context, bot = admin_context(status=ChatMemberStatus.MEMBER, args=["on"])
+    await handlers.on_capture(command("/capture on"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]

@@ -9,6 +9,7 @@ from blybot.domain.models import (
     ActionContext,
     ActionScope,
     ActionSpec,
+    CapturedMessage,
     GroupProfile,
     OutboundMessage,
     Pseudonym,
@@ -346,3 +347,39 @@ class InMemoryActions:
             for (chat_id, thread_id), specs in self.actions.items()
             if specs
         ]
+
+
+@dataclass
+class InMemoryArchive:
+    """MessageArchive fake: an ordered list with the adapter's semantics."""
+
+    messages: list[CapturedMessage] = field(default_factory=list)
+    fail: bool = False
+
+    async def store(self, message: CapturedMessage) -> None:
+        if self.fail:
+            raise StorageError
+        key = (message.chat_id, message.thread_id, message.message_id)
+        if any((m.chat_id, m.thread_id, m.message_id) == key for m in self.messages):
+            return  # idempotent per message id, like INSERT IGNORE
+        self.messages.append(message)
+
+    async def window(
+        self, chat_id: int, thread_id: int, since: datetime, until: datetime
+    ) -> list[CapturedMessage]:
+        if self.fail:
+            raise StorageError
+        matching = [
+            m
+            for m in self.messages
+            if (m.chat_id, m.thread_id) == (chat_id, thread_id) and since <= m.posted_at < until
+        ]
+        return sorted(matching, key=lambda m: (m.posted_at, m.message_id))
+
+    async def purge(self, chat_id: int, thread_id: int) -> int:
+        if self.fail:
+            raise StorageError
+        kept = [m for m in self.messages if (m.chat_id, m.thread_id) != (chat_id, thread_id)]
+        removed = len(self.messages) - len(kept)
+        self.messages = kept
+        return removed

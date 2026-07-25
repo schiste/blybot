@@ -13,6 +13,7 @@ from cryptography.fernet import Fernet
 
 from blybot.adapters.toolsdb.store import (
     MIGRATE_ADD_ACTIONS,
+    MIGRATE_ADD_CAPTURE,
     MIGRATE_ADD_CURSORS,
     MIGRATE_ADD_RULES,
     MIGRATE_ADD_THREAD,
@@ -60,6 +61,7 @@ class FakeToolsDb:
                 "repo": None,
                 "consent_mode": None,
                 "events_enabled": 0,
+                "capture_enabled": 0,
                 "rules_json": None,
                 "token": None,
                 "cursors": None,
@@ -77,6 +79,7 @@ class FakeToolsDb:
             row["repo"],
             row["consent_mode"],
             row["events_enabled"],
+            row["capture_enabled"],
             row["rules_json"],
             row["token"] is not None,
         )
@@ -109,7 +112,12 @@ class FakeToolsDb:
                 self.schema_created = True
                 self.thread_in_pk = True  # a freshly created table has the composite key
             return []
-        if query in (MIGRATE_ADD_THREAD, MIGRATE_ADD_RULES, MIGRATE_ADD_CURSORS):
+        if query in (
+            MIGRATE_ADD_THREAD,
+            MIGRATE_ADD_RULES,
+            MIGRATE_ADD_CURSORS,
+            MIGRATE_ADD_CAPTURE,
+        ):
             return []  # column add: no-op in the fake
         if query in (MIGRATE_ADD_ACTIONS, Q_ACTIONS_WRITE, Q_ACTIONS_READ, Q_ACTIONS_LIST):
             return self._run_actions(query, params)
@@ -125,13 +133,14 @@ class FakeToolsDb:
                 del self.tables[key]
             return []
         if query == Q_UPSERT:
-            chat_id, thread_id, log_page, repo, consent, events_enabled, rules_json = params
+            chat_id, thread_id, log_page, repo, consent, events, capture, rules_json = params
             row = self._row((chat_id, thread_id))
             row.update(
                 log_page=log_page,
                 repo=repo,
                 consent_mode=consent,
-                events_enabled=events_enabled,
+                events_enabled=events,
+                capture_enabled=capture,
                 rules_json=rules_json,
             )
             return []

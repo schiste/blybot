@@ -83,6 +83,15 @@ class Config:
     toolsdb_name: str
     toolsdb_cnf: str
     events_poll_minutes: int
+    archive_pseudonym_key: str
+    capture_max_per_minute: int
+    liftwing_api_base: str
+    liftwing_model_default: str
+    liftwing_model_large: str
+    liftwing_timeout_seconds: int
+    llm_default_lang: str
+    llm_max_tokens_ceiling: int
+    llm_max_chunks_per_run: int
     user_agent: str
 
     @property
@@ -153,6 +162,17 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         toolsdb_name=source.get("TOOLSDB_NAME", ""),
         toolsdb_cnf=source.get("TOOLSDB_CNF", str(Path.home() / "replica.my.cnf")),
         events_poll_minutes=_parse_positive_int(source, "EVENTS_POLL_MINUTES", 5),
+        archive_pseudonym_key=source.get("ARCHIVE_PSEUDONYM_KEY", ""),
+        capture_max_per_minute=_parse_positive_int(source, "CAPTURE_MAX_PER_MINUTE", 60),
+        liftwing_api_base=source.get(
+            "LIFTWING_API_BASE", "https://api.wikimedia.org/service/lw/inference/v1"
+        ),
+        liftwing_model_default=source.get("LIFTWING_MODEL_DEFAULT", "llm-qwen3-14b"),
+        liftwing_model_large=source.get("LIFTWING_MODEL_LARGE", "llm-qwen36-27b"),
+        liftwing_timeout_seconds=_parse_positive_int(source, "LIFTWING_TIMEOUT_SECONDS", 120),
+        llm_default_lang=source.get("LLM_DEFAULT_LANG", "en"),
+        llm_max_tokens_ceiling=_parse_positive_int(source, "LLM_MAX_TOKENS_CEILING", 4096),
+        llm_max_chunks_per_run=_parse_positive_int(source, "LLM_MAX_CHUNKS_PER_RUN", 12),
         user_agent=source["USER_AGENT"],
     )
 

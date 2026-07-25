@@ -12,6 +12,7 @@ from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.app import Lifecycle
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
+from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
 from tests.test_config import REQUIRED
 
@@ -91,3 +92,67 @@ def test_invalid_encryption_key_fails_fast(
 
     assert entry.main() == 2
     assert "Fernet" in capsys.readouterr().err
+
+
+async def test_pseudonym_key_enables_capture_wiring(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+
+    assert entry.main() == 0
+    assert seen["capture_handlers"] is not None
+    admin = seen["admin_handlers"]
+    assert admin.archive is not None
+    assert admin.capture_service is seen["capture_handlers"].service
+    await seen["lifecycle"].release()
+
+
+async def test_capture_stays_off_without_the_pseudonym_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.delenv("ARCHIVE_PSEUDONYM_KEY", raising=False)
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+
+    assert entry.main() == 0
+    assert seen["capture_handlers"] is None
+    assert seen["admin_handlers"].archive is None
+
+    async def store_boot(_self: object) -> None:
+        return None
+
+    monkeypatch.setattr(ToolsDbStore, "bootstrap", store_boot)
+    await seen["lifecycle"].bootstrap()  # no archive: profile store only
+    await seen["lifecycle"].release()
+
+
+async def test_bootstrap_covers_both_stores(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+    booted: list[str] = []
+
+    async def store_boot(_self: object) -> None:
+        booted.append("profiles")
+
+    async def archive_boot(_self: object) -> None:
+        booted.append("messages")
+
+    monkeypatch.setattr(ToolsDbStore, "bootstrap", store_boot)
+    monkeypatch.setattr(ToolsDbArchive, "bootstrap", archive_boot)
+
+    assert entry.main() == 0
+    bootstrap = seen["lifecycle"].bootstrap
+    assert bootstrap is not None
+    await bootstrap()
+    assert booted == ["profiles", "messages"]
+    await seen["lifecycle"].release()

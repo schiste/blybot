@@ -1,9 +1,11 @@
 """Telegram transport wiring (spec section 8).
 
-Long polling via python-telegram-bot with privacy mode ON (R1): the
-``allowed_updates`` list opts into exactly ``message``,
-``my_chat_member`` and ``chat_member`` — reliable join detection via
-``chat_member`` additionally requires the bot to be a group admin.
+Long polling via python-telegram-bot. The ``allowed_updates`` list opts
+into ``message``, ``my_chat_member`` and ``chat_member`` — reliable join
+detection via ``chat_member`` additionally requires the bot to be a
+group admin. Capture-enabled deployments (v3) additionally subscribe to
+``channel_post`` and run with privacy mode OFF; without capture, privacy
+mode stays ON (R1) and group chatter is never even delivered.
 
 A maintenance task sweeps expired sessions and emits a periodic
 heartbeat with the counter snapshot (spec 16); shutdown flushes pending
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
     from telegram import Bot
 
     from blybot.adapters.telegram.admin import AdminHandlers
+    from blybot.adapters.telegram.capture import CaptureHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.observability import Counters
     from blybot.services.notify import RepoNotifier
@@ -135,12 +138,13 @@ async def repo_notify_loop(bot: Bot, notifier: RepoNotifier, interval_seconds: f
                 log_event("repo_digest", "ignored")
 
 
-def build_application(
+def build_application(  # noqa: PLR0913 -- one handler bundle per concern
     token: str,
     group_handlers: GroupHandlers,
     private_handlers: PrivateHandlers,
     admin_handlers: AdminHandlers,
     lifecycle: Lifecycle,
+    capture_handlers: CaptureHandlers | None = None,
 ) -> _App:
     """Build the PTB application with every handler registered."""
     application = (
@@ -176,6 +180,7 @@ def build_application(
         ("events", admin_handlers.on_events),
         ("rule", admin_handlers.on_rule),
         ("rules", admin_handlers.on_rules),
+        ("capture", admin_handlers.on_capture),
         ("revoke", admin_handlers.on_revoke),
         ("settings", admin_handlers.on_settings),
         ("reset", admin_handlers.on_reset),
@@ -207,18 +212,41 @@ def build_application(
             filters.ChatType.PRIVATE & filters.TEXT & ~filters.COMMAND, private_handlers.on_dm
         )
     )
+    if capture_handlers is not None:
+        # Handler group 1: capture observes updates independently, so it
+        # can never steal an update from (or be starved by) the
+        # interactive handlers above, which all live in group 0.
+        application.add_handler(
+            MessageHandler(filters.UpdateType.CHANNEL_POST, capture_handlers.on_channel_post),
+            group=1,
+        )
+        application.add_handler(
+            MessageHandler(
+                filters.ChatType.GROUPS & ~filters.COMMAND & ~filters.StatusUpdate.ALL,
+                capture_handlers.on_group_message,
+            ),
+            group=1,
+        )
+        application.add_handler(
+            ChatMemberHandler(capture_handlers.on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER),
+            group=1,
+        )
     return application
 
 
-def run_polling(
+def run_polling(  # noqa: PLR0913 -- one handler bundle per concern
     token: str,
     group_handlers: GroupHandlers,
     private_handlers: PrivateHandlers,
     admin_handlers: AdminHandlers,
     lifecycle: Lifecycle,
+    capture_handlers: CaptureHandlers | None = None,
 ) -> None:
     """Poll until stopped; blocks for the process lifetime."""
     application = build_application(
-        token, group_handlers, private_handlers, admin_handlers, lifecycle
+        token, group_handlers, private_handlers, admin_handlers, lifecycle, capture_handlers
     )
-    application.run_polling(allowed_updates=_ALLOWED_UPDATES)
+    allowed = list(_ALLOWED_UPDATES)
+    if capture_handlers is not None:
+        allowed.append(Update.CHANNEL_POST)
+    application.run_polling(allowed_updates=allowed)

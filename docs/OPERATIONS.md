@@ -141,7 +141,10 @@ section before enabling.**
    instances) so privacy-first groups keep the structural guarantee.
 3. Group admins enable per scope with `/capture on` (announced in-chat,
    permanently); channels enable by making the bot a channel admin (it
-   posts an announcement). `/capture off` stops; `/capture purge`
+   posts an announcement first — if it cannot post, capture does not
+   start) and disable by demoting or removing it. Re-promoting the bot
+   re-announces: a fresh loud opt-in, never a silent resumption. In
+   groups `/capture off` stops; `/capture purge`
    erases (`/capture purge before:YYYY-MM-DD` trims only older rows).
    Set `CAPTURE_REANNOUNCE_DAYS` to re-post the announcement on a
    cadence. Note: the archive keeps the first version of each message —

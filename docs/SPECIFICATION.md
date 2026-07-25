@@ -365,9 +365,13 @@ bot, privacy mode ON.
 archived only for scopes with capture explicitly enabled: groups via an
 admin's `/capture on` (the confirmation is a permanent in-chat
 announcement), broadcast channels by an admin adding the bot as channel
-admin (announced with a channel post). `/capture off` stops collection;
-`/capture purge` hard-deletes the scope's archive. The enable check is
-the single policy boundary between the update stream and storage.
+admin (announced with a channel post — the announcement precedes the
+enable, so a channel that cannot be told is never archived). For groups,
+`/capture off` stops collection and `/capture purge` hard-deletes the
+scope's archive; for channels, admin status *is* the consent — demoting
+or removing the bot disables capture, and a re-promotion re-announces
+before re-enabling. The enable check is the single policy boundary
+between the update stream and storage.
 
 **R-v3.2 — Pseudonymized archive.** The `messages` table stores group
 structure, timestamps, text, and an author label that is

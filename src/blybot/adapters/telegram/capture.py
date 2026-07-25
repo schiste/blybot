@@ -57,7 +57,8 @@ class HmacAuthorMasker:
     The label is HMAC-SHA256(key, scope‖user) truncated for readability:
     stable within a scope (so activity stats work), unlinkable across
     scopes, and unlinkable to the account without the key. Rotating
-    ``ARCHIVE_PSEUDONYM_KEY`` re-keys everyone at once.
+    ``ARCHIVE_PSEUDONYM_KEY`` re-keys every *future* label; archived
+    rows keep theirs (nothing stored can recompute them — R-v3.2).
     """
 
     key: str

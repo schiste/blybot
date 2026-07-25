@@ -374,7 +374,11 @@ every author *going forward*: already-archived rows keep their old
 labels — by design they cannot be recomputed, because the user id that
 fed the HMAC is never stored — so rotation severs the link between an
 author's past and future labels; erasing the old labels themselves is
-`/capture purge`. Media bodies are not archived (a `media_note` row records
+`/capture purge`. Labels are likewise scoped to the chat id, so a
+group→supergroup upgrade (which changes the id) restarts them: migrated
+rows keep their old labels and later messages get new ones — a one-time
+discontinuity where stats windows spanning the migration count an
+author under two labels. Media bodies are not archived (a `media_note` row records
 that media was posted). Ingest is guarded by text truncation at 4096
 chars and a per-scope per-minute ceiling.
 

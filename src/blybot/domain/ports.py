@@ -146,6 +146,10 @@ class MessageArchive(Protocol):
         """Return the archive's total row count (operator metric)."""
         ...
 
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        """Re-key every topic's messages after a group→supergroup upgrade."""
+        ...
+
 
 class ActionStore(Protocol):
     """Persists each scope's configured actions (spec 11: one JSON document)."""

@@ -84,7 +84,9 @@ serves every recipe. Each scope holds at most 20 actions
   follow.
 - `last_run` is stamped when a run is *attempted*, before its outcome is
   known: a permanently failing action costs one try per slot, not one
-  per tick.
+  per tick. The stamp is *persisted before* the pipeline runs, so a
+  publish followed by a crash reads as "already ran" — a skipped digest
+  beats a duplicated wiki section.
 - `window=since_last_run` turns a scheduled digest into a watermark
   window: each run covers exactly the messages archived since the
   previous run (clamped to 30 days after long downtime) — no edge

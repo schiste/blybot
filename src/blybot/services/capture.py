@@ -46,7 +46,9 @@ class CaptureService:
         """Archive ``message`` iff its scope opted in; never raises."""
         if not await self._enabled(message.chat_id, message.thread_id):
             return
-        if not self.limiter.allow("capture", message.chat_id):
+        # Throttle per (chat, topic) — the documented per-scope ceiling.
+        # One busy topic must not starve its siblings' archives.
+        if not self.limiter.allow(f"capture:{message.thread_id}", message.chat_id):
             self.counters.increment("captures_throttled")
             return
         if len(message.text) > MAX_TEXT_CHARS:

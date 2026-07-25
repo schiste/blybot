@@ -10,6 +10,13 @@ retried until its next due slot — its ``last_run`` was stamped for the
 attempt, so a permanently broken action costs one try per slot, not one
 per tick.
 
+The stamped watermarks are persisted *before* any pipeline runs: a
+publish followed by a crash must read as "already ran", never as "still
+due" — a skipped digest beats a duplicated wiki section. Persisting
+first also keeps the write adjacent to the load, so a minutes-long LLM
+run cannot overwrite ``/action add``/``remove`` edits made meanwhile
+with a stale snapshot.
+
 A stored action with no ``last_run`` (older rows, hand-edited state) is
 baselined: stamped now, run at its *next* slot — never a replay, the
 same first-contact rule the repo poll cursors follow.
@@ -69,21 +76,26 @@ class ActionScheduler:
         self, scope: ActionScope, actions: tuple[ActionSpec, ...]
     ) -> list[OutboundMessage]:
         now = self.clock.now()
-        messages: list[OutboundMessage] = []
         updated = list(actions)
-        changed = False
+        due: list[ActionSpec] = []
         for index, spec in enumerate(actions):
             schedule = spec.trigger.schedule
             if spec.trigger.kind is not TriggerKind.SCHEDULE or schedule is None:
                 continue
             if spec.last_run is None:  # baseline: next slot, never a replay
                 updated[index] = replace(spec, last_run=now)
-                changed = True
                 continue
             if not schedule.is_due(now, spec.last_run):
                 continue
             updated[index] = replace(spec, last_run=now)
-            changed = True
+            due.append(spec)  # the *old* last_run feeds since_last_run windows
+        if tuple(updated) != actions:
+            # Persist the stamps before any side effects (module docstring).
+            # If this write fails, the per-scope isolation above skips the
+            # scope's runs this tick — failing toward "no duplicate publish".
+            await self.store.set_actions(scope.chat_id, scope.thread_id, tuple(updated))
+        messages: list[OutboundMessage] = []
+        for spec in due:
             try:
                 messages.extend((await self.engine.run(scope, spec, now)).messages)
             except Exception:
@@ -92,6 +104,4 @@ class ActionScheduler:
                 # scope's other due actions. Deliberately broad.
                 self.counters.increment("actions_failed")
                 log_event("action_run", "error")
-        if changed:
-            await self.store.set_actions(scope.chat_id, scope.thread_id, tuple(updated))
         return messages

@@ -11,6 +11,8 @@ from blybot.adapters.toolsdb.archive import (
     MESSAGES_SCHEMA,
     Q_COUNT,
     Q_COUNT_BEFORE,
+    Q_MIGRATE,
+    Q_MIGRATE_CLEAR,
     Q_PURGE,
     Q_PURGE_BEFORE,
     Q_STORE,
@@ -66,6 +68,17 @@ class FakeMessagesDb:
             return []
         if query == Q_TOTAL:
             return [(len(self.rows),)]
+        if query == Q_MIGRATE_CLEAR:
+            (new_chat_id,) = params
+            for key in [k for k in self.rows if k[0] == new_chat_id]:
+                del self.rows[key]
+            return []
+        if query == Q_MIGRATE:
+            new_chat_id, old_chat_id = params
+            for key in [k for k in self.rows if k[0] == old_chat_id]:
+                row = self.rows.pop(key)
+                self.rows[new_chat_id, key[1], key[2]] = (new_chat_id, *row[1:])
+            return []
         msg = f"unexpected query: {query!r}"
         raise AssertionError(msg)
 
@@ -189,3 +202,20 @@ async def test_total_counts_every_scope() -> None:
         CapturedMessage(chat_id=-2, thread_id=0, message_id=9, posted_at=NOW, author="x")
     )
     assert await archive.total() == 2
+
+
+async def test_migrate_rekeys_every_topic_and_clears_collisions() -> None:
+    archive, db = make_archive()
+    await archive.store(msg(1))
+    await archive.store(
+        CapturedMessage(chat_id=-1, thread_id=7, message_id=2, posted_at=NOW, author="x")
+    )
+    # A message captured under the new id before the service message
+    # arrived: the migrated rows win, mirroring the profile store.
+    await archive.store(
+        CapturedMessage(chat_id=-100999, thread_id=0, message_id=3, posted_at=NOW, author="x")
+    )
+
+    await archive.migrate(-1, -100999)
+
+    assert sorted(db.rows) == [(-100999, 0, 1), (-100999, 7, 2)]

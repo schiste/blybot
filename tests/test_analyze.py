@@ -237,6 +237,21 @@ async def test_scope_settings_and_step_params_override_defaults() -> None:
     assert report.model_label == "large model on liftwing"
 
 
+async def test_topic_without_its_own_settings_inherits_the_group_default() -> None:
+    store = InMemoryProfiles()
+    await store.upsert(GroupProfile(chat_id=-1, llm=LlmSettings(model="large", lang="fr")))
+    await store.upsert(GroupProfile(chat_id=-1, thread_id=7))  # topic row, no /llm
+    runner = FakePromptRunner(results=[PromptResult(content='["oui"]')])
+    transform, _counters = make_transform(runner, store=store)
+    topic = ActionContext(scope=ActionScope(chat_id=-1, thread_id=7), spec=context().spec, now=NOW)
+
+    report = await transform.apply(topic, prompt_step(), transcript(msg(1)))
+
+    (request,) = runner.requests
+    assert request.model == "large"  # topic override → group default → operator default
+    assert report.lang == "fr"
+
+
 async def test_storage_outage_falls_back_to_deployment_defaults() -> None:
     store = InMemoryProfiles(fail=True)
     runner = FakePromptRunner(results=[PromptResult(content='["ok"]')])

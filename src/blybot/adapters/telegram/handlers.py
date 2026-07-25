@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
     from blybot.adapters.telegram.token_entry import TokenEntryHandler
     from blybot.domain.models import Session
+    from blybot.domain.ports import MessageArchive
     from blybot.services.directory import ChannelDirectory, ChannelSettings
     from blybot.services.dm_routing import DmRouteRegistry
     from blybot.services.engine import ActionEngine
@@ -263,6 +264,9 @@ class GroupHandlers:
     maintainer: str
     newcomer_welcome_enabled: bool
     repo_service: GroupRepoService | None
+    # Capture-enabled deployments only: the archive follows the group
+    # across supergroup migrations, alongside its profiles.
+    archive: MessageArchive | None = None
     # The /log command message is deleted after this delay, hiding who
     # requested the publication. Requires the "Delete messages" admin
     # right; without it the cleanup is skipped silently.
@@ -403,6 +407,11 @@ class GroupHandlers:
         applied = self.groups.migrate(message.chat.id, message.migrate_to_chat_id)
         try:
             await self.directory.migrate(message.chat.id, message.migrate_to_chat_id)
+            if self.archive is not None:
+                # The captured messages move with the profiles: rows left
+                # under the dead chat id would vanish from analyses and be
+                # unreachable by /capture purge.
+                await self.archive.migrate(message.chat.id, message.migrate_to_chat_id)
         except StorageError:
             log_event("chat_migration", "error")
             return

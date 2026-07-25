@@ -28,10 +28,12 @@ def make_service(
     return service, counters
 
 
-def msg(message_id: int = 1, text: str = "hello", chat_id: int = -1) -> CapturedMessage:
+def msg(
+    message_id: int = 1, text: str = "hello", chat_id: int = -1, thread_id: int = 0
+) -> CapturedMessage:
     return CapturedMessage(
         chat_id=chat_id,
-        thread_id=0,
+        thread_id=thread_id,
         message_id=message_id,
         posted_at=FakeClock().now(),
         author="abc123",
@@ -95,6 +97,19 @@ async def test_ingest_ceiling_throttles_a_flood() -> None:
         await service.ingest(msg(message_id))
 
     assert len(archive.messages) == 2
+    assert counters.snapshot()["captures_throttled"] == 2
+
+
+async def test_one_busy_topic_never_throttles_its_siblings() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)  # thread 0 covers every topic via inheritance
+    service, counters = make_service(store, archive, clock, per_minute=2)
+
+    for message_id in range(1, 5):
+        await service.ingest(msg(message_id, thread_id=7))  # capped at 2
+    await service.ingest(msg(9, thread_id=8))  # sibling scope: own budget
+
+    assert [m.thread_id for m in archive.messages] == [7, 7, 8]
     assert counters.snapshot()["captures_throttled"] == 2
 
 

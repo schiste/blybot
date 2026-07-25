@@ -15,6 +15,7 @@ from blybot.adapters.toolsdb.store import (
     MIGRATE_ADD_ACTIONS,
     MIGRATE_ADD_CAPTURE,
     MIGRATE_ADD_CURSORS,
+    MIGRATE_ADD_LLM,
     MIGRATE_ADD_RULES,
     MIGRATE_ADD_THREAD,
     MIGRATE_REBUILD_PK,
@@ -37,7 +38,7 @@ from blybot.adapters.toolsdb.store import (
     PymysqlRunner,
     ToolsDbStore,
 )
-from blybot.domain.models import ActionScope, ConsentMode, GroupProfile
+from blybot.domain.models import ActionScope, ConsentMode, GroupProfile, LlmSettings
 from blybot.domain.ports import StorageError
 from blybot.services.actions import parse_action
 from blybot.services.rules import parse_rule
@@ -63,6 +64,7 @@ class FakeToolsDb:
                 "events_enabled": 0,
                 "capture_enabled": 0,
                 "rules_json": None,
+                "llm_json": None,
                 "token": None,
                 "cursors": None,
                 "actions": None,
@@ -81,6 +83,7 @@ class FakeToolsDb:
             row["events_enabled"],
             row["capture_enabled"],
             row["rules_json"],
+            row["llm_json"],
             row["token"] is not None,
         )
 
@@ -117,6 +120,7 @@ class FakeToolsDb:
             MIGRATE_ADD_RULES,
             MIGRATE_ADD_CURSORS,
             MIGRATE_ADD_CAPTURE,
+            MIGRATE_ADD_LLM,
         ):
             return []  # column add: no-op in the fake
         if query in (MIGRATE_ADD_ACTIONS, Q_ACTIONS_WRITE, Q_ACTIONS_READ, Q_ACTIONS_LIST):
@@ -133,7 +137,7 @@ class FakeToolsDb:
                 del self.tables[key]
             return []
         if query == Q_UPSERT:
-            chat_id, thread_id, log_page, repo, consent, events, capture, rules_json = params
+            chat_id, thread_id, log_page, repo, consent, events, capture, rules, llm = params
             row = self._row((chat_id, thread_id))
             row.update(
                 log_page=log_page,
@@ -141,7 +145,8 @@ class FakeToolsDb:
                 consent_mode=consent,
                 events_enabled=events,
                 capture_enabled=capture,
-                rules_json=rules_json,
+                rules_json=rules,
+                llm_json=llm,
             )
             return []
         if query == Q_GET:
@@ -422,3 +427,19 @@ async def test_migrate_rekeys_the_profile() -> None:
     migrated = await store.get(-200600, 0)
     assert migrated is not None
     assert migrated.repo == PROFILE.repo
+
+
+async def test_llm_settings_roundtrip_through_json_column() -> None:
+    store, _fake = make_store()
+    profile = replace(PROFILE, llm=LlmSettings(model="large", lang="fr"))
+
+    await store.upsert(profile)
+    loaded = await store.get(PROFILE.chat_id, 0)
+
+    assert loaded is not None
+    assert loaded.llm == LlmSettings(model="large", lang="fr")
+
+    await store.upsert(replace(profile, llm=None))
+    reloaded = await store.get(PROFILE.chat_id, 0)
+    assert reloaded is not None
+    assert reloaded.llm is None

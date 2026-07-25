@@ -24,6 +24,7 @@ from blybot.domain.models import ActionScope, ConsentMode, GroupProfile
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 from blybot.services.actions import dumps_actions, loads_actions
+from blybot.services.llmconf import dumps_llm, loads_llm
 from blybot.services.rules import dumps_rules, loads_rules
 
 if TYPE_CHECKING:
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     events_enabled TINYINT(1) NOT NULL DEFAULT 0,
     capture_enabled TINYINT(1) NOT NULL DEFAULT 0,
     rules_json TEXT NULL,
+    llm_json TEXT NULL,
     cursors_json TEXT NULL,
     token_ciphertext BLOB NULL,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -50,7 +52,7 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 _PROFILE_COLUMNS: Final = (
     "chat_id, thread_id, log_page, repo, consent_mode, events_enabled, "
-    "capture_enabled, rules_json, token_ciphertext IS NOT NULL"
+    "capture_enabled, rules_json, llm_json, token_ciphertext IS NOT NULL"
 )
 _KEY: Final = "chat_id = %s AND thread_id = %s"
 Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: S608
@@ -58,11 +60,12 @@ Q_LIST_EVENT_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE ev
 Q_UPSERT: Final = """
 INSERT INTO profiles
     (chat_id, thread_id, log_page, repo, consent_mode, events_enabled,
-     capture_enabled, rules_json)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+     capture_enabled, rules_json, llm_json)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE log_page = VALUES(log_page), repo = VALUES(repo),
     consent_mode = VALUES(consent_mode), events_enabled = VALUES(events_enabled),
-    capture_enabled = VALUES(capture_enabled), rules_json = VALUES(rules_json)
+    capture_enabled = VALUES(capture_enabled), rules_json = VALUES(rules_json),
+    llm_json = VALUES(llm_json)
 """
 Q_DELETE: Final = f"DELETE FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_GET_CURSORS: Final = f"SELECT cursors_json FROM profiles WHERE {_KEY}"  # noqa: S608
@@ -94,6 +97,7 @@ MIGRATE_ADD_ACTIONS: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS acti
 MIGRATE_ADD_CAPTURE: Final = (
     "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS " "capture_enabled TINYINT(1) NOT NULL DEFAULT 0"
 )
+MIGRATE_ADD_LLM: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS llm_json TEXT NULL"
 Q_ACTIONS_READ: Final = f"SELECT actions_json FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_ACTIONS_WRITE: Final = """
 INSERT INTO profiles (chat_id, thread_id, actions_json) VALUES (%s, %s, %s)
@@ -183,6 +187,7 @@ class ToolsDbStore:
         await self._run(MIGRATE_ADD_CURSORS, ())
         await self._run(MIGRATE_ADD_ACTIONS, ())
         await self._run(MIGRATE_ADD_CAPTURE, ())
+        await self._run(MIGRATE_ADD_LLM, ())
         rows = await self._run(Q_THREAD_IN_PK, ())
         if rows and not int(rows[0][0]):
             await self._run(MIGRATE_REBUILD_PK, ())
@@ -206,6 +211,7 @@ class ToolsDbStore:
                 int(profile.events_enabled),
                 int(profile.capture_enabled),
                 dumps_rules(profile.rules),
+                dumps_llm(profile.llm) if profile.llm is not None else None,
             ),
         )
 
@@ -306,6 +312,7 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         events_enabled,
         capture_enabled,
         rules_json,
+        llm_json,
         has_token,
     ) = row
     return GroupProfile(
@@ -317,5 +324,6 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         events_enabled=bool(events_enabled),
         capture_enabled=bool(capture_enabled),
         rules=loads_rules(rules_json),
+        llm=loads_llm(llm_json),
         has_token=bool(has_token),
     )

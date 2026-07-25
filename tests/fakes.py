@@ -12,6 +12,8 @@ from blybot.domain.models import (
     CapturedMessage,
     GroupProfile,
     OutboundMessage,
+    PromptRequest,
+    PromptResult,
     Pseudonym,
     RepoEvent,
     RepoSummary,
@@ -383,3 +385,20 @@ class InMemoryArchive:
         removed = len(self.messages) - len(kept)
         self.messages = kept
         return removed
+
+
+@dataclass
+class FakePromptRunner:
+    """PromptRunner fake: scripted results (or errors), recorded requests."""
+
+    results: list[PromptResult | Exception] = field(default_factory=list)
+    requests: list[PromptRequest] = field(default_factory=list)
+
+    async def run(self, request: PromptRequest) -> PromptResult:
+        self.requests.append(request)
+        if not self.results:
+            return PromptResult(content='["fallback item"]')
+        result = self.results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result

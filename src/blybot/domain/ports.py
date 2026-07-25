@@ -18,6 +18,8 @@ from blybot.domain.models import (
     CapturedMessage,
     GroupProfile,
     OutboundMessage,
+    PromptRequest,
+    PromptResult,
     Pseudonym,
     RepoEvent,
     RepoSummary,
@@ -90,6 +92,27 @@ class Sink(Protocol):
 
     async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         """Publish ``payload``; return any chat messages to send."""
+        ...
+
+
+class PromptError(Exception):
+    """An inference call failed for good after bounded retries.
+
+    Defined in the domain so services can abort an analysis (and
+    publish nothing) without importing the platform adapter.
+    """
+
+
+class PromptRunner(Protocol):
+    """Text-in/text-out inference behind a platform adapter (v3 plan §2.3).
+
+    Implementations resolve the request's model *alias* to a concrete
+    id, apply transport retries, and surface truncation via
+    ``finish_reason`` rather than guessing.
+    """
+
+    async def run(self, request: PromptRequest) -> PromptResult:
+        """Execute one chat completion; raise :class:`PromptError` on failure."""
         ...
 
 

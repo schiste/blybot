@@ -128,6 +128,50 @@ class LogContent:
 
 
 @dataclass(frozen=True, slots=True)
+class Transcript:
+    """An archive window handed to analysis transforms — pseudonymized already."""
+
+    messages: tuple[CapturedMessage, ...]
+    since: datetime
+    until: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisReport:
+    """The structured outcome of an LLM analysis, ready for trusted rendering.
+
+    ``items`` are untrusted model-written strings: every consumer must
+    sanitize them individually before they may touch a wiki page (v3
+    plan §2.5 — the model never writes markup).
+    """
+
+    title: str
+    items: tuple[str, ...]
+    message_count: int
+    participant_count: int
+    since: datetime
+    until: datetime
+    model_label: str
+    lang: str
+    sampled: bool = False  # the window exceeded the chunk cap; items cover a prefix
+
+
+@dataclass(frozen=True, slots=True)
+class StatsReport:
+    """Deterministic activity statistics — computed in Python, no LLM involved."""
+
+    message_count: int
+    participant_count: int
+    media_count: int
+    reply_count: int
+    busiest_hour_utc: int | None
+    busiest_hour_count: int
+    top_authors: tuple[tuple[str, int], ...]  # (pseudonym label, messages)
+    since: datetime
+    until: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class GroupProfile:
     """Self-service configuration one group's admins chose from Telegram.
 
@@ -146,6 +190,7 @@ class GroupProfile:
     rules: tuple[Rule, ...] = ()
     has_token: bool = False
     capture_enabled: bool = False
+    llm: LlmSettings | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +438,59 @@ class OutboundMessage:
     chat_id: int
     thread_id: int
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class LlmSettings:
+    """Per-scope LLM configuration (v3 plan §2.4).
+
+    ``model`` is an alias (``default`` or ``large``) the platform adapter
+    resolves to a concrete id, so operators can re-point aliases without
+    touching any scope's settings. ``lang`` pins the *output* language of
+    every analysis regardless of the transcript's language(s).
+    """
+
+    platform: str = "liftwing"
+    model: str = "default"
+    lang: str = "en"
+    temperature: float = 0.2
+    max_tokens: int = 1024
+
+    def __post_init__(self) -> None:
+        if not (self.platform and self.model and self.lang):
+            msg = "LlmSettings fields must be non-empty"
+            raise ValueError(msg)
+        if not 0.0 <= self.temperature <= 1.0:
+            msg = "temperature must be between 0 and 1"
+            raise ValueError(msg)
+        if self.max_tokens <= 0:
+            msg = "max_tokens must be positive"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class PromptRequest:
+    """One text-in/text-out inference call, platform-agnostic."""
+
+    model: str  # an alias the platform resolves (never a chat identity)
+    system: str
+    user_content: str
+    max_tokens: int = 1024
+    temperature: float = 0.2
+
+
+@dataclass(frozen=True, slots=True)
+class PromptResult:
+    """What came back: content plus the safety-relevant metadata.
+
+    ``finish_reason`` matters because ``"length"`` marks truncated output
+    that must never be published; token counts feed operator counters.
+    """
+
+    content: str
+    finish_reason: str = "stop"
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 CAPTURE_KINDS: Final = frozenset({"text", "media_note"})

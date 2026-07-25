@@ -163,9 +163,7 @@ async def test_becoming_channel_admin_enables_capture_and_announces() -> None:
     handlers, store, _archive = make_handlers()
     context, bot = tg.make_context()
 
-    await handlers.on_my_chat_member(
-        admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context
-    )
+    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
 
     profile = await store.get(CHANNEL.id, 0)
     assert profile is not None
@@ -190,9 +188,7 @@ async def test_channel_enable_survives_storage_and_send_failures() -> None:
     handlers, store, _archive = make_handlers()
     store.fail_upserts = True
     context, bot = tg.make_context()
-    await handlers.on_my_chat_member(
-        admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context
-    )
+    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
     bot.send_message.assert_not_awaited()  # no announcement for a failed enable
 
     store.fail_upserts = False
@@ -209,9 +205,7 @@ async def test_disallowed_channel_is_never_enabled() -> None:
     handlers, store, _archive = make_handlers(allowed={-999})
     context, bot = tg.make_context()
 
-    await handlers.on_my_chat_member(
-        admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context
-    )
+    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
 
     assert await store.get(CHANNEL.id, 0) is None
     bot.send_message.assert_not_awaited()
@@ -244,6 +238,4 @@ async def test_authorless_group_messages_are_archived_without_a_label() -> None:
 
 def test_captured_messages_reject_unknown_kinds() -> None:
     with pytest.raises(ValueError, match="kind"):
-        CapturedMessage(
-            chat_id=-1, thread_id=0, message_id=1, posted_at=tg.NOW, kind="sticker"
-        )
+        CapturedMessage(chat_id=-1, thread_id=0, message_id=1, posted_at=tg.NOW, kind="sticker")

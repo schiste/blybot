@@ -16,7 +16,7 @@ from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError
 
 from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
-from blybot.domain.models import ConsentMode
+from blybot.domain.models import ConsentMode, LlmSettings
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
 from blybot.services.directory import (
@@ -24,6 +24,7 @@ from blybot.services.directory import (
     SelfServiceUnavailableError,
     TooManyRulesError,
 )
+from blybot.services.llmconf import LlmParseError, describe_llm, parse_llm_args
 from blybot.services.rules import MAX_RULES, RuleParseError, describe_rule, parse_rule
 
 if TYPE_CHECKING:
@@ -93,6 +94,15 @@ REPLY_RULES_LIST: Final = "Rules for {scope}:\n{lines}"
 REPLY_RULES_FULL: Final = (
     "You already have the maximum of {max} rules at {scope}; remove one with /rule remove <id>."
 )
+REPLY_LLM_USAGE: Final = (
+    "Usage: /llm show · /llm set key:value … · /llm reset\n"
+    "Keys: platform, model (default|large), lang (output language), "
+    "temp (0..1), max_tokens"
+)
+REPLY_LLM_OFF_DEPLOY: Final = "LLM analyses aren't enabled on this deployment; ask the operator."
+REPLY_LLM_SHOW: Final = "LLM settings for {scope} ({origin}):\n{line}"
+REPLY_LLM_SET: Final = "LLM settings updated for {scope}: {line}"
+REPLY_LLM_RESET: Final = "LLM settings for {scope} back to deployment defaults."
 REPLY_CAPTURE_USAGE: Final = "Usage: /capture on | off | purge"
 REPLY_CAPTURE_OFF_DEPLOY: Final = (
     "Message capture isn't enabled on this deployment; ask the operator."
@@ -118,6 +128,9 @@ SETUP_TEXT: Final = (
     "/rule add|remove|clear — composable event rules (see /rules)\n"
     "/rules — list this chat's event rules\n"
     "/capture on|off|purge — archive this chat's messages for analyses\n"
+    "/summarize · /talkingpoints · /stats [24h|7d] — publish an analysis now\n"
+    "/action add|remove|list — schedule recurring analyses\n"
+    "/llm show|set|reset — this chat's model, output language, parameters\n"
     "/revoke — discard this group's stored GitHub token\n"
     "/settings — current configuration\n"
     "/reset — forget everything and return to defaults\n\n"
@@ -164,6 +177,9 @@ class AdminHandlers:
     # and the ingest service whose policy cache /capture must invalidate.
     archive: MessageArchive | None = None
     capture_service: CaptureService | None = None
+    # Analysis-enabled deployments only: the /llm defaults and hard cap.
+    llm_defaults: LlmSettings | None = None
+    llm_max_tokens_ceiling: int = 4096
 
     async def on_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain the self-service commands to an admin."""
@@ -345,6 +361,55 @@ class AdminHandlers:
             # The confirmation *is* the permanent in-chat announcement.
             return CAPTURE_ANNOUNCEMENT.format(scope=scope)
         return REPLY_CAPTURE_DISABLED.format(scope=scope)
+
+    async def on_llm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show, set, or reset this scope's LLM settings (v3 §2.4)."""
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
+            return
+        chat, thread_id = resolved
+        defaults = self.llm_defaults
+        if defaults is None:
+            await self._reply(context, chat.id, thread_id, REPLY_LLM_OFF_DEPLOY)
+            return
+        args = list(context.args or ())
+        sub = args[0].lower() if args else ""
+        try:
+            if sub == "show":
+                reply = await self._llm_show(chat.id, thread_id, defaults)
+            elif sub == "set" and len(args) > 1:
+                reply = await self._llm_set(chat.id, thread_id, args[1:], defaults)
+            elif sub == "reset":
+                await self.directory.set_llm(chat.id, thread_id, None)
+                log_event("profile_update", "ok")
+                reply = REPLY_LLM_RESET.format(scope=_scope(thread_id))
+            else:
+                reply = REPLY_LLM_USAGE
+        except StorageError:
+            reply = REPLY_STORAGE_DOWN
+        await self._reply(context, chat.id, thread_id, reply)
+
+    async def _llm_show(self, chat_id: int, thread_id: int, defaults: LlmSettings) -> str:
+        own = await self.directory.profile_of(chat_id, thread_id)
+        settings, origin = (
+            (own.llm, "set for this scope") if own.llm else (defaults, "deployment defaults")
+        )
+        return REPLY_LLM_SHOW.format(
+            scope=_scope(thread_id), origin=origin, line=describe_llm(settings)
+        )
+
+    async def _llm_set(
+        self, chat_id: int, thread_id: int, tokens: list[str], defaults: LlmSettings
+    ) -> str:
+        own = await self.directory.profile_of(chat_id, thread_id)
+        base = own.llm or defaults
+        try:
+            settings = parse_llm_args(" ".join(tokens), base, self.llm_max_tokens_ceiling)
+        except LlmParseError as error:
+            return str(error)
+        await self.directory.set_llm(chat_id, thread_id, settings)
+        log_event("profile_update", "ok")
+        return REPLY_LLM_SET.format(scope=_scope(thread_id), line=describe_llm(settings))
 
     async def on_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or clear this (group, topic)'s composable event rules."""

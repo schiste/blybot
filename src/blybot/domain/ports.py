@@ -11,7 +11,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from blybot.domain.models import GroupProfile, Pseudonym, RepoEvent, RepoSummary, Resource
+from blybot.domain.models import (
+    ActionContext,
+    ActionScope,
+    ActionSpec,
+    GroupProfile,
+    OutboundMessage,
+    Pseudonym,
+    RepoEvent,
+    RepoSummary,
+    Resource,
+    StepSpec,
+)
 
 
 class WikiWriteError(Exception):
@@ -32,6 +43,71 @@ class StorageError(Exception):
     Defined in the domain so services and handlers can degrade
     gracefully without importing the database adapter.
     """
+
+
+class ActionError(Exception):
+    """An action could not run; the message is safe to show a group admin.
+
+    Raised for configuration-shaped failures (unknown component names,
+    unusable payloads) as opposed to transport errors, which keep their
+    own exception types.
+    """
+
+
+class Source(Protocol):
+    """Produces the payload an action pipeline starts from.
+
+    Returning ``None`` means "nothing to do" — the engine stops the run
+    quietly (an empty archive window is normal, not an error).
+    """
+
+    async def fetch(self, context: ActionContext) -> object | None:
+        """Return the initial payload for this run, or ``None`` for no-op."""
+        ...
+
+
+class Transform(Protocol):
+    """One payload → payload step of an action pipeline.
+
+    ``step`` carries the parameters this occurrence was configured with,
+    so one registered transform can serve many specs. Returning ``None``
+    stops the run quietly.
+    """
+
+    async def apply(self, context: ActionContext, step: StepSpec, payload: object) -> object | None:
+        """Return the transformed payload, or ``None`` to end the run."""
+        ...
+
+
+class Sink(Protocol):
+    """Publishes an action pipeline's final payload.
+
+    Sinks that write externally (wiki) return no messages; sinks that
+    speak in chat return :class:`OutboundMessage`s for the transport
+    layer to send — services never touch Telegram directly.
+    """
+
+    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+        """Publish ``payload``; return any chat messages to send."""
+        ...
+
+
+class ActionStore(Protocol):
+    """Persists each scope's configured actions (spec 11: one JSON document)."""
+
+    async def get_actions(self, chat_id: int, thread_id: int) -> tuple[ActionSpec, ...]:
+        """Return the (group, topic) actions, empty when none are configured."""
+        ...
+
+    async def set_actions(
+        self, chat_id: int, thread_id: int, actions: tuple[ActionSpec, ...]
+    ) -> None:
+        """Replace the (group, topic) actions (state included) wholesale."""
+        ...
+
+    async def list_scheduled(self) -> list[tuple[ActionScope, tuple[ActionSpec, ...]]]:
+        """Return every scope that has at least one action configured."""
+        ...
 
 
 class ProfileStore(Protocol):

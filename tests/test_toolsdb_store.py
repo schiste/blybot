@@ -12,10 +12,14 @@ import pytest
 from cryptography.fernet import Fernet
 
 from blybot.adapters.toolsdb.store import (
+    MIGRATE_ADD_ACTIONS,
     MIGRATE_ADD_CURSORS,
     MIGRATE_ADD_RULES,
     MIGRATE_ADD_THREAD,
     MIGRATE_REBUILD_PK,
+    Q_ACTIONS_LIST,
+    Q_ACTIONS_READ,
+    Q_ACTIONS_WRITE,
     Q_DELETE,
     Q_GET,
     Q_GET_CURSORS,
@@ -32,8 +36,9 @@ from blybot.adapters.toolsdb.store import (
     PymysqlRunner,
     ToolsDbStore,
 )
-from blybot.domain.models import ConsentMode, GroupProfile
+from blybot.domain.models import ActionScope, ConsentMode, GroupProfile
 from blybot.domain.ports import StorageError
+from blybot.services.actions import parse_action
 from blybot.services.rules import parse_rule
 
 
@@ -58,6 +63,7 @@ class FakeToolsDb:
                 "rules_json": None,
                 "token": None,
                 "cursors": None,
+                "actions": None,
             },
         )
 
@@ -75,6 +81,22 @@ class FakeToolsDb:
             row["token"] is not None,
         )
 
+    def _run_actions(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+        """The actions_json queries, kept apart to keep :meth:`run` readable."""
+        if query == Q_ACTIONS_WRITE:
+            chat_id, thread_id, actions_json = params
+            self._row((chat_id, thread_id))["actions"] = actions_json
+        if query == Q_ACTIONS_READ:
+            key = (params[0], params[1])
+            return [(self.tables[key]["actions"],)] if key in self.tables else []
+        if query == Q_ACTIONS_LIST:
+            return [
+                (key[0], key[1], row["actions"])
+                for key, row in self.tables.items()
+                if row["actions"] not in (None, "[]")
+            ]
+        return []  # MIGRATE_ADD_ACTIONS / write: no rows
+
     def run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         if self.fail:
             msg = "db down"
@@ -89,6 +111,8 @@ class FakeToolsDb:
             return []
         if query in (MIGRATE_ADD_THREAD, MIGRATE_ADD_RULES, MIGRATE_ADD_CURSORS):
             return []  # column add: no-op in the fake
+        if query in (MIGRATE_ADD_ACTIONS, Q_ACTIONS_WRITE, Q_ACTIONS_READ, Q_ACTIONS_LIST):
+            return self._run_actions(query, params)
         if query == Q_THREAD_IN_PK:
             return [(1 if self.thread_in_pk else 0,)]
         if query == MIGRATE_REBUILD_PK:
@@ -295,6 +319,28 @@ async def test_rotated_key_reads_as_no_token_and_logs(
     with caplog.at_level(logging.INFO, logger="blybot"):
         assert await rotated.fetch_token(-1, 0) is None
     assert any("token_vault" in message for message in caplog.messages)
+
+
+async def test_actions_roundtrip_through_json_column() -> None:
+    db = FakeToolsDb()
+    store = ToolsDbStore(runner=db, fernet_key=Fernet.generate_key().decode())
+    spec = parse_action("daily@06:00 summarize model=large", now_iso="2026-07-25T12:00:00+00:00")
+
+    await store.set_actions(-1, 0, (spec,))
+
+    assert await store.get_actions(-1, 0) == (spec,)
+    assert await store.list_scheduled() == [(ActionScope(chat_id=-1, thread_id=0), (spec,))]
+
+
+async def test_actions_default_to_empty_and_empty_lists_are_not_scheduled() -> None:
+    db = FakeToolsDb()
+    store = ToolsDbStore(runner=db, fernet_key=Fernet.generate_key().decode())
+
+    assert await store.get_actions(-1, 0) == ()  # unconfigured scope
+
+    await store.set_actions(-1, 0, ())  # explicit empty: stored, never polled
+    assert await store.get_actions(-1, 0) == ()
+    assert await store.list_scheduled() == []
 
 
 async def test_database_failure_raises_storage_error() -> None:

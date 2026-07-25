@@ -41,7 +41,7 @@ from blybot.services.analyze import (
     explicit_page_resolver,
 )
 from blybot.services.binding import TokenBinding
-from blybot.services.capture import CaptureService
+from blybot.services.capture import CaptureReminder, CaptureService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.engine import ActionEngine
@@ -229,7 +229,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             sources={"archive_window": ArchiveWindowSource(archive=archive)},
             transforms={
                 "prompt": PromptTransform(
-                    runner=llm_client,
+                    runners={"liftwing": llm_client},
                     store=store,
                     defaults=llm_defaults,
                     max_tokens_ceiling=config.llm_max_tokens_ceiling,
@@ -299,13 +299,24 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
 
         bootstrap = bootstrap_storage
 
+    reminder = (
+        CaptureReminder(
+            store=store,
+            groups=group_policy,
+            clock=clock,
+            cadence=timedelta(days=config.capture_reannounce_days),
+        )
+        if store is not None and archive is not None and config.capture_reannounce_days
+        else None
+    )
     lifecycle = Lifecycle(
-        maintenance=Maintenance(sessions=sessions, counters=counters),
+        maintenance=Maintenance(sessions=sessions, counters=counters, archive=archive),
         transcription=transcription,
         release=release_clients,
         bootstrap=bootstrap,
         notifier=notifier,
         scheduler=scheduler,
+        reminder=reminder,
         poll_interval_seconds=config.events_poll_minutes * 60,
     )
     run_polling(

@@ -119,3 +119,29 @@ async def test_chain_order_is_the_spec_order() -> None:
 
     ((_context, delivered),) = sink.delivered
     assert delivered == "hello+1+2"
+
+
+async def test_caller_provided_payloads_replace_the_source() -> None:
+    """The phase-5 seam: interactive flows inject their payload directly."""
+    sink = FakeSink(messages=(OutboundMessage(chat_id=-1, thread_id=0, text="done"),))
+    source = FakeSource(payload="from the source")
+    engine, counters = make_engine(source=source, sink=sink)
+
+    messages = await engine.run(SCOPE, spec_for(), NOW, payload="provided by the caller")
+
+    assert messages == sink.messages
+    assert source.fetched == []  # the source never ran
+    ((_context, delivered),) = sink.delivered
+    assert delivered == "provided by the caller+t"
+    assert counters.snapshot()["actions_run"] == 1
+
+
+async def test_provided_payloads_skip_source_resolution_entirely() -> None:
+    engine = ActionEngine(
+        sources={},  # no source registered at all
+        transforms={"prompt": SuffixTransform(), "stats": SuffixTransform()},
+        sinks={"wiki_section": FakeSink()},
+        counters=Counters(),
+    )
+    # Would raise "unknown source" without a provided payload; with one it runs.
+    await engine.run(SCOPE, spec_for(), NOW, payload="direct")

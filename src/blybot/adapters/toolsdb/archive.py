@@ -52,7 +52,10 @@ Q_WINDOW: Final = (
     "ORDER BY posted_at, message_id"
 )
 Q_PURGE: Final = f"DELETE FROM messages WHERE {_KEY}"  # noqa: S608
+Q_PURGE_BEFORE: Final = f"DELETE FROM messages WHERE {_KEY} AND posted_at < %s"  # noqa: S608
 Q_COUNT: Final = f"SELECT COUNT(*) FROM messages WHERE {_KEY}"  # noqa: S608
+Q_COUNT_BEFORE: Final = f"SELECT COUNT(*) FROM messages WHERE {_KEY} AND posted_at < %s"  # noqa: S608
+Q_TOTAL: Final = "SELECT COUNT(*) FROM messages"
 
 
 class ToolsDbArchive:
@@ -96,12 +99,23 @@ class ToolsDbArchive:
         )
         return [_message_from_row(chat_id, thread_id, row) for row in rows]
 
-    async def purge(self, chat_id: int, thread_id: int) -> int:
-        """Hard-delete the scope's entire archive; return the rows removed."""
-        rows = await self._run(Q_COUNT, (chat_id, thread_id))
+    async def purge(self, chat_id: int, thread_id: int, before: datetime | None = None) -> int:
+        """Hard-delete the scope's archive (older than ``before`` if given)."""
+        if before is None:
+            count_query, purge_query = Q_COUNT, Q_PURGE
+            params: tuple[Any, ...] = (chat_id, thread_id)
+        else:
+            count_query, purge_query = Q_COUNT_BEFORE, Q_PURGE_BEFORE
+            params = (chat_id, thread_id, before.astimezone(UTC).replace(tzinfo=None))
+        rows = await self._run(count_query, params)
         count = int(rows[0][0]) if rows else 0
-        await self._run(Q_PURGE, (chat_id, thread_id))
+        await self._run(purge_query, params)
         return count
+
+    async def total(self) -> int:
+        """Return the archive's total row count (operator metric)."""
+        rows = await self._run(Q_TOTAL, ())
+        return int(rows[0][0]) if rows else 0
 
     async def _run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         try:

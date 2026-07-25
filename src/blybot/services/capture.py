@@ -14,13 +14,14 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
+from blybot.domain.models import OutboundMessage
 from blybot.domain.ports import StorageError
 
 if TYPE_CHECKING:
     from blybot.domain.models import CapturedMessage
     from blybot.domain.ports import Clock, MessageArchive, ProfileStore
     from blybot.observability import Counters
-    from blybot.services.policy import SlidingWindowLimiter
+    from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 
 MAX_TEXT_CHARS: Final = 4096  # Telegram's own message cap; nothing longer is stored
 
@@ -79,3 +80,55 @@ class CaptureService:
         enabled = bool(profile and profile.capture_enabled)
         self._enabled_cache[key] = (enabled, now + self.cache_ttl)
         return enabled
+
+
+REMINDER_TEXT: Final = (
+    "🔁 Reminder: messages in this chat are being archived for on-wiki "
+    "summaries and statistics (authors appear only as anonymous labels). "
+    "An admin can stop this with /capture off and erase the archive with "
+    "/capture purge."
+)
+
+
+@dataclass(eq=False)
+class CaptureReminder:
+    """Periodic re-announcement for capture-enabled scopes (v3 §1).
+
+    A :class:`~blybot.adapters.telegram.app.MessageCollector` on the
+    shared tick. Cadence state is memory-only on purpose: a restart
+    resets every scope's timer, so the worst failure mode is a *late*
+    reminder — never a spammed one.
+    """
+
+    store: ProfileStore
+    groups: GroupPolicy
+    clock: Clock
+    cadence: timedelta
+    _next_due: dict[tuple[int, int], datetime] = field(default_factory=dict, init=False)
+
+    async def collect(self) -> list[OutboundMessage]:
+        """Return the reminders due this tick."""
+        try:
+            profiles = await self.store.list_capture_enabled()
+        except StorageError:
+            return []
+        now = self.clock.now()
+        messages: list[OutboundMessage] = []
+        for profile in profiles:
+            if not self.groups.is_allowed(profile.chat_id):
+                continue
+            key = (profile.chat_id, profile.thread_id)
+            due = self._next_due.get(key)
+            if due is None:  # first sighting: schedule, don't repeat the enable announcement
+                self._next_due[key] = now + self.cadence
+                continue
+            if now >= due:
+                self._next_due[key] = now + self.cadence
+                messages.append(
+                    OutboundMessage(
+                        chat_id=profile.chat_id,
+                        thread_id=profile.thread_id,
+                        text=REMINDER_TEXT,
+                    )
+                )
+        return messages

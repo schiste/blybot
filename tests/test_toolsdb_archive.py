@@ -10,8 +10,11 @@ import pytest
 from blybot.adapters.toolsdb.archive import (
     MESSAGES_SCHEMA,
     Q_COUNT,
+    Q_COUNT_BEFORE,
     Q_PURGE,
+    Q_PURGE_BEFORE,
     Q_STORE,
+    Q_TOTAL,
     Q_WINDOW,
     ToolsDbArchive,
 )
@@ -51,16 +54,30 @@ class FakeMessagesDb:
             return sorted(hits, key=lambda row: (row[1], row[0]))
         if query == Q_COUNT:
             return [(len(self._scope_rows(params)),)]
+        if query == Q_COUNT_BEFORE:
+            return [(len(self._scope_rows(params[:2], before=params[2])),)]
         if query == Q_PURGE:
             for key in self._scope_rows(params):
                 del self.rows[key]
             return []
+        if query == Q_PURGE_BEFORE:
+            for key in self._scope_rows(params[:2], before=params[2]):
+                del self.rows[key]
+            return []
+        if query == Q_TOTAL:
+            return [(len(self.rows),)]
         msg = f"unexpected query: {query!r}"
         raise AssertionError(msg)
 
-    def _scope_rows(self, params: tuple[Any, ...]) -> list[tuple[int, int, int]]:
+    def _scope_rows(
+        self, params: tuple[Any, ...], before: Any = None
+    ) -> list[tuple[int, int, int]]:
         chat_id, thread_id = params
-        return [key for key in self.rows if key[0] == chat_id and key[1] == thread_id]
+        return [
+            key
+            for key, row in self.rows.items()
+            if key[0] == chat_id and key[1] == thread_id and (before is None or row[3] < before)
+        ]
 
 
 def make_archive() -> tuple[ToolsDbArchive, FakeMessagesDb]:
@@ -150,3 +167,25 @@ async def test_database_failure_raises_storage_error() -> None:
         await archive.window(-1, 0, NOW, NOW)
     with pytest.raises(StorageError):
         await archive.purge(-1, 0)
+
+
+async def test_purge_before_trims_only_the_older_rows() -> None:
+    archive, _db = make_archive()
+    await archive.store(msg(1, minutes=0))
+    await archive.store(msg(2, minutes=90))
+
+    removed = await archive.purge(-1, 0, before=NOW + timedelta(hours=1))
+
+    assert removed == 1
+    window = await archive.window(-1, 0, NOW - timedelta(days=1), NOW + timedelta(days=1))
+    assert [m.message_id for m in window] == [2]
+
+
+async def test_total_counts_every_scope() -> None:
+    archive, _db = make_archive()
+    assert await archive.total() == 0
+    await archive.store(msg(1))
+    await archive.store(
+        CapturedMessage(chat_id=-2, thread_id=0, message_id=9, posted_at=NOW, author="x")
+    )
+    assert await archive.total() == 2

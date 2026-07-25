@@ -47,7 +47,7 @@ waits for its next slot; it is not retried every tick.
 
 schedule:  every:<N>h | daily@HH:MM | weekly@<dow>.HH:MM     (all UTC)
 recipe:    summarize | talking_points | stats | stats_narrative | prompt:<template>
-params:    window=<N>h|<N>d   → source
+params:    window=<N>h|<N>d|since_last_run   → source
            page=<title>       → sink
            model=default|large, lang=<code>, temp=<0..1> → prompt transform
 ```
@@ -79,6 +79,11 @@ serves every recipe. Each scope holds at most 20 actions
 - `last_run` is stamped when a run is *attempted*, before its outcome is
   known: a permanently failing action costs one try per slot, not one
   per tick.
+- `window=since_last_run` turns a scheduled digest into a watermark
+  window: each run covers exactly the messages archived since the
+  previous run (clamped to 30 days after long downtime) — no edge
+  double-coverage, no gaps. Command-triggered runs have no watermark
+  and are refused.
 
 ## Adding a new component
 

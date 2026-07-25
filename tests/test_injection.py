@@ -62,7 +62,7 @@ def context() -> ActionContext:
 
 def make_transform(runner: FakePromptRunner) -> PromptTransform:
     return PromptTransform(
-        runner=runner,
+        runners={"liftwing": runner},
         store=None,
         defaults=LlmSettings(),
         max_tokens_ceiling=4096,
@@ -91,7 +91,7 @@ async def test_hostile_content_reaches_the_model_only_as_fenced_scrubbed_data() 
 async def test_language_switch_demands_lose_to_the_pinned_language() -> None:
     runner = FakePromptRunner(results=[PromptResult(content='["résumé"]')])
     transform = PromptTransform(
-        runner=runner,
+        runners={"liftwing": runner},
         store=None,
         defaults=LlmSettings(lang="fr"),
         max_tokens_ceiling=4096,

@@ -6,8 +6,8 @@ from datetime import timedelta
 
 from blybot.domain.models import CapturedMessage, GroupProfile
 from blybot.observability import Counters
-from blybot.services.capture import MAX_TEXT_CHARS, CaptureService
-from blybot.services.policy import SlidingWindowLimiter
+from blybot.services.capture import MAX_TEXT_CHARS, CaptureReminder, CaptureService
+from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
 
 
@@ -150,3 +150,42 @@ async def test_forum_topics_inherit_the_group_capture_default() -> None:
         )
     )
     assert len(archive.messages) == 2
+
+
+def make_reminder(store: InMemoryProfiles, clock: FakeClock, days: int = 30) -> CaptureReminder:
+    return CaptureReminder(
+        store=store,
+        groups=GroupPolicy(allowed=set()),
+        clock=clock,
+        cadence=timedelta(days=days),
+    )
+
+
+async def test_reminders_fire_once_per_cadence_never_at_first_sight() -> None:
+    store, clock = InMemoryProfiles(), FakeClock()
+    await enable(store)
+    reminder = make_reminder(store, clock, days=30)
+
+    assert await reminder.collect() == []  # first sighting: baseline only
+
+    clock.advance(timedelta(days=29))
+    assert await reminder.collect() == []  # not due yet
+
+    clock.advance(timedelta(days=2))
+    (message,) = await reminder.collect()
+    assert message.chat_id == -1
+    assert "/capture off" in message.text
+    assert await reminder.collect() == []  # rescheduled, not repeated
+
+
+async def test_reminders_respect_the_allowlist_and_storage_outages() -> None:
+    store, clock = InMemoryProfiles(), FakeClock()
+    await enable(store)
+    reminder = make_reminder(store, clock)
+    reminder.groups = GroupPolicy(allowed={-999})
+    await reminder.collect()
+    clock.advance(timedelta(days=31))
+    assert await reminder.collect() == []  # disallowed scope stays silent
+
+    store.fail = True
+    assert await reminder.collect() == []  # outage: quiet tick

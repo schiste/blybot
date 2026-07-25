@@ -85,6 +85,7 @@ class Config:
     events_poll_minutes: int
     archive_pseudonym_key: str
     capture_max_per_minute: int
+    capture_reannounce_days: int
     liftwing_api_base: str
     liftwing_model_default: str
     liftwing_model_large: str
@@ -164,6 +165,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         events_poll_minutes=_parse_positive_int(source, "EVENTS_POLL_MINUTES", 5),
         archive_pseudonym_key=source.get("ARCHIVE_PSEUDONYM_KEY", ""),
         capture_max_per_minute=_parse_positive_int(source, "CAPTURE_MAX_PER_MINUTE", 60),
+        capture_reannounce_days=_parse_non_negative_int(source, "CAPTURE_REANNOUNCE_DAYS", 0),
         liftwing_api_base=source.get(
             "LIFTWING_API_BASE", "https://api.wikimedia.org/service/lw/inference/v1"
         ),
@@ -240,6 +242,24 @@ def _parse_cleanup_seconds(
         msg = f"{key} must not be negative (0 disables deletion)"
         raise ConfigurationError(msg)
     return float(value) if value else -1.0
+
+
+def _parse_non_negative_int(
+    source: dict[str, str] | os._Environ[str], key: str, default: int
+) -> int:
+    """An integer setting where 0 means "feature off"."""
+    raw = source.get(key)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        msg = f"{key} must be an integer (0 disables it)"
+        raise ConfigurationError(msg) from exc
+    if value < 0:
+        msg = f"{key} must not be negative (0 disables it)"
+        raise ConfigurationError(msg)
+    return value
 
 
 def _parse_positive_int(source: dict[str, str] | os._Environ[str], key: str, default: int) -> int:

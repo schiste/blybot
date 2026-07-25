@@ -192,6 +192,10 @@ class InMemoryProfiles:
             if profile.events_enabled
         ]
 
+    async def list_capture_enabled(self) -> list[GroupProfile]:
+        self._check()
+        return [profile for profile in self.profiles.values() if profile.capture_enabled]
+
     async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:
         self._check()
         return dict(self.cursors.get((chat_id, thread_id), {}))
@@ -378,13 +382,23 @@ class InMemoryArchive:
         ]
         return sorted(matching, key=lambda m: (m.posted_at, m.message_id))
 
-    async def purge(self, chat_id: int, thread_id: int) -> int:
+    async def purge(self, chat_id: int, thread_id: int, before: datetime | None = None) -> int:
         if self.fail:
             raise StorageError
-        kept = [m for m in self.messages if (m.chat_id, m.thread_id) != (chat_id, thread_id)]
+        kept = [
+            m
+            for m in self.messages
+            if (m.chat_id, m.thread_id) != (chat_id, thread_id)
+            or (before is not None and m.posted_at >= before)
+        ]
         removed = len(self.messages) - len(kept)
         self.messages = kept
         return removed
+
+    async def total(self) -> int:
+        if self.fail:
+            raise StorageError
+        return len(self.messages)
 
 
 @dataclass

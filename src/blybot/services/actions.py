@@ -192,8 +192,8 @@ def _parse_params(tokens: list[str]) -> dict[str, str]:
 
 def _validate_param(key: str, value: str) -> None:
     """Reject bad values at add time, not at 06:00 tomorrow."""
-    if key == "window" and not _WINDOW_SUGAR_RE.match(value):
-        msg = f"window must look like 24h or 7d, got {value!r}"
+    if key == "window" and value != "since_last_run" and not _WINDOW_SUGAR_RE.match(value):
+        msg = f"window must look like 24h, 7d, or since_last_run, got {value!r}"
         raise ActionParseError(msg)
     if key == "model" and value not in {"default", "large"}:
         msg = "model must be default or large"

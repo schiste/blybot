@@ -139,10 +139,17 @@ section before enabling.**
 3. Group admins enable per scope with `/capture on` (announced in-chat,
    permanently); channels enable by making the bot a channel admin (it
    posts an announcement). `/capture off` stops; `/capture purge`
-   erases.
+   erases (`/capture purge before:YYYY-MM-DD` trims only older rows).
+   Set `CAPTURE_REANNOUNCE_DAYS` to re-post the announcement on a
+   cadence. Note: the archive keeps the first version of each message —
+   Telegram edits and deletions do not propagate to it (or to anything
+   already published).
 4. Watch the counters: `captures`, `captures_throttled`,
-   `captures_failed`. Archive growth is operator-owned — there is no
-   automatic expiry. Check size occasionally:
+   `captures_failed`, and `injection_suspected` (injection-shaped
+   phrases seen in analyzed transcripts — telemetry, not a gate).
+   Archive growth is operator-owned — there is no automatic expiry; the
+   heartbeat logs an `archive_size` line (total rows) every ~15 minutes,
+   and per-scope size is
    `SELECT chat_id, COUNT(*) FROM messages GROUP BY chat_id;`
 
 ## LiftWing LLM endpoints (v3 pre-flight findings)

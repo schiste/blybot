@@ -25,6 +25,7 @@ from blybot.adapters.toolsdb.store import (
     Q_DELETE,
     Q_GET,
     Q_GET_CURSORS,
+    Q_LIST_CAPTURE_ENABLED,
     Q_LIST_EVENT_ENABLED,
     Q_MIGRATE,
     Q_MIGRATE_CLEAR,
@@ -157,6 +158,12 @@ class FakeToolsDb:
                 self._as_profile_row(key)
                 for key, row in self.tables.items()
                 if row["events_enabled"]
+            ]
+        if query == Q_LIST_CAPTURE_ENABLED:
+            return [
+                self._as_profile_row(key)
+                for key, row in self.tables.items()
+                if row["capture_enabled"]
             ]
         if query == Q_DELETE:
             self.tables.pop((params[0], params[1]), None)
@@ -443,3 +450,13 @@ async def test_llm_settings_roundtrip_through_json_column() -> None:
     reloaded = await store.get(PROFILE.chat_id, 0)
     assert reloaded is not None
     assert reloaded.llm is None
+
+
+async def test_list_capture_enabled_filters() -> None:
+    store, _fake = make_store()
+    await store.upsert(replace(PROFILE, capture_enabled=True))
+    await store.upsert(GroupProfile(chat_id=-7))
+
+    listed = await store.list_capture_enabled()
+
+    assert [profile.chat_id for profile in listed] == [PROFILE.chat_id]

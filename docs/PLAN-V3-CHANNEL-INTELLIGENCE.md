@@ -19,9 +19,24 @@ transform consults; the `/rule` UX and stored rows are untouched). DM
 transcription is deliberately exempt: its sessions are keyed by private
 chat ids, which the identifier-free `ActionContext` must never carry
 (R6) — forcing it through the engine would weaken the privacy
-architecture for zero behavior gain. Remaining: the Phase 0 governance
-items (community announcement, on-wiki norms sign-off, Toolforge-tier
-latency measurement), the Phase 6 pre-deploy audit, and media analysis
+architecture for zero behavior gain. Two automated review rounds were
+addressed post-merge-candidate: durable-before-side-effects `last_run`
+watermarks, archive re-keying on supergroup migration, tri-state
+`capture_enabled` (topic opt-outs beat the group default; older tables
+converted once), `page=` overrides gated through the `/setpage` policy,
+`/llm` inheritance in topics, per-topic capture throttling, and rotating
+per-tick caps in the scheduler and notifier. The Phase 6 audit ran:
+counters and log events in OPERATIONS.md verified against the code (the
+shipped names are `captures[_throttled|_failed]`, `prompts_run`,
+`prompt_tokens`/`completion_tokens`, `prompt_failures`,
+`analyses_aborted`/`analyses_failed`, `actions_*`,
+`injection_suspected`, plus the `archive_size` heartbeat — superseding
+the tentative `archive_rows`/`analyses_published` names below),
+`.env.example` complete, SPECIFICATION §21 accurate, README
+status/architecture-tree refreshed, and the job memory default bumped to
+768Mi (README + `deploy-instance.sh`). Remaining — operator actions, not
+code: the Phase 0 governance items (community announcement, on-wiki
+norms sign-off, Toolforge-tier latency measurement) and media analysis
 (parked: LiftWing has no multimodal input yet).
 
 Blybot v3 turns the bot from a *marked-message logger* into a *channel

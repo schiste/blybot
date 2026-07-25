@@ -16,7 +16,7 @@
 
 Blybot is a small, single-purpose Telegram bot in the spirit of the old IRC utility bots, rebuilt around a privacy-first premise. It does not journal conversations passively and keeps no statistics. It only ever ingests two things: a message a user explicitly marks with `/log`, and messages a user sends to it in a private chat. Marked messages are published, without attribution, to a configured Meta-wiki page. Private conversations ask the user to choose a shared group, then are transcribed to that group's Meta page as an anonymized discussion using a per-session pseudonym that is never persisted. The bot runs as a continuous job on Toolforge.
 
-The design deliberately keeps the bot structurally incapable of seeing ordinary group chatter. That property is enforced by Telegram's privacy mode, not merely by application logic.
+The design deliberately keeps the bot structurally incapable of seeing ordinary group chatter. That property is enforced by Telegram's privacy mode, not merely by application logic. (Capture-enabled v3 deployments deliberately trade this structural guarantee for an audited policy boundary — §21.)
 
 ---
 
@@ -78,7 +78,7 @@ Wikimedia community groups increasingly coordinate on Telegram, where useful dec
 ### 7.1 Must-have (P0)
 
 **R1. Privacy mode stays enabled.**
-The bot operates with Telegram privacy mode ON (the BotFather default). It must function correctly without ever disabling it.
+The bot operates with Telegram privacy mode ON (the BotFather default). It must function correctly without ever disabling it. (*Capture-enabled v3 deployments supersede this framing — see §21.*)
 - Given the bot is in a group with privacy mode on, when a user replies to a message with `/log`, then the bot receives the command together with the referenced message in `reply_to_message`.
 - The bot never receives or processes non-command group messages.
 
@@ -132,7 +132,7 @@ Design so these remain possible without rework: quote store and `/quote` retriev
 
 **Transport.** Long polling via `getUpdates`, using `python-telegram-bot` (async). Polling is outbound-only, so no public endpoint is required. This matters for Toolforge (see 13).
 
-**Privacy mode.** Left ON. Under privacy mode the bot still receives commands addressed to it and replies meant for it, and a `/log` command sent as a reply carries the referenced message in `reply_to_message`. Ordinary chatter is never delivered.
+**Privacy mode.** Left ON (OFF only on capture-enabled v3 deployments — §21). Under privacy mode the bot still receives commands addressed to it and replies meant for it, and a `/log` command sent as a reply carries the referenced message in `reply_to_message`. Ordinary chatter is never delivered.
 
 **Command addressing.** When a user selects `/log` from the `/` autocomplete, the client appends `@<bot>`, guaranteeing delivery. Bare `/log` typed by hand only reaches the bot if it was the last bot to speak in the group, which R3 (greet-on-entry) ensures.
 
@@ -264,7 +264,11 @@ toolforge jobs run blybot \
 2. Confirm outbound to the Meta API (native and expected to work).
 3. Create the on-wiki account, issue a BotPassword, and (ideally) request the bot flag.
 4. Create the target Meta pages and confirm the account can edit them.
-5. Confirm privacy mode is ON for the bot.
+5. Confirm privacy mode is ON for the bot — unless this is a
+   **capture-enabled v3 deployment** (§21), which requires privacy mode
+   OFF, flipped only after the announcement procedure in
+   OPERATIONS.md; with it ON, `/capture` never receives the chatter it
+   is meant to archive.
 
 **Secrets.** Token and wiki credentials in `$HOME` at `0600`, isolated by the Toolforge tool account. Never in git.
 
@@ -323,7 +327,7 @@ These shape the design and one of them remains an open governance decision.
 
 ## 19. Phasing
 
-- **Phase 0 (pre-flight):** outbound checks, on-wiki account + BotPassword, target pages, confirm privacy mode ON.
+- **Phase 0 (pre-flight):** outbound checks, on-wiki account + BotPassword, target pages, confirm privacy mode ON (OFF for capture-enabled v3 deployments — §21 and §14 item 5).
 - **Phase 1 (MVP):** `/log` group flow, sanitizer, append to Meta, greet-on-entry, config, Toolforge continuous job.
 - **Phase 2:** DM transcription, per-session pseudonyms, incremental writes, burst coalescing, per-session anchoring.
 - **Phase 3:** newcomer welcome (join detection + deep-link Start).

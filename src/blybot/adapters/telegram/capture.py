@@ -104,13 +104,9 @@ class CaptureHandlers:
             return
         if change.old_chat_member.status == ChatMemberStatus.ADMINISTRATOR:
             return  # a permissions edit, not a promotion: don't re-announce
-        try:
-            await self.directory.set_capture(change.chat.id, 0, enabled=True)
-        except StorageError:
-            log_event("capture_enable", "error")
-            return
-        self.service.forget_scope(change.chat.id, 0)
-        log_event("capture_enable", "ok")
+        # Announce first: loud opt-in is a hard requirement (R-v3.1), so
+        # if the channel cannot be told, capture must not start. A
+        # demote + re-promote retries the whole sequence.
         try:
             await context.bot.send_message(
                 chat_id=change.chat.id,
@@ -118,6 +114,15 @@ class CaptureHandlers:
             )
         except TelegramError:
             log_event("capture_announce", "error")
+            return
+        try:
+            await self.directory.set_capture(change.chat.id, 0, enabled=True)
+        except StorageError:
+            # Announced but not enabled — the safe direction to fail.
+            log_event("capture_enable", "error")
+            return
+        self.service.forget_scope(change.chat.id, 0)
+        log_event("capture_enable", "ok")
 
 
 def _as_captured(message: Message, thread_id: int, author: str) -> CapturedMessage:

@@ -21,7 +21,9 @@ chat ids, which the identifier-free `ActionContext` must never carry
 (R6) — forcing it through the engine would weaken the privacy
 architecture for zero behavior gain. Two automated review rounds were
 addressed post-merge-candidate: durable-before-side-effects `last_run`
-watermarks, archive re-keying on supergroup migration, tri-state
+watermarks, archive re-keying on supergroup migration (rows follow the
+group; author labels restart under the new chat id — a documented
+one-time stats discontinuity), tri-state
 `capture_enabled` (topic opt-outs beat the group default; older tables
 converted once), `page=` overrides gated through the `/setpage` policy,
 `/llm` inheritance in topics, per-topic capture throttling, and rotating

@@ -146,7 +146,10 @@ section before enabling.**
    Set `CAPTURE_REANNOUNCE_DAYS` to re-post the announcement on a
    cadence. Note: the archive keeps the first version of each message —
    Telegram edits and deletions do not propagate to it (or to anything
-   already published).
+   already published). A group→supergroup upgrade moves the archive to
+   the new chat id, but author labels (HMAC-scoped to the id) restart
+   from the migration on: stats windows spanning it count an author
+   under two labels, once.
 4. Watch the counters: `captures`, `captures_throttled`,
    `captures_failed`, and `injection_suspected` (injection-shaped
    phrases seen in analyzed transcripts — telemetry, not a gate).

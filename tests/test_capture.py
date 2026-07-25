@@ -129,3 +129,24 @@ async def test_profile_outage_fails_closed_without_caching_the_outage() -> None:
     await enable(store)
     await service.ingest(msg(2))
     assert len(archive.messages) == 1
+
+
+async def test_forum_topics_inherit_the_group_capture_default() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)  # /capture on in General (thread 0)
+    service, _counters = make_service(store, archive, clock)
+    topic_message = CapturedMessage(
+        chat_id=-1, thread_id=42, message_id=1, posted_at=clock.now(), author="abc", text="hi"
+    )
+
+    await service.ingest(topic_message)
+    assert len(archive.messages) == 1
+
+    # An explicitly enabled topic works without a group default too.
+    await store.upsert(GroupProfile(chat_id=-2, thread_id=7, capture_enabled=True))
+    await service.ingest(
+        CapturedMessage(
+            chat_id=-2, thread_id=7, message_id=2, posted_at=clock.now(), author="x", text="y"
+        )
+    )
+    assert len(archive.messages) == 2

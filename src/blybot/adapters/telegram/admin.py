@@ -115,7 +115,7 @@ REPLY_ACTION_USAGE: Final = (
     "/action remove <id>\n"
     "/action list\n"
     "Schedules: every:<N>h · daily@HH:MM · weekly@<dow>.HH:MM (UTC). "
-    "Recipes: summarize, talking_points, stats, prompt:<template>. "
+    "Recipes: summarize, talking_points, stats, stats_narrative, prompt:<template>. "
     "Params: window=24h|7d · page=<title> · model=default|large · "
     "lang=<code> · temp=<0..1>"
 )

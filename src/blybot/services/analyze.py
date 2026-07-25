@@ -43,6 +43,7 @@ if TYPE_CHECKING:
         WikiPublisher,
     )
     from blybot.observability import Counters
+    from blybot.services.directory import ChannelDirectory
 
 _WINDOW_RE: Final = re.compile(r"^(\d+)([hd])$")
 MAX_WINDOW: Final = timedelta(days=30)
@@ -229,6 +230,29 @@ class StatsTransform:
             since=payload.since,
             until=payload.until,
         )
+
+
+def explicit_page_resolver(
+    directory: ChannelDirectory,
+) -> Callable[[int, int], Awaitable[str]]:
+    """The wiki sink's page policy: publish only to an explicitly set page.
+
+    Same rule as ``/log`` on self-service deployments — a scope that
+    never ran ``/setpage`` is refused (with the fix spelled out) rather
+    than silently writing to the operator default page.
+    """
+
+    async def resolve_page(chat_id: int, thread_id: int) -> str:
+        settings = await directory.resolve(chat_id, thread_id)
+        if not settings.page_explicit:
+            msg = (
+                "No target page is set for this chat. An admin must "
+                "run /setpage first, or add page=<title> to the action."
+            )
+            raise ActionError(msg)
+        return settings.log_page
+
+    return resolve_page
 
 
 @dataclass(eq=False)

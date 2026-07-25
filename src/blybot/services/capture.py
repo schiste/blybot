@@ -69,6 +69,11 @@ class CaptureService:
             return cached[0]
         try:
             profile = await self.store.get(chat_id, thread_id)
+            # Forum topics inherit the group default (thread 0), the same
+            # two-tier resolution the directory applies to pages/repos —
+            # /capture on in General covers every topic.
+            if not (profile and profile.capture_enabled) and thread_id:
+                profile = await self.store.get(chat_id, 0)
         except StorageError:
             return False  # fail closed, and never cache an outage
         enabled = bool(profile and profile.capture_enabled)

@@ -38,6 +38,7 @@ from blybot.services.analyze import (
     StatsTransform,
     TelegramReplySink,
     WikiSectionSink,
+    explicit_page_resolver,
 )
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureService
@@ -224,9 +225,6 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             counters=counters,
         )
 
-        async def resolve_page(chat_id: int, thread_id: int) -> str:
-            return (await directory.resolve(chat_id, thread_id)).log_page
-
         engine = ActionEngine(
             sources={"archive_window": ArchiveWindowSource(archive=archive)},
             transforms={
@@ -244,7 +242,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
                 "wiki_section": WikiSectionSink(
                     publisher=publisher,
                     sanitizer=sanitizer,
-                    resolve_page=resolve_page,
+                    resolve_page=explicit_page_resolver(directory),
                     page_url_for=config.page_url,
                     edit_summary=config.edit_summary,
                     bot_name=config.bot_name,

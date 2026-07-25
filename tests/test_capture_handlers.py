@@ -68,8 +68,16 @@ def channel_post_update(text: str | None = None) -> Update:
     return Update(update_id=3, channel_post=post)
 
 
-def admin_change(chat: Chat, status: ChatMemberStatus) -> Update:
-    change = SimpleNamespace(chat=chat, new_chat_member=SimpleNamespace(status=status))
+def admin_change(
+    chat: Chat,
+    status: ChatMemberStatus,
+    old_status: ChatMemberStatus = ChatMemberStatus.MEMBER,
+) -> Update:
+    change = SimpleNamespace(
+        chat=chat,
+        old_chat_member=SimpleNamespace(status=old_status),
+        new_chat_member=SimpleNamespace(status=status),
+    )
     return cast("Update", SimpleNamespace(my_chat_member=change))
 
 
@@ -239,3 +247,19 @@ async def test_authorless_group_messages_are_archived_without_a_label() -> None:
 def test_captured_messages_reject_unknown_kinds() -> None:
     with pytest.raises(ValueError, match="kind"):
         CapturedMessage(chat_id=-1, thread_id=0, message_id=1, posted_at=tg.NOW, kind="sticker")
+
+
+async def test_permission_edits_do_not_reannounce() -> None:
+    handlers, _store, _archive = make_handlers()
+    context, bot = tg.make_context()
+
+    await handlers.on_my_chat_member(
+        admin_change(
+            CHANNEL,
+            ChatMemberStatus.ADMINISTRATOR,
+            old_status=ChatMemberStatus.ADMINISTRATOR,
+        ),
+        context,
+    )
+
+    bot.send_message.assert_not_awaited()

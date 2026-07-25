@@ -66,3 +66,19 @@ def test_nothing_persists_state_to_disk() -> None:
     forbidden = ("sqlite3", "shelve", "pickle", "dbm")
     for layer in ("domain", "services"):
         assert violations(SRC / layer, forbidden) == []
+
+
+def test_user_identity_stays_at_the_telegram_boundary() -> None:
+    """v3 capture: only the Telegram adapter may read message authors.
+
+    ``from_user`` is the attribute every Telegram identity flows
+    through; keeping it out of domain, services, and the other adapters
+    means captured content is pseudonymized before it crosses inward.
+    """
+    allowed = SRC / "adapters" / "telegram"
+    for path in SRC.rglob("*.py"):
+        if path.is_relative_to(allowed):
+            continue
+        assert "from_user" not in path.read_text(
+            encoding="utf-8"
+        ), f"{path.relative_to(SRC.parent)} reads Telegram user identity"

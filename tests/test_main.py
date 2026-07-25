@@ -14,6 +14,7 @@ from blybot.adapters.telegram.app import Lifecycle
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
+from blybot.domain.ports import ActionError
 from tests.test_config import REQUIRED
 
 
@@ -175,10 +176,11 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
     assert set(engine.sources) == {"archive_window"}
     assert set(engine.transforms) == {"prompt", "stats"}
     assert set(engine.sinks) == {"wiki_section", "telegram_reply"}
-    # The wiki sink resolves the scope's page through the directory,
-    # degrading to the operator default when storage is unreachable.
+    # The wiki sink refuses to publish for a scope that never ran
+    # /setpage — same policy as /log on self-service deployments.
     sink = engine.sinks["wiki_section"]
-    assert await sink.resolve_page(-1, 0) == REQUIRED["LOG_TARGET_PAGE"]
+    with pytest.raises(ActionError, match="/setpage"):
+        await sink.resolve_page(-1, 0)
     assert seen["admin_handlers"].llm_defaults is not None
     await seen["lifecycle"].release()  # also closes the LiftWing client
 

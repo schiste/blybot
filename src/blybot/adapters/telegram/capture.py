@@ -40,6 +40,10 @@ CHANNEL_ANNOUNCEMENT: Final = (
     "anonymous labels; the archive powers scheduled digests published "
     "publicly on Meta-wiki."
 )
+CHANNEL_RETRACTION: Final = (
+    "⚠️ Correction: enabling the archive failed, so this channel's posts "
+    "are NOT being archived. Demote and re-promote {bot_name} to retry."
+)
 
 _LABEL_CHARS: Final = 12  # 48 bits of the HMAC: no realistic collisions per scope
 
@@ -118,8 +122,16 @@ class CaptureHandlers:
         try:
             await self.directory.set_capture(change.chat.id, 0, enabled=True)
         except StorageError:
-            # Announced but not enabled — the safe direction to fail.
+            # Announced but not enabled — the safe direction to fail,
+            # but the "being archived" claim must not stand uncorrected.
             log_event("capture_enable", "error")
+            try:
+                await context.bot.send_message(
+                    chat_id=change.chat.id,
+                    text=CHANNEL_RETRACTION.format(bot_name=self.bot_name),
+                )
+            except TelegramError:
+                log_event("capture_announce", "error")
             return
         self.service.forget_scope(change.chat.id, 0)
         log_event("capture_enable", "ok")

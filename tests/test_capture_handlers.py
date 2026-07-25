@@ -13,6 +13,7 @@ from telegram.error import TelegramError
 
 from blybot.adapters.telegram.capture import (
     CHANNEL_ANNOUNCEMENT,
+    CHANNEL_RETRACTION,
     CaptureHandlers,
     HmacAuthorMasker,
 )
@@ -205,7 +206,7 @@ async def test_failed_announcement_means_capture_never_starts() -> None:
     assert profile is None or not profile.capture_enabled
 
 
-async def test_storage_failure_after_the_announcement_leaves_capture_off() -> None:
+async def test_storage_failure_after_the_announcement_retracts_it() -> None:
     handlers, store, _archive = make_handlers()
     store.fail_upserts = True
     context, bot = tg.make_context()
@@ -214,8 +215,27 @@ async def test_storage_failure_after_the_announcement_leaves_capture_off() -> No
         admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context
     )  # must not raise
 
-    assert len(tg.sent_texts(bot)) == 1  # announced, then the enable write failed
+    # Announced, the enable write failed, and the claim was corrected.
+    assert tg.sent_texts(bot) == [
+        CHANNEL_ANNOUNCEMENT.format(bot_name="Blybot"),
+        CHANNEL_RETRACTION.format(bot_name="Blybot"),
+    ]
     assert await store.get(CHANNEL.id, 0) is None  # the safe direction to fail
+
+
+async def test_a_lost_retraction_is_swallowed_and_logged() -> None:
+    handlers, store, _archive = make_handlers()
+    store.fail_upserts = True
+    context, bot = tg.make_context()
+    outcomes = [None, TelegramError("muted")]  # announcement lands, retraction doesn't
+    bot.send_message.side_effect = outcomes
+
+    await handlers.on_my_chat_member(
+        admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context
+    )  # must not raise
+
+    assert bot.send_message.await_count == 2
+    assert await store.get(CHANNEL.id, 0) is None
 
 
 async def test_disallowed_channel_is_never_enabled() -> None:

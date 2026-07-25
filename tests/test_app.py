@@ -24,7 +24,7 @@ from blybot.adapters.telegram.app import (
     run_polling,
 )
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
-from blybot.domain.models import ConsentMode, OutboundMessage
+from blybot.domain.models import ConsentMode, GroupProfile, OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
@@ -206,6 +206,35 @@ async def test_run_forever_ticks_until_cancelled() -> None:
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_maintenance_tick_converges_pending_capture_revocations() -> None:
+    store, clock = InMemoryProfiles(), FakeClock()
+    await store.upsert(GroupProfile(chat_id=-200, capture_enabled=True))
+    capture = CaptureService(
+        store=store,
+        archive=InMemoryArchive(),
+        limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
+        clock=clock,
+        counters=Counters(),
+    )
+    capture.deny_scope(-200, 0)  # a revocation whose durable write failed
+    lifecycle, _, _ = make_lifecycle()
+    maintenance = lifecycle.maintenance
+    maintenance.capture = capture
+    maintenance.interval_seconds = 0
+    maintenance.heartbeat_every_ticks = 10_000
+
+    task = asyncio.ensure_future(maintenance.run_forever())
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    profile = await store.get(-200, 0)
+    assert profile is not None
+    assert profile.capture_enabled is False  # durable within one tick, no post needed
 
 
 async def test_repo_notify_loop_delivers_digests_and_survives_send_failures() -> None:

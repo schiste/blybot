@@ -96,6 +96,16 @@ class CaptureService:
         self._denied.discard((chat_id, thread_id))
         self.forget_scope(chat_id, thread_id)
 
+    async def retry_denied(self) -> None:
+        """Converge every tombstoned scope's disable (maintenance tick).
+
+        Runs independently of message arrival, so a quiet channel's
+        pending revocation becomes durable within one tick of storage
+        recovering — not only when its next post happens to arrive.
+        """
+        for key in list(self._denied):
+            await self._retry_disable(key)
+
     async def _retry_disable(self, key: tuple[int, int]) -> None:
         """Try to make a denied scope's disable durable; keep denying on failure."""
         chat_id, thread_id = key

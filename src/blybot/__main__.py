@@ -328,7 +328,9 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         else None
     )
     lifecycle = Lifecycle(
-        maintenance=Maintenance(sessions=sessions, counters=counters, archive=archive),
+        maintenance=Maintenance(
+            sessions=sessions, counters=counters, archive=archive, capture=capture_service
+        ),
         transcription=transcription,
         release=release_clients,
         bootstrap=bootstrap,

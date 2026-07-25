@@ -110,7 +110,10 @@ async def test_pseudonym_key_enables_capture_wiring(monkeypatch: pytest.MonkeyPa
     assert admin.capture_service is seen["capture_handlers"].service
     # Supergroup migrations re-key the captured messages too.
     assert seen["group_handlers"].archive is admin.archive
-    await seen["lifecycle"].release()
+    # Pending consent revocations converge on the maintenance tick.
+    lifecycle = seen["lifecycle"]
+    assert lifecycle.maintenance.capture is seen["capture_handlers"].service
+    await lifecycle.release()
 
 
 async def test_capture_stays_off_without_the_pseudonym_key(

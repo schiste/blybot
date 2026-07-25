@@ -92,7 +92,7 @@ class AnalysisHandlers:
         await send_threaded(context.bot, chat_id, thread_id, REPLY_WORKING)
         scope = ActionScope(chat_id=chat_id, thread_id=thread_id)
         try:
-            messages = await self.engine.run(scope, spec, self.clock.now())
+            outcome = await self.engine.run(scope, spec, self.clock.now())
         except ActionError as error:
             await send_threaded(context.bot, chat_id, thread_id, str(error))
             return
@@ -104,10 +104,10 @@ class AnalysisHandlers:
             log_event("analysis_command", "error")
             await send_threaded(context.bot, chat_id, thread_id, REPLY_FAILED)
             return
-        if not messages:
+        if not outcome.messages:
             await send_threaded(context.bot, chat_id, thread_id, REPLY_EMPTY)
             return
-        for message in messages:
+        for message in outcome.messages:
             await send_threaded(context.bot, message.chat_id, message.thread_id, message.text)
 
     async def _admin_scope(

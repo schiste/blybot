@@ -10,12 +10,19 @@ the interactive re-homes need. Also shipped from the backlog:
 `injection_suspected` heuristic counter (§2.6 layer 8), a platform
 registry in the prompt transform (a second PromptRunner is now
 composition-root-only), and edit/deletion semantics in the privacy copy.
-Remaining: the Phase 0 governance items (community announcement, on-wiki
-norms sign-off, Toolforge-tier latency measurement), the Phase 5 feature
-re-homes (`/log`, DM transcription, `/bug` — see the note in §4; the
-notifier re-home additionally needs a `rules_json` data migration), the
-Phase 6 pre-deploy audit, and media analysis (externally blocked:
-LiftWing has no multimodal input yet).
+The Phase 5 re-homes are complete: `/log` runs as a `log_publish` →
+`chat_confirm` pipeline, `/bug` through the reusable `issue_tracker`
+sink, and the repo notifier as `repo_events` → `rule_match` →
+`telegram_message` — one engine serves every deployment tier, and no
+`rules_json` migration proved necessary (rules are *filters* the
+transform consults; the `/rule` UX and stored rows are untouched). DM
+transcription is deliberately exempt: its sessions are keyed by private
+chat ids, which the identifier-free `ActionContext` must never carry
+(R6) — forcing it through the engine would weaken the privacy
+architecture for zero behavior gain. Remaining: the Phase 0 governance
+items (community announcement, on-wiki norms sign-off, Toolforge-tier
+latency measurement), the Phase 6 pre-deploy audit, and media analysis
+(parked: LiftWing has no multimodal input yet).
 
 Blybot v3 turns the bot from a *marked-message logger* into a *channel
 intelligence platform*: it passively archives the content of Telegram

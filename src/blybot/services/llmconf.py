@@ -34,8 +34,7 @@ def parse_llm_args(text: str, base: LlmSettings, max_tokens_ceiling: int) -> Llm
         key, sep, value = token.partition(":")
         if not sep or not value:
             msg = (
-                f"Expected key:value, got {token!r} "
-                "(keys: platform, model, lang, temp, max_tokens)"
+                f"Expected key:value, got {token!r} (keys: platform, model, lang, temp, max_tokens)"
             )
             raise LlmParseError(msg)
         settings = _apply(settings, key, value, max_tokens_ceiling)

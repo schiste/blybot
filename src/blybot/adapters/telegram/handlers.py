@@ -29,10 +29,13 @@ from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 
 from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
-from blybot.domain.models import ConsentMode, LogContent, LogMedia
+from blybot.domain.models import ActionScope, ConsentMode, LogContent, LogMedia
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 from blybot.observability import Counters, log_event
-from blybot.services.publish import NothingToPublishError, PublishedLog
+from blybot.services.feedback import BUG_ACTION
+from blybot.services.feedback import CONFIRMATION_TEMPLATE as BUG_CONFIRMATION
+from blybot.services.publish import CONFIRMATION_TEMPLATE as PUBLISH_CONFIRMATION
+from blybot.services.publish import NothingToPublishError, PublishedLog, log_action
 from blybot.services.repo import NoRepoBoundError, NoTokenError
 
 if TYPE_CHECKING:
@@ -45,9 +48,9 @@ if TYPE_CHECKING:
     from blybot.domain.models import Session
     from blybot.services.directory import ChannelDirectory, ChannelSettings
     from blybot.services.dm_routing import DmRouteRegistry
+    from blybot.services.engine import ActionEngine
     from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
-    from blybot.services.publish import LogPublicationService
     from blybot.services.repo import GroupRepoService
     from blybot.services.sessions import SessionRegistry
     from blybot.services.transcribe import DmTranscriptionService
@@ -63,7 +66,7 @@ REPLY_LOG_IS_GROUP_ONLY: Final = (
 )
 REPLY_MEDIA_DECLINED: Final = "That message has no text or supported image I can publish."
 REPLY_MEDIA_FETCH_FAILED: Final = "Sorry, I couldn't fetch that image from Telegram."
-REPLY_PUBLISHED: Final = "Published anonymously: {url}"
+REPLY_PUBLISHED: Final = PUBLISH_CONFIRMATION  # sink-owned copy, re-exported for tests
 REPLY_MEDIA_REVIEW_DM: Final = (
     "Media uploaded for review:\n{links}\n\n"
     "Please check the file description and license before {deadline}. "
@@ -92,7 +95,7 @@ DM_DESTINATION_BUTTON: Final = "Choose group"
 REPLY_BUG_USAGE: Final = (
     "Describe the problem after the command, e.g.: /bug the bot ignored my /flush"
 )
-REPLY_BUG_FILED: Final = "Filed anonymously: {url}"
+REPLY_BUG_FILED: Final = BUG_CONFIRMATION  # sink-owned copy, re-exported for tests
 REPLY_BUG_DISABLED: Final = "Chat bug reports aren't enabled; please open an issue at {url}"
 REPLY_BUG_FAILED: Final = "Sorry, filing the issue failed — please report it at {url}"
 REPLY_CONFIG_UNAVAILABLE: Final = (
@@ -250,7 +253,7 @@ def _help_footer(page_url: str, maintainer: str) -> str:
 class GroupHandlers:
     """Handlers for the group ``/log`` flow, greeting, and migration."""
 
-    log_service: LogPublicationService
+    engine: ActionEngine
     groups: GroupPolicy
     limiter: SlidingWindowLimiter
     directory: ChannelDirectory
@@ -319,11 +322,10 @@ class GroupHandlers:
             content = await _log_content_from_message(
                 context.bot, target, include_media=include_media
             )
-            page_url = self.page_url_for(settings.log_page)
-            published = await self.log_service.publish_entry(
-                content,
-                target_page=settings.log_page,
-                page_url=page_url,
+            outcome = await self.engine.run(
+                ActionScope(chat_id=chat.id, thread_id=thread_id),
+                log_action(settings.log_page),
+                payload=content,
             )
         except NothingToPublishError:
             self.counters.increment("log_declined_media")
@@ -335,12 +337,10 @@ class GroupHandlers:
             await reply(REPLY_WIKI_ERROR)
         else:
             log_event("log_command", "ok")
-            section_url = published.section_url or (
-                f"{self.page_url_for(settings.log_page)}#{published.heading.replace(' ', '_')}"
-            )
-            await reply(REPLY_PUBLISHED.format(url=section_url))
-            if include_media:
-                await self._send_media_review_dm(context.bot, message, published)
+            for confirmation in outcome.messages:
+                await reply(confirmation.text)
+            if include_media and isinstance(outcome.payload, PublishedLog):
+                await self._send_media_review_dm(context.bot, message, outcome.payload)
 
     def _log_decline(
         self, settings: ChannelSettings, command: Message, target: Message
@@ -556,6 +556,7 @@ class PrivateHandlers:
     dm_page_url: str
     maintainer: str
     issues_url: str
+    engine: ActionEngine
     feedback: FeedbackService | None
     bug_limiter: SlidingWindowLimiter
     token_entry: TokenEntryHandler
@@ -637,14 +638,18 @@ class PrivateHandlers:
             await reply(REPLY_THROTTLED)
             return
         try:
-            url = await self.feedback.report(description)
+            # Sentinel scope: a private chat id is a user identifier and
+            # must never enter the pipeline — this handler routes the
+            # confirmation itself.
+            outcome = await self.engine.run(ActionScope(chat_id=0), BUG_ACTION, payload=description)
         except IssueTrackerError:
             log_event("bug_report", "error")
             await reply(REPLY_BUG_FAILED.format(url=self.issues_url))
             return
         self.counters.increment("bugs_filed")
         log_event("bug_report", "ok")
-        await reply(REPLY_BUG_FILED.format(url=url))
+        for confirmation in outcome.messages:
+            await reply(confirmation.text)
 
     async def on_privacy(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """State exactly what is ingested, published, and stored."""

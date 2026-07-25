@@ -19,6 +19,7 @@ from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
 from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
+from blybot.services.engine import ActionEngine
 from blybot.services.feedback import FeedbackService
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests import tg
@@ -69,6 +70,14 @@ def make_handlers(
         default_repo="",
         page_suffix="Telegram logs",
     )
+    feedback = FeedbackService(tracker) if tracker else None
+    engine = ActionEngine(
+        sources={},
+        transforms={},
+        sinks={"issue_tracker": feedback} if feedback else {},
+        counters=Counters(),
+        clock=clock,
+    )
     handlers = h.PrivateHandlers(
         transcription=transcription,
         sessions=transcription.sessions,
@@ -80,7 +89,8 @@ def make_handlers(
         dm_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Discussions",
         maintainer="Test Maintainer",
         issues_url=ISSUES_URL,
-        feedback=FeedbackService(tracker) if tracker else None,
+        engine=engine,
+        feedback=feedback,
         bug_limiter=SlidingWindowLimiter(clock=clock, limit=bug_limit, window=timedelta(hours=1)),
         token_entry=TokenEntryHandler(
             binding=TokenBinding(clock=clock),
@@ -406,6 +416,7 @@ async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() ->
         dm_page_url="https://example.org/wiki/D",
         maintainer="",
         issues_url=ISSUES_URL,
+        engine=ActionEngine(sources={}, transforms={}, sinks={}, counters=Counters(), clock=clock),
         feedback=None,
         bug_limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(hours=1)),
         token_entry=TokenEntryHandler(

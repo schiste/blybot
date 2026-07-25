@@ -38,7 +38,6 @@ from blybot.services.sessions import SessionRegistry
 from tests.fakes import (
     FakeClock,
     FakePublisher,
-    FakeRepoGateway,
     InMemoryActions,
     InMemoryArchive,
     InMemoryProfiles,
@@ -213,10 +212,10 @@ async def test_repo_notify_loop_delivers_digests_and_survives_send_failures() ->
     store = InMemoryProfiles()
     notifier = RepoNotifier(
         store=store,
-        vault=store,
-        gateway=FakeRepoGateway(),
         groups=GroupPolicy(allowed=set()),
-        counters=Counters(),
+        engine=ActionEngine(
+            sources={}, transforms={}, sinks={}, counters=Counters(), clock=FakeClock()
+        ),
     )
 
     sent: list[tuple[int, str, int | None]] = []
@@ -252,10 +251,10 @@ async def test_post_init_starts_the_notify_task_when_configured() -> None:
     lifecycle.poll_interval_seconds = 3600
     lifecycle.notifier = RepoNotifier(
         store=store,
-        vault=store,
-        gateway=FakeRepoGateway(),
         groups=GroupPolicy(allowed=set()),
-        counters=Counters(),
+        engine=ActionEngine(
+            sources={}, transforms={}, sinks={}, counters=Counters(), clock=FakeClock()
+        ),
     )
     app = cast("_App", SimpleNamespace(bot=SimpleNamespace()))
     await lifecycle.post_init(app)
@@ -270,10 +269,10 @@ async def test_notify_loop_survives_a_crashing_collect() -> None:
     store = InMemoryProfiles()
     notifier = RepoNotifier(
         store=store,
-        vault=store,
-        gateway=FakeRepoGateway(),
         groups=GroupPolicy(allowed=set()),
-        counters=Counters(),
+        engine=ActionEngine(
+            sources={}, transforms={}, sinks={}, counters=Counters(), clock=FakeClock()
+        ),
     )
     calls = {"n": 0}
 
@@ -360,7 +359,9 @@ def test_run_polling_subscribes_channel_posts_only_with_capture(
 
 def make_analysis_handlers() -> Any:
     return AnalysisHandlers(
-        engine=ActionEngine(sources={}, transforms={}, sinks={}, counters=Counters()),
+        engine=ActionEngine(
+            sources={}, transforms={}, sinks={}, counters=Counters(), clock=FakeClock()
+        ),
         groups=GroupPolicy(allowed=set()),
         limiter=SlidingWindowLimiter(clock=FakeClock(), limit=6, window=timedelta(hours=1)),
         clock=FakeClock(),
@@ -404,7 +405,9 @@ def test_analysis_commands_register_when_wired(monkeypatch: pytest.MonkeyPatch) 
 def make_scheduler() -> Any:
     return ActionScheduler(
         store=InMemoryActions(),
-        engine=ActionEngine(sources={}, transforms={}, sinks={}, counters=Counters()),
+        engine=ActionEngine(
+            sources={}, transforms={}, sinks={}, counters=Counters(), clock=FakeClock()
+        ),
         groups=GroupPolicy(allowed=set()),
         clock=FakeClock(),
         counters=Counters(),

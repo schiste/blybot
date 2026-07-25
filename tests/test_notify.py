@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from blybot.domain.models import EventType, GroupProfile, RepoEvent, Resource, Rule, RuleFilter
 from blybot.observability import Counters
-from blybot.services.notify import RepoNotifier
+from blybot.services.engine import ActionEngine
+from blybot.services.notify import (
+    ChatMessagesSink,
+    RepoEventsSource,
+    RepoNotifier,
+    RuleMatchTransform,
+)
 from blybot.services.policy import GroupPolicy
 from blybot.services.rules import parse_rule
-from tests.fakes import FakeRepoGateway, InMemoryProfiles
+from tests.fakes import FakeClock, FakeRepoGateway, InMemoryProfiles
 
 RELEASE = RepoEvent(event_type=EventType.RELEASE, title="Release 1.0", url="https://x/r/1")
 MERGE = RepoEvent(event_type=EventType.PR_MERGED, title="fix", url="https://x/pr/2", author="dev")
@@ -21,12 +27,17 @@ def make_notifier(
     gateway: FakeRepoGateway,
     allowed: set[int] | None = None,
 ) -> RepoNotifier:
+    engine = ActionEngine(
+        sources={"repo_events": RepoEventsSource(store=store, vault=store, gateway=gateway)},
+        transforms={"rule_match": RuleMatchTransform(counters=Counters())},
+        sinks={"telegram_message": ChatMessagesSink()},
+        counters=Counters(),
+        clock=FakeClock(),
+    )
     return RepoNotifier(
         store=store,
-        vault=store,
-        gateway=gateway,
         groups=GroupPolicy(allowed=allowed if allowed is not None else set()),
-        counters=Counters(),
+        engine=engine,
     )
 
 

@@ -164,6 +164,7 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
 ) -> None:
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)  # no issue_tracker sink
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
     seen: dict[str, Any] = {}
@@ -173,9 +174,15 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
     handlers = seen["analysis_handlers"]
     assert handlers is not None
     engine = handlers.engine
-    assert set(engine.sources) == {"archive_window"}
-    assert set(engine.transforms) == {"prompt", "stats"}
-    assert set(engine.sinks) == {"wiki_section", "telegram_reply"}
+    # One engine serves every pipeline this deployment enables.
+    assert set(engine.sources) == {"archive_window", "repo_events"}
+    assert set(engine.transforms) == {"prompt", "stats", "log_publish", "rule_match"}
+    assert set(engine.sinks) == {
+        "wiki_section",
+        "telegram_reply",
+        "chat_confirm",
+        "telegram_message",
+    }
     # The wiki sink refuses to publish for a scope that never ran
     # /setpage — same policy as /log on self-service deployments.
     sink = engine.sinks["wiki_section"]

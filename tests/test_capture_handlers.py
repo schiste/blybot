@@ -192,21 +192,30 @@ async def test_group_membership_changes_are_not_capture_events() -> None:
     bot.send_message.assert_not_awaited()
 
 
-async def test_channel_enable_survives_storage_and_send_failures() -> None:
+async def test_failed_announcement_means_capture_never_starts() -> None:
+    handlers, store, _archive = make_handlers()
+    context, bot = tg.make_context()
+    bot.send_message.side_effect = TelegramError("muted")
+
+    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
+
+    # Loud opt-in (R-v3.1): a channel that cannot be told is never
+    # archived. A demote + re-promote retries the whole sequence.
+    profile = await store.get(CHANNEL.id, 0)
+    assert profile is None or not profile.capture_enabled
+
+
+async def test_storage_failure_after_the_announcement_leaves_capture_off() -> None:
     handlers, store, _archive = make_handlers()
     store.fail_upserts = True
     context, bot = tg.make_context()
-    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
-    bot.send_message.assert_not_awaited()  # no announcement for a failed enable
 
-    store.fail_upserts = False
-    bot.send_message.side_effect = TelegramError("muted")
     await handlers.on_my_chat_member(
         admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context
-    )  # must not raise; capture is on even if the announcement was lost
-    profile = await store.get(CHANNEL.id, 0)
-    assert profile is not None
-    assert profile.capture_enabled
+    )  # must not raise
+
+    assert len(tg.sent_texts(bot)) == 1  # announced, then the enable write failed
+    assert await store.get(CHANNEL.id, 0) is None  # the safe direction to fail
 
 
 async def test_disallowed_channel_is_never_enabled() -> None:

@@ -223,6 +223,28 @@ async def test_storage_failure_after_the_announcement_retracts_it() -> None:
     assert await store.get(CHANNEL.id, 0) is None  # the safe direction to fail
 
 
+async def test_repromotion_of_an_enabled_channel_is_quiet() -> None:
+    handlers, store, _archive = make_handlers()
+    await store.upsert(GroupProfile(chat_id=CHANNEL.id, capture_enabled=True))
+    context, bot = tg.make_context()
+
+    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
+
+    # Nothing changed: it was announced when first enabled, and a failed
+    # redundant enable write must never trigger a false retraction.
+    bot.send_message.assert_not_awaited()
+
+
+async def test_unreadable_prior_state_claims_and_changes_nothing() -> None:
+    handlers, store, _archive = make_handlers()
+    store.fail = True
+    context, bot = tg.make_context()
+
+    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
+
+    bot.send_message.assert_not_awaited()  # no claim either way while state is unknown
+
+
 async def test_a_lost_retraction_is_swallowed_and_logged() -> None:
     handlers, store, _archive = make_handlers()
     store.fail_upserts = True

@@ -19,12 +19,13 @@ from blybot.adapters.telegram.analyze import AnalysisHandlers
 from blybot.adapters.telegram.app import (
     Lifecycle,
     Maintenance,
+    action_tick_loop,
     build_application,
     repo_notify_loop,
     run_polling,
 )
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
-from blybot.domain.models import ConsentMode
+from blybot.domain.models import ConsentMode, OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
@@ -33,11 +34,13 @@ from blybot.services.directory import ChannelDirectory
 from blybot.services.engine import ActionEngine
 from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
+from blybot.services.schedule import ActionScheduler
 from blybot.services.sessions import SessionRegistry
 from tests.fakes import (
     FakeClock,
     FakePublisher,
     FakeRepoGateway,
+    InMemoryActions,
     InMemoryArchive,
     InMemoryProfiles,
     SequentialPseudonyms,
@@ -94,8 +97,8 @@ def test_build_registers_every_handler() -> None:
     kinds = [type(handler) for handler in handlers]
     # log, logmedia, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
     # setup, setpage, setconsent, setrepo, events, rule, rules, capture, llm,
-    # revoke, settings, reset
-    assert kinds.count(CommandHandler) == 24
+    # action, revoke, settings, reset
+    assert kinds.count(CommandHandler) == 25
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
     assert 1 not in application.handlers  # no capture: group 1 stays empty
@@ -376,7 +379,7 @@ def test_analysis_commands_register_when_wired(monkeypatch: pytest.MonkeyPatch) 
         analysis_handlers=make_analysis_handlers(),
     )
     kinds = [type(handler) for handler in application.handlers[0]]
-    assert kinds.count(CommandHandler) == 28  # + summarize, talkingpoints, stats, run
+    assert kinds.count(CommandHandler) == 29  # + summarize, talkingpoints, stats, run
 
     seen: dict[str, Any] = {}
 
@@ -394,3 +397,73 @@ def test_analysis_commands_register_when_wired(monkeypatch: pytest.MonkeyPatch) 
     )
     # Analysis commands alone don't need channel posts; capture does.
     assert Update.CHANNEL_POST not in seen["allowed_updates"]
+
+
+def make_scheduler() -> Any:
+    return ActionScheduler(
+        store=InMemoryActions(),
+        engine=ActionEngine(sources={}, transforms={}, sinks={}, counters=Counters()),
+        groups=GroupPolicy(allowed=set()),
+        clock=FakeClock(),
+        counters=Counters(),
+    )
+
+
+async def test_action_tick_loop_delivers_messages_and_survives_failures() -> None:
+    scheduler = make_scheduler()
+    sent: list[tuple[int, str, int | None]] = []
+
+    class Recorder:
+        async def send_message(
+            self, chat_id: int, text: str, message_thread_id: int | None = None
+        ) -> None:
+            if chat_id == -13:
+                raise TelegramError("kicked")
+            sent.append((chat_id, text, message_thread_id))
+
+    async def fake_collect() -> list[OutboundMessage]:
+        return [
+            OutboundMessage(chat_id=-13, thread_id=0, text="lost"),
+            OutboundMessage(chat_id=-1, thread_id=7, text="Published: url"),
+        ]
+
+    scheduler.collect = fake_collect
+    task = asyncio.ensure_future(action_tick_loop(cast("Any", Recorder()), scheduler, 0))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (-1, "Published: url", 7) in sent
+
+
+async def test_action_tick_loop_survives_a_crashing_collect() -> None:
+    scheduler = make_scheduler()
+    calls = {"n": 0}
+
+    async def exploding_collect() -> list[OutboundMessage]:
+        calls["n"] += 1
+        msg = "schema drift"
+        raise RuntimeError(msg)
+
+    scheduler.collect = exploding_collect
+    task = asyncio.ensure_future(action_tick_loop(cast("Any", None), scheduler, 0))
+    for _ in range(30):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert calls["n"] >= 2
+
+
+async def test_post_init_starts_the_actions_task_when_configured() -> None:
+    lifecycle, _, _ = make_lifecycle()
+    lifecycle.maintenance.interval_seconds = 3600
+    lifecycle.poll_interval_seconds = 3600
+    lifecycle.scheduler = make_scheduler()
+    app = cast("_App", SimpleNamespace(bot=SimpleNamespace()))
+    await lifecycle.post_init(app)
+    assert lifecycle._actions_task is not None
+    await lifecycle.post_shutdown(app)
+    await asyncio.sleep(0)
+    assert lifecycle._actions_task.cancelled()

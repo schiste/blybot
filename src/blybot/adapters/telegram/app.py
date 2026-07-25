@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.observability import Counters
     from blybot.services.notify import RepoNotifier
+    from blybot.services.schedule import ActionScheduler
     from blybot.services.sessions import SessionRegistry
     from blybot.services.transcribe import DmTranscriptionService
 
@@ -85,8 +86,11 @@ class Lifecycle:
     bootstrap: Callable[[], Awaitable[None]] | None = None
     # Repo-event digests (self-service deployments with events on).
     notifier: RepoNotifier | None = None
+    # Scheduled actions (capture-enabled deployments; v3 phase 4).
+    scheduler: ActionScheduler | None = None
     poll_interval_seconds: float = 300
     _notify_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _actions_task: asyncio.Task[None] | None = field(default=None, init=False)
     # Scheduled directly on the loop (PTB's create_task pre-start warns and
     # would not track it anyway); held here so shutdown can cancel it.
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -104,15 +108,20 @@ class Lifecycle:
             self._notify_task = loop.create_task(
                 repo_notify_loop(app.bot, self.notifier, self.poll_interval_seconds)
             )
+        if self.scheduler is not None:
+            self._actions_task = loop.create_task(
+                action_tick_loop(app.bot, self.scheduler, self.poll_interval_seconds)
+            )
         log_event("startup", "ok")
 
     async def post_shutdown(self, app: _App) -> None:
         """Stop maintenance, flush pending DM buffers, release the wiki client."""
         del app
-        for task in (self._maintenance_task, self._notify_task):
+        tasks = (self._maintenance_task, self._notify_task, self._actions_task)
+        for task in tasks:
             if task is not None:
                 task.cancel()
-        for task in (self._maintenance_task, self._notify_task):
+        for task in tasks:
             if task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
@@ -137,6 +146,24 @@ async def repo_notify_loop(bot: Bot, notifier: RepoNotifier, interval_seconds: f
                 # Kicked from the group, muted, etc. — that group's
                 # digest is lost, everyone else's still goes out.
                 log_event("repo_digest", "ignored")
+
+
+async def action_tick_loop(bot: Bot, scheduler: ActionScheduler, interval_seconds: float) -> None:
+    """Run due scheduled actions and deliver their messages until cancelled."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            messages = await scheduler.collect()
+        except Exception:
+            log_event("action_tick", "error")
+            continue
+        for message in messages:
+            try:
+                await send_threaded(bot, message.chat_id, message.thread_id, message.text)
+            except TelegramError:
+                # Kicked, muted, etc. — this scope's confirmation is
+                # lost; every other scope's still goes out.
+                log_event("action_delivery", "ignored")
 
 
 def build_application(  # noqa: PLR0913 -- one handler bundle per concern
@@ -184,6 +211,7 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
         ("rules", admin_handlers.on_rules),
         ("capture", admin_handlers.on_capture),
         ("llm", admin_handlers.on_llm),
+        ("action", admin_handlers.on_action),
         ("revoke", admin_handlers.on_revoke),
         ("settings", admin_handlers.on_settings),
         ("reset", admin_handlers.on_reset),

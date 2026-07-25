@@ -14,11 +14,11 @@ registered once at the composition root. Adding a new capability to the
 bot usually means writing one new component and composing it, not a new
 feature module.
 
-Status: the framework core shipped in Phase 1 and the capture +
-analysis components in Phases 2–3 of the
-[v3 plan](PLAN-V3-CHANNEL-INTELLIGENCE.md). On-demand analyses work
-today (see the command list below); `/action add` scheduling lands with
-Phase 4.
+Status: fully operational. The framework core (Phase 1), capture and
+analysis components (Phases 2–3), and `/action add` scheduling (Phase 4)
+of the [v3 plan](PLAN-V3-CHANNEL-INTELLIGENCE.md) have all shipped;
+scheduled actions run on the shared background tick
+(`EVENTS_POLL_MINUTES`).
 
 ## Concepts
 

@@ -135,8 +135,15 @@ class MessageArchive(Protocol):
         """Return the scope's messages with ``since <= posted_at < until``, oldest first."""
         ...
 
-    async def purge(self, chat_id: int, thread_id: int) -> int:
-        """Hard-delete the scope's entire archive; return the rows removed."""
+    async def purge(self, chat_id: int, thread_id: int, before: datetime | None = None) -> int:
+        """Hard-delete the scope's archive (older than ``before`` if given).
+
+        Returns the rows removed.
+        """
+        ...
+
+    async def total(self) -> int:
+        """Return the archive's total row count (operator metric)."""
         ...
 
 
@@ -175,6 +182,10 @@ class ProfileStore(Protocol):
 
     async def list_event_enabled(self) -> list[GroupProfile]:
         """Return every profile with repo notifications switched on."""
+        ...
+
+    async def list_capture_enabled(self) -> list[GroupProfile]:
+        """Return every profile with message capture switched on."""
         ...
 
     async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:

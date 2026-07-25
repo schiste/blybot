@@ -202,3 +202,23 @@ async def test_capture_wiring_schedules_actions_on_the_tick(
     assert seen["admin_handlers"].actions is not None
     assert seen["admin_handlers"].clock is not None
     await lifecycle.release()
+
+
+async def test_reannounce_cadence_wires_the_reminder(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+
+    assert entry.main() == 0
+    assert seen["lifecycle"].reminder is None  # default: reminders off
+    assert seen["lifecycle"].maintenance.archive is not None  # size metric on
+
+    monkeypatch.setenv("CAPTURE_REANNOUNCE_DAYS", "30")
+    assert entry.main() == 0
+    rewired = seen["lifecycle"]
+    assert rewired.reminder is not None
+    assert rewired.reminder.cadence.days == 30
+    await rewired.release()

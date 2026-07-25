@@ -39,6 +39,16 @@ DEFAULT_CHUNK_CHARS: Final = 24_000  # ≈6K tokens: safe for a 16K-context mode
 # Qwen-style chat-template control tokens and lookalikes (<|anything|>).
 _CONTROL_TOKENS: Final = re.compile(r"<\|[^|>]{0,32}\|>")
 
+# Heuristic injection markers (v3 plan §2.6 layer 8) — operator
+# telemetry only, never a publishing gate.
+_SUSPECT: Final = re.compile(
+    r"(?i)(ignore\s+(?:all\s+|any\s+)?(?:previous|prior|above)\s+instructions"
+    r"|disregard\s+(?:the\s+)?(?:system|above)"
+    r"|system\s+override"
+    r"|you\s+are\s+now\s+"
+    r"|<\|)"
+)
+
 
 class PromptContractError(Exception):
     """The model's output violated the structured-output contract."""
@@ -105,6 +115,11 @@ def template_for(name: str) -> PromptTemplate:
         known = ", ".join(sorted(TEMPLATES))
         raise KeyError(known)
     return TEMPLATES[name]
+
+
+def suspicion_count(texts: Iterable[str]) -> int:
+    """How many texts carry injection-shaped phrases (telemetry, not a gate)."""
+    return sum(1 for text in texts if _SUSPECT.search(text))
 
 
 def mint_fence() -> str:

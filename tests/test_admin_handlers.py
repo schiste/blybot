@@ -808,3 +808,35 @@ async def test_action_requires_a_group_admin() -> None:
     context, bot = admin_context(status=ChatMemberStatus.MEMBER, args=["list"])
     await handlers.on_action(command("/action list"), context)
     assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]
+
+
+async def test_capture_purge_accepts_a_before_date() -> None:
+    handlers, _store, archive = make_capture_handlers()
+    archive.messages.extend(
+        [
+            CapturedMessage(
+                chat_id=tg.GROUP.id,
+                thread_id=0,
+                message_id=1,
+                posted_at=tg.NOW - timedelta(days=40),
+                author="x",
+            ),
+            CapturedMessage(
+                chat_id=tg.GROUP.id, thread_id=0, message_id=2, posted_at=tg.NOW, author="x"
+            ),
+        ]
+    )
+    context, bot = admin_context(args=["purge", "before:2026-07-01"])
+
+    await handlers.on_capture(command("/capture purge before:2026-07-01"), context)
+
+    assert "1 message(s) deleted" in tg.sent_texts(bot)[0]
+    assert len(archive.messages) == 1  # recent rows kept
+
+
+async def test_capture_purge_rejects_a_bad_before_date() -> None:
+    handlers, _store, _archive = make_capture_handlers()
+    for bad in ["before:soon", "before:2026-13-01", "until:2026-01-01"]:
+        context, bot = admin_context(args=["purge", bad])
+        await handlers.on_capture(command(f"/capture purge {bad}"), context)
+        assert tg.sent_texts(bot) == [a.REPLY_CAPTURE_USAGE]

@@ -40,15 +40,24 @@ class ActionEngine:
     counters: Counters
 
     async def run(
-        self, scope: ActionScope, spec: ActionSpec, now: datetime
+        self,
+        scope: ActionScope,
+        spec: ActionSpec,
+        now: datetime,
+        payload: object | None = None,
     ) -> tuple[OutboundMessage, ...]:
         """Run one action; return any chat messages for the transport to send.
 
-        Raises :class:`ActionError` when the spec names a component this
-        deployment does not register — a configuration problem the
+        A caller-provided ``payload`` replaces the source step entirely —
+        the seam interactive flows (a replied-to message, a DM) use to
+        enter the pipeline, since their payloads exist before any spec
+        runs. Raises :class:`ActionError` when the spec names a component
+        this deployment does not register — a configuration problem the
         caller may show to a group admin.
         """
-        source = self._resolve(self.sources, spec.source.name, "source")
+        source = (
+            None if payload is not None else self._resolve(self.sources, spec.source.name, "source")
+        )
         chain = [
             (step, self._resolve(self.transforms, step.name, "transform"))
             for step in spec.transforms
@@ -56,7 +65,8 @@ class ActionEngine:
         sink = self._resolve(self.sinks, spec.sink.name, "sink")
 
         context = ActionContext(scope=scope, spec=spec, now=now)
-        payload: object | None = await source.fetch(context)
+        if source is not None:
+            payload = await source.fetch(context)
         for step, transform in chain:
             if payload is None:
                 break

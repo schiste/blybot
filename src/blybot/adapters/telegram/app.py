@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from blybot.adapters.telegram.analyze import AnalysisHandlers
     from blybot.adapters.telegram.capture import CaptureHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
+    from blybot.domain.ports import MessageArchive
     from blybot.observability import Counters
     from blybot.services.notify import RepoNotifier
     from blybot.services.schedule import ActionScheduler
@@ -54,6 +55,8 @@ class Maintenance:
 
     sessions: SessionRegistry
     counters: Counters
+    # Capture deployments: the archive whose size each heartbeat reports.
+    archive: MessageArchive | None = None
     interval_seconds: float = 60
     heartbeat_every_ticks: int = 15  # one liveness line roughly every 15 minutes
 
@@ -64,6 +67,8 @@ class Maintenance:
             await asyncio.sleep(self.interval_seconds)
             ticks += 1
             self.tick(ticks)
+            if self.archive is not None and ticks % self.heartbeat_every_ticks == 0:
+                await _archive_heartbeat(self.archive)
 
     def tick(self, ticks: int) -> None:
         """Sweep expired sessions; prove liveness every Nth tick."""
@@ -89,9 +94,12 @@ class Lifecycle:
     notifier: RepoNotifier | None = None
     # Scheduled actions (capture-enabled deployments; v3 phase 4).
     scheduler: ActionScheduler | None = None
+    # Periodic capture re-announcements (CAPTURE_REANNOUNCE_DAYS > 0).
+    reminder: MessageCollector | None = None
     poll_interval_seconds: float = 300
     _notify_task: asyncio.Task[None] | None = field(default=None, init=False)
     _actions_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _reminder_task: asyncio.Task[None] | None = field(default=None, init=False)
     # Scheduled directly on the loop (PTB's create_task pre-start warns and
     # would not track it anyway); held here so shutdown can cancel it.
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -113,12 +121,21 @@ class Lifecycle:
             self._actions_task = loop.create_task(
                 message_loop(app.bot, self.scheduler, self.poll_interval_seconds, "action_tick")
             )
+        if self.reminder is not None:
+            self._reminder_task = loop.create_task(
+                message_loop(app.bot, self.reminder, self.poll_interval_seconds, "capture_remind")
+            )
         log_event("startup", "ok")
 
     async def post_shutdown(self, app: _App) -> None:
         """Stop maintenance, flush pending DM buffers, release the wiki client."""
         del app
-        tasks = (self._maintenance_task, self._notify_task, self._actions_task)
+        tasks = (
+            self._maintenance_task,
+            self._notify_task,
+            self._actions_task,
+            self._reminder_task,
+        )
         for task in tasks:
             if task is not None:
                 task.cancel()
@@ -129,6 +146,14 @@ class Lifecycle:
         await self.transcription.flush_all()
         await self.release()
         log_event("shutdown", "ok")
+
+
+async def _archive_heartbeat(archive: MessageArchive) -> None:
+    """Report archive growth (v3): rows only, never content."""
+    try:
+        log_event("archive_size", "ok", rows=await archive.total())
+    except StorageError:
+        log_event("archive_size", "error")
 
 
 class MessageCollector(Protocol):

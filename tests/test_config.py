@@ -170,3 +170,14 @@ def test_github_settings_default_to_public_repo_and_no_token() -> None:
 def test_explicit_ttl_override_is_honored() -> None:
     config = load_config(dict(REQUIRED) | {"SESSION_TTL_MINUTES": "30"})
     assert config.session_ttl == timedelta(minutes=30)
+
+
+def test_reannounce_days_accepts_zero_and_rejects_negatives() -> None:
+    config = load_config({**REQUIRED, "CAPTURE_REANNOUNCE_DAYS": "0"})
+    assert config.capture_reannounce_days == 0
+    config = load_config({**REQUIRED, "CAPTURE_REANNOUNCE_DAYS": "30"})
+    assert config.capture_reannounce_days == 30
+    with pytest.raises(ConfigurationError, match="negative"):
+        load_config({**REQUIRED, "CAPTURE_REANNOUNCE_DAYS": "-1"})
+    with pytest.raises(ConfigurationError, match="integer"):
+        load_config({**REQUIRED, "CAPTURE_REANNOUNCE_DAYS": "monthly"})

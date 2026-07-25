@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 from telegram.constants import ChatMemberStatus
@@ -133,7 +134,7 @@ REPLY_ACTIONS_FULL: Final = (
     "You already have the maximum of {max} actions at {scope}; "
     "remove one with /action remove <id>."
 )
-REPLY_CAPTURE_USAGE: Final = "Usage: /capture on | off | purge"
+REPLY_CAPTURE_USAGE: Final = "Usage: /capture on | off | purge [before:YYYY-MM-DD]"
 REPLY_CAPTURE_OFF_DEPLOY: Final = (
     "Message capture isn't enabled on this deployment; ask the operator."
 )
@@ -191,6 +192,23 @@ async def is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 def _scope(thread_id: int) -> str:
     return "this topic" if thread_id else "the group default"
+
+
+# Sentinel distinguishing "no before: given" (None) from "unparsable".
+_BAD_DATE: Final = datetime(1, 1, 1, tzinfo=UTC)
+
+
+def _parse_before(token: str) -> datetime | None:
+    """Parse an optional ``before:YYYY-MM-DD`` purge bound (UTC midnight)."""
+    if not token:
+        return None
+    key, sep, value = token.partition(":")
+    if key != "before" or not sep:
+        return _BAD_DATE
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
+    except ValueError:
+        return _BAD_DATE
 
 
 @dataclass(eq=False)
@@ -358,8 +376,10 @@ class AdminHandlers:
         if resolved is None:
             return
         chat, thread_id = resolved
-        argument = (context.args or [""])[0].lower()
-        if argument not in {"on", "off", "purge"}:
+        args = list(context.args or [""])
+        argument = args[0].lower() if args else ""
+        before = _parse_before(args[1] if len(args) > 1 else "")
+        if argument not in {"on", "off", "purge"} or before is _BAD_DATE:
             await self._reply(context, chat.id, thread_id, REPLY_CAPTURE_USAGE)
             return
         archive, service = self.archive, self.capture_service
@@ -367,22 +387,25 @@ class AdminHandlers:
             await self._reply(context, chat.id, thread_id, REPLY_CAPTURE_OFF_DEPLOY)
             return
         try:
-            reply = await self._apply_capture(chat.id, thread_id, argument, archive, service)
+            reply = await self._apply_capture(
+                chat.id, thread_id, argument, archive, service, before
+            )
         except StorageError:
             reply = REPLY_STORAGE_DOWN
         await self._reply(context, chat.id, thread_id, reply)
 
-    async def _apply_capture(
+    async def _apply_capture(  # noqa: PLR0913 -- one narrowed dependency per argument
         self,
         chat_id: int,
         thread_id: int,
         argument: str,
         archive: MessageArchive,
         service: CaptureService,
+        before: datetime | None,
     ) -> str:
         scope = _scope(thread_id)
         if argument == "purge":
-            count = await archive.purge(chat_id, thread_id)
+            count = await archive.purge(chat_id, thread_id, before)
             log_event("capture_purge", "ok")
             return REPLY_CAPTURE_PURGED.format(scope=scope, count=count)
         enabled = argument == "on"

@@ -57,6 +57,7 @@ _PROFILE_COLUMNS: Final = (
 _KEY: Final = "chat_id = %s AND thread_id = %s"
 Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_LIST_EVENT_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE events_enabled = 1"  # noqa: S608
+Q_LIST_CAPTURE_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE capture_enabled = 1"  # noqa: S608
 Q_UPSERT: Final = """
 INSERT INTO profiles
     (chat_id, thread_id, log_page, repo, consent_mode, events_enabled,
@@ -222,6 +223,11 @@ class ToolsDbStore:
     async def list_event_enabled(self) -> list[GroupProfile]:
         """Return every profile with repo notifications switched on."""
         rows = await self._run(Q_LIST_EVENT_ENABLED, ())
+        return [_profile_from_row(row) for row in rows]
+
+    async def list_capture_enabled(self) -> list[GroupProfile]:
+        """Return every profile with message capture switched on."""
+        rows = await self._run(Q_LIST_CAPTURE_ENABLED, ())
         return [_profile_from_row(row) for row in rows]
 
     async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:

@@ -28,7 +28,7 @@ from blybot.domain.models import ConsentMode, OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
-from blybot.services.capture import CaptureService
+from blybot.services.capture import CaptureReminder, CaptureService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.engine import ActionEngine
 from blybot.services.notify import RepoNotifier
@@ -469,3 +469,48 @@ async def test_post_init_starts_the_actions_task_when_configured() -> None:
     await lifecycle.post_shutdown(app)
     await asyncio.sleep(0)
     assert lifecycle._actions_task.cancelled()
+
+
+async def test_heartbeat_reports_archive_size(caplog: pytest.LogCaptureFixture) -> None:
+    lifecycle, _, _ = make_lifecycle()
+    maintenance = lifecycle.maintenance
+    maintenance.archive = InMemoryArchive()
+    maintenance.interval_seconds = 0
+    maintenance.heartbeat_every_ticks = 1
+
+    with caplog.at_level(logging.INFO, logger="blybot"):
+        task = asyncio.ensure_future(maintenance.run_forever())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert any("archive_size" in message and "rows=0" in message for message in caplog.messages)
+
+    maintenance.archive = InMemoryArchive(fail=True)
+    with caplog.at_level(logging.INFO, logger="blybot"):
+        task = asyncio.ensure_future(maintenance.run_forever())
+        for _ in range(10):
+            await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert any("archive_size" in message and "error" in message for message in caplog.messages)
+
+
+async def test_post_init_starts_the_reminder_task_when_configured() -> None:
+    lifecycle, _, _ = make_lifecycle()
+    lifecycle.maintenance.interval_seconds = 3600
+    lifecycle.poll_interval_seconds = 3600
+    lifecycle.reminder = CaptureReminder(
+        store=InMemoryProfiles(),
+        groups=GroupPolicy(allowed=set()),
+        clock=FakeClock(),
+        cadence=timedelta(days=30),
+    )
+    app = cast("_App", SimpleNamespace(bot=SimpleNamespace()))
+    await lifecycle.post_init(app)
+    assert lifecycle._reminder_task is not None
+    await lifecycle.post_shutdown(app)
+    await asyncio.sleep(0)
+    assert lifecycle._reminder_task.cancelled()

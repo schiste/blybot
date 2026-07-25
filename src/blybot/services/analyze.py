@@ -32,7 +32,7 @@ from blybot.domain.prompts import PromptContractError
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Mapping
 
     from blybot.domain.models import ActionContext, CapturedMessage, PromptResult, StepSpec
     from blybot.domain.ports import (
@@ -75,15 +75,27 @@ class ArchiveWindowSource:
 
     async def fetch(self, context: ActionContext) -> Transcript | None:
         """Return the window's transcript, or ``None`` when it is empty."""
-        window = parse_window(context.spec.source.param("window", DEFAULT_WINDOW))
+        window_arg = context.spec.source.param("window", DEFAULT_WINDOW)
         until = context.now
-        since = until - window
+        since = self._since(context, window_arg, until)
         messages = await self.archive.window(
             context.scope.chat_id, context.scope.thread_id, since, until
         )
         if not messages:
             return None
         return Transcript(messages=tuple(messages), since=since, until=until)
+
+    @staticmethod
+    def _since(context: ActionContext, window_arg: str, until: datetime) -> datetime:
+        if window_arg != "since_last_run":
+            return until - parse_window(window_arg)
+        # Watermark window: exactly-once over the archive for scheduled
+        # digests. The scheduler stamps last_run to this run's `now`, so
+        # the next window starts precisely where this one ends.
+        if context.spec.last_run is None:
+            msg = "window=since_last_run only works on scheduled actions"
+            raise ActionError(msg)
+        return max(context.spec.last_run, until - MAX_WINDOW)
 
 
 @dataclass(eq=False)
@@ -96,7 +108,7 @@ class PromptTransform:
     malformed output, or transport failure beyond one retry.
     """
 
-    runner: PromptRunner
+    runners: Mapping[str, PromptRunner]  # platform name → adapter
     store: ProfileStore | None
     defaults: LlmSettings
     max_tokens_ceiling: int
@@ -110,6 +122,13 @@ class PromptTransform:
         """Return the structured analysis; raise :class:`ActionError` on failure."""
         template = self._template(step)
         settings = await self._settings(context, step)
+        if isinstance(payload, Transcript):
+            hits = prompts.suspicion_count(m.text for m in payload.messages)
+            if hits:
+                # Telemetry only, never a gate: legitimate discussion
+                # *about* prompt injection must still be analyzable.
+                self.counters.increment("injection_suspected", hits)
+                log_event("injection_heuristic", "ignored", hits=hits)
         lines, counts = _payload_lines(payload)
         chunks = prompts.chunk_lines(lines, self.chunk_chars)
         sampled = len(chunks) > self.max_chunks
@@ -173,7 +192,16 @@ class PromptTransform:
         content = prompts.reduce_prompt(template, settings.lang, fence, partials)
         return tuple(await self._call(settings, content))
 
+    def _runner(self, settings: LlmSettings) -> PromptRunner:
+        runner = self.runners.get(settings.platform)
+        if runner is None:
+            known = ", ".join(sorted(self.runners))
+            msg = f"unknown platform {settings.platform!r} (this deployment has: {known})"
+            raise ActionError(msg)
+        return runner
+
     async def _call(self, settings: LlmSettings, user_content: str) -> tuple[str, ...]:
+        runner = self._runner(settings)
         request = PromptRequest(
             model=settings.model,
             system=prompts.system_prompt(settings.lang),
@@ -181,7 +209,7 @@ class PromptTransform:
             max_tokens=min(settings.max_tokens, self.max_tokens_ceiling),
             temperature=settings.temperature,
         )
-        result = await self.runner.run(request)
+        result = await runner.run(request)
         try:
             return self._accept(result)
         except PromptContractError:
@@ -195,7 +223,7 @@ class PromptTransform:
                     "code fences, and finish within the length limit."
                 ),
             )
-            return self._accept(await self.runner.run(retry))
+            return self._accept(await runner.run(retry))
 
     @staticmethod
     def _accept(result: PromptResult) -> tuple[str, ...]:

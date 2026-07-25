@@ -1,13 +1,21 @@
 # Plan v3: Channel intelligence on an action framework
 
 **Status: Phases 1–4 shipped** (framework core, capture, LiftWing
-analyses with per-scope `/llm`, `/action` scheduling), plus the Phase 5
-delivery unification (one `MessageCollector` loop serves the repo
-notifier and the action scheduler). Remaining: the Phase 0 governance
-items (community announcement, on-wiki norms sign-off, Toolforge-tier
-latency measurement), the rest of Phase 5 (re-homing `/log`, DM
-transcription, and `/bug` onto the framework — see the note in §4), and
-the Phase 6 pre-deploy audit.
+analyses with per-scope `/llm`, `/action` scheduling), plus from Phase 5
+the delivery unification (one `MessageCollector` loop serves every
+background producer) and the engine's caller-provided-payload seam that
+the interactive re-homes need. Also shipped from the backlog:
+`window=since_last_run` watermark digests, `/capture purge before:`,
+`CAPTURE_REANNOUNCE_DAYS`, the `archive_size` heartbeat metric, the
+`injection_suspected` heuristic counter (§2.6 layer 8), a platform
+registry in the prompt transform (a second PromptRunner is now
+composition-root-only), and edit/deletion semantics in the privacy copy.
+Remaining: the Phase 0 governance items (community announcement, on-wiki
+norms sign-off, Toolforge-tier latency measurement), the Phase 5 feature
+re-homes (`/log`, DM transcription, `/bug` — see the note in §4; the
+notifier re-home additionally needs a `rules_json` data migration), the
+Phase 6 pre-deploy audit, and media analysis (externally blocked:
+LiftWing has no multimodal input yet).
 
 Blybot v3 turns the bot from a *marked-message logger* into a *channel
 intelligence platform*: it passively archives the content of Telegram

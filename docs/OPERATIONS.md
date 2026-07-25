@@ -112,6 +112,30 @@ usernames, messages. Losing
 back up the env file accordingly. Verify tokens are ciphertext with:
 `SELECT chat_id, LEFT(token_ciphertext, 20) FROM profiles;`
 
+## LiftWing LLM endpoints (v3 pre-flight findings)
+
+The v3 analyses ([plan](PLAN-V3-CHANNEL-INTELLIGENCE.md)) call the Qwen
+chat models hosted on Wikimedia LiftWing through its OpenAI-compatible
+endpoint:
+
+```
+POST https://api.wikimedia.org/service/lw/inference/v1/models/llm-<model>/openai/v1/chat/completions
+```
+
+Verified live on 2026-07-25 (anonymous tier):
+
+- `llm-qwen3-14b` (16K context) and `llm-qwen36-27b` (Qwen3.6 27B, 32K
+  context) both answer; `llm-qwen3-27b` does **not** exist. Responses
+  are OpenAI-shaped (`choices[].message.content`, `finish_reason`,
+  `usage` with prompt/completion token counts).
+- No API key. Anonymous callers share a ~100 req/h pool; calls from
+  Toolforge are effectively unthrottled — measure Toolforge-tier latency
+  and long-generation behavior before enabling scheduled analyses
+  (remaining Phase 0 item).
+- Reference:
+  [Machine_Learning/LiftWing/Large_Language_Models/Wikimania_2026](https://wikitech.wikimedia.org/wiki/Machine_Learning/LiftWing/Large_Language_Models/Wikimania_2026)
+  on wikitech.
+
 ## Updating (all instances at once)
 
 ```sh

@@ -18,6 +18,7 @@ from blybot.adapters.telegram.capture import (
     HmacAuthorMasker,
 )
 from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile
+from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.capture import CaptureService
 from blybot.services.directory import ChannelDirectory
@@ -206,48 +207,96 @@ async def test_failed_announcement_means_capture_never_starts() -> None:
     assert profile is None or not profile.capture_enabled
 
 
-async def test_storage_failure_after_the_announcement_retracts_it() -> None:
-    handlers, store, _archive = make_handlers()
-    store.fail_upserts = True
+class EnableWriteFails(InMemoryProfiles):
+    """Fails only capture-*enabling* upserts: the disable verification succeeds."""
+
+    async def upsert(self, profile: GroupProfile) -> None:
+        if profile.capture_enabled:
+            raise StorageError
+        await super().upsert(profile)
+
+
+async def test_failed_enable_retracts_only_after_a_verified_disable() -> None:
+    handlers, store, _archive = make_handlers(store=EnableWriteFails())
     context, bot = tg.make_context()
 
     await handlers.on_my_chat_member(
         admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context
     )  # must not raise
 
-    # Announced, the enable write failed, and the claim was corrected.
+    # Announced, the enable write failed, the state was forced off (so
+    # the correction is truthful by construction), then corrected.
     assert tg.sent_texts(bot) == [
         CHANNEL_ANNOUNCEMENT.format(bot_name="Blybot"),
         CHANNEL_RETRACTION.format(bot_name="Blybot"),
     ]
-    assert await store.get(CHANNEL.id, 0) is None  # the safe direction to fail
+    profile = await store.get(CHANNEL.id, 0)
+    assert profile is not None
+    assert profile.capture_enabled is False
 
 
-async def test_repromotion_of_an_enabled_channel_is_quiet() -> None:
+async def test_demotion_revokes_the_structural_opt_in() -> None:
     handlers, store, _archive = make_handlers()
-    await store.upsert(GroupProfile(chat_id=CHANNEL.id, capture_enabled=True))
+    await enable(store, CHANNEL.id)
     context, bot = tg.make_context()
 
-    await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
+    await handlers.on_my_chat_member(
+        admin_change(CHANNEL, ChatMemberStatus.MEMBER, old_status=ChatMemberStatus.ADMINISTRATOR),
+        context,
+    )
 
-    # Nothing changed: it was announced when first enabled, and a failed
-    # redundant enable write must never trigger a false retraction.
-    bot.send_message.assert_not_awaited()
+    profile = await store.get(CHANNEL.id, 0)
+    assert profile is not None
+    assert profile.capture_enabled is False  # admin status was the consent
+    bot.send_message.assert_not_awaited()  # the bot cannot post there anymore
 
 
-async def test_unreadable_prior_state_claims_and_changes_nothing() -> None:
+async def test_repromotion_reannounces_a_fresh_opt_in() -> None:
+    handlers, store, _archive = make_handlers()
+    context, bot = tg.make_context()
+    promote = admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR)
+    demote = admin_change(
+        CHANNEL, ChatMemberStatus.MEMBER, old_status=ChatMemberStatus.ADMINISTRATOR
+    )
+
+    await handlers.on_my_chat_member(promote, context)
+    await handlers.on_my_chat_member(demote, context)
+    await handlers.on_my_chat_member(promote, context)
+
+    # Restored admin rights are a fresh loud opt-in, never a silent resumption.
+    assert tg.sent_texts(bot) == [CHANNEL_ANNOUNCEMENT.format(bot_name="Blybot")] * 2
+    profile = await store.get(CHANNEL.id, 0)
+    assert profile is not None
+    assert profile.capture_enabled is True
+
+
+async def test_demotion_with_storage_down_still_forgets_and_never_raises() -> None:
+    handlers, store, _archive = make_handlers()
+    await enable(store, CHANNEL.id)
+    store.fail = True
+    context, _bot = tg.make_context()
+
+    await handlers.on_my_chat_member(
+        admin_change(CHANNEL, ChatMemberStatus.MEMBER, old_status=ChatMemberStatus.ADMINISTRATOR),
+        context,
+    )  # no raise; the bot receives nothing from the channel while demoted
+
+
+async def test_fully_unavailable_storage_never_produces_a_retraction() -> None:
     handlers, store, _archive = make_handlers()
     store.fail = True
     context, bot = tg.make_context()
 
     await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
 
-    bot.send_message.assert_not_awaited()  # no claim either way while state is unknown
+    # Enable failed and the state could not be forced off, so it is
+    # unknowable: the standing announcement over-warns (the privacy-safe
+    # direction) and no false "NOT being archived" claim is posted.
+    assert tg.sent_texts(bot) == [CHANNEL_ANNOUNCEMENT.format(bot_name="Blybot")]
 
 
 async def test_a_lost_retraction_is_swallowed_and_logged() -> None:
-    handlers, store, _archive = make_handlers()
-    store.fail_upserts = True
+    handlers, store, _archive = make_handlers(store=EnableWriteFails())
     context, bot = tg.make_context()
     outcomes = [None, TelegramError("muted")]  # announcement lands, retraction doesn't
     bot.send_message.side_effect = outcomes
@@ -257,7 +306,9 @@ async def test_a_lost_retraction_is_swallowed_and_logged() -> None:
     )  # must not raise
 
     assert bot.send_message.await_count == 2
-    assert await store.get(CHANNEL.id, 0) is None
+    profile = await store.get(CHANNEL.id, 0)
+    assert profile is not None
+    assert profile.capture_enabled is False  # still verifiably off
 
 
 async def test_disallowed_channel_is_never_enabled() -> None:

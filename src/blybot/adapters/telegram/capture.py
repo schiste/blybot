@@ -8,7 +8,9 @@ lives behind :class:`~blybot.services.capture.CaptureService`.
 
 Broadcast channels opt in structurally: when the bot is made a channel
 admin it posts a permanent announcement and enables capture for that
-channel; groups opt in explicitly via ``/capture on``.
+channel, and demoting (or removing) it disables capture again — admin
+status *is* the channel's consent. Groups opt in explicitly via
+``/capture on``.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from telegram import ChatMemberUpdated, Message, Update
+    from telegram import Message, Update
     from telegram.ext import ContextTypes
 
     from blybot.services.capture import CaptureService
@@ -98,60 +100,92 @@ class CaptureHandlers:
         await self.service.ingest(_as_captured(message, thread_id=thread_id, author=author))
 
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Enable capture and announce it when the bot becomes a channel admin."""
+        """Track the bot's channel admin status — the structural opt-in.
+
+        Admin status *is* a channel's capture consent (channels have no
+        `/capture` commands), so the two transitions are symmetric:
+        promotion announces and enables, demotion (or removal) disables.
+        Every genuine promotion re-announces — a channel that took the
+        bot's admin rights away and later restores them gets a fresh
+        loud opt-in, never a silent resumption.
+        """
         change = update.my_chat_member
-        if change is None or not _is_channel_promotion(change):
+        if change is None or change.chat.type != ChatType.CHANNEL:
             return
         if not self.groups.is_allowed(change.chat.id):
             return
-        # Read the prior state first: a re-promotion of an already-enabled
-        # channel changes nothing (it was announced when first enabled),
-        # and if the state cannot be read, claim nothing and change
-        # nothing — a failed *redundant* enable write must never produce
-        # a false "not being archived" retraction.
+        admin = ChatMemberStatus.ADMINISTRATOR
+        was_admin = change.old_chat_member.status == admin
+        is_admin = change.new_chat_member.status == admin
+        if was_admin and not is_admin:
+            await self._end_channel_capture(change.chat.id)
+        elif is_admin and not was_admin:
+            await self._begin_channel_capture(change.chat.id, context)
+        # admin→admin is a permissions edit; anything else is not ours.
+
+    async def _end_channel_capture(self, chat_id: int) -> None:
+        """Demotion revokes the structural opt-in: capture must not survive it."""
+        self.service.forget_scope(chat_id, 0)
         try:
-            profile = await self.directory.profile_of(change.chat.id, 0)
+            await self.directory.set_capture(chat_id, 0, enabled=False)
         except StorageError:
+            # The bot receives nothing from a channel it is not admin of,
+            # so nothing is archived meanwhile; a later re-promotion runs
+            # the full announce-and-enable sequence either way.
             log_event("capture_enable", "error")
             return
-        if profile.capture_enabled:
-            return
-        # Announce first: loud opt-in is a hard requirement (R-v3.1), so
-        # if the channel cannot be told, capture must not start. A
-        # demote + re-promote retries the whole sequence.
+        log_event("capture_enable", "ok", enabled=0)
+
+    async def _begin_channel_capture(
+        self, chat_id: int, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Announce first (loud opt-in, R-v3.1), then enable; never claim falsely."""
         try:
             await context.bot.send_message(
-                chat_id=change.chat.id,
+                chat_id=chat_id,
                 text=CHANNEL_ANNOUNCEMENT.format(bot_name=self.bot_name),
             )
         except TelegramError:
+            # The channel cannot be told, so capture must not start. A
+            # demote + re-promote retries the whole sequence.
             log_event("capture_announce", "error")
             return
         try:
-            await self.directory.set_capture(change.chat.id, 0, enabled=True)
+            await self.directory.set_capture(chat_id, 0, enabled=True)
         except StorageError:
-            # Announced but not enabled — the safe direction to fail,
-            # but the "being archived" claim must not stand uncorrected.
             log_event("capture_enable", "error")
-            try:
-                await context.bot.send_message(
-                    chat_id=change.chat.id,
-                    text=CHANNEL_RETRACTION.format(bot_name=self.bot_name),
-                )
-            except TelegramError:
-                log_event("capture_announce", "error")
+            await self._retract_if_verifiably_off(chat_id, context)
             return
-        self.service.forget_scope(change.chat.id, 0)
+        self.service.forget_scope(chat_id, 0)
         log_event("capture_enable", "ok")
 
+    async def _retract_if_verifiably_off(
+        self, chat_id: int, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """After a failed enable write, correct the announcement — but only truthfully.
 
-def _is_channel_promotion(change: ChatMemberUpdated) -> bool:
-    """A member→admin transition in a channel; a permissions edit is not one."""
-    return (
-        change.chat.type == ChatType.CHANNEL
-        and change.new_chat_member.status == ChatMemberStatus.ADMINISTRATOR
-        and change.old_chat_member.status != ChatMemberStatus.ADMINISTRATOR
-    )
+        A failed write is an *uncertain* outcome (the UPSERT may have
+        committed before the connection dropped), and older state may
+        even already be enabled. Force the state off; only when that
+        write is confirmed may the "NOT being archived" correction be
+        posted. If even the disable fails, the state is unknowable — the
+        standing announcement then over-warns (claims archiving that may
+        not happen), which is the privacy-safe direction to be wrong in.
+        """
+        self.service.forget_scope(chat_id, 0)
+        try:
+            await self.directory.set_capture(chat_id, 0, enabled=False)
+        except StorageError:
+            log_event("capture_enable", "error")
+            return
+        self.service.forget_scope(chat_id, 0)
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=CHANNEL_RETRACTION.format(bot_name=self.bot_name),
+            )
+        except TelegramError:
+            log_event("capture_announce", "error")
 
 
 def _as_captured(message: Message, thread_id: int, author: str) -> CapturedMessage:

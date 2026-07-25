@@ -91,7 +91,9 @@ Mitigations the design keeps:
   readable handle — never the user id, username, or display name. Stats
   ("top contributors", "active participants") work on pseudonyms. The HMAC
   key (`ARCHIVE_PSEUDONYM_KEY`) lives in config; rotating it unlinkably
-  re-keys everyone. This preserves the spirit of R6 in a world where
+  re-keys everyone *going forward* (already-archived rows keep their old
+  labels — the user id needed to recompute them is never stored; erasing
+  them is `/capture purge`). This preserves the spirit of R6 in a world where
   content is stored. (If a community later wants real attribution, that is
   a per-scope opt-in flag added in a follow-up, not a v3 default.)
 - **Non-captured scopes lose nothing but the structural framing.** The

@@ -166,6 +166,21 @@ async def test_fan_out_is_capped() -> None:
     assert len(await notifier.collect()) == 2  # two scopes processed, one digest each
 
 
+async def test_capped_fan_out_rotates_across_ticks() -> None:
+    store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
+    gateway.events = [RELEASE]
+    for chat_id in range(-5, 0):
+        await enable(store, chat_id=chat_id, specs=("release digest",))
+    notifier = make_notifier(store, gateway)
+    notifier.max_groups_per_tick = 2
+
+    served: set[int] = set()
+    for _ in range(3):  # ceil(5 / 2) ticks cover every scope
+        served.update(m.chat_id for m in await notifier.collect())
+
+    assert served == {-5, -4, -3, -2, -1}  # nobody is permanently starved
+
+
 async def test_digest_truncates_beyond_five_lines() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
     gateway.events = [RELEASE] * 7

@@ -502,11 +502,21 @@ class AdminHandlers:
             reply = REPLY_STORAGE_DOWN
         await self._reply(context, chat.id, thread_id, reply)
 
-    async def _llm_show(self, chat_id: int, thread_id: int, defaults: LlmSettings) -> str:
+    async def _effective_llm(
+        self, chat_id: int, thread_id: int, defaults: LlmSettings
+    ) -> tuple[LlmSettings, str]:
+        """Resolve topic override → group default → deployment defaults."""
         own = await self.directory.profile_of(chat_id, thread_id)
-        settings, origin = (
-            (own.llm, "set for this scope") if own.llm else (defaults, "deployment defaults")
-        )
+        if own.llm:
+            return own.llm, "set for this scope"
+        if thread_id:
+            group = await self.directory.profile_of(chat_id, 0)
+            if group.llm:
+                return group.llm, "inherited from the group"
+        return defaults, "deployment defaults"
+
+    async def _llm_show(self, chat_id: int, thread_id: int, defaults: LlmSettings) -> str:
+        settings, origin = await self._effective_llm(chat_id, thread_id, defaults)
         return REPLY_LLM_SHOW.format(
             scope=_scope(thread_id), origin=origin, line=describe_llm(settings)
         )
@@ -514,8 +524,11 @@ class AdminHandlers:
     async def _llm_set(
         self, chat_id: int, thread_id: int, tokens: list[str], defaults: LlmSettings
     ) -> str:
-        own = await self.directory.profile_of(chat_id, thread_id)
-        base = own.llm or defaults
+        # Partial edits build on what the scope actually runs with — for
+        # a topic that inherits, that's the group settings, not the
+        # deployment defaults (otherwise `set temp:0.4` would silently
+        # reset an inherited model/lang).
+        base, _ = await self._effective_llm(chat_id, thread_id, defaults)
         try:
             settings = parse_llm_args(" ".join(tokens), base, self.llm_max_tokens_ceiling)
         except LlmParseError as error:

@@ -317,9 +317,9 @@ async def test_stats_are_computed_deterministically() -> None:
 
 
 def make_wiki_sink(publisher: FakePublisher) -> WikiSectionSink:
-    async def resolve_page(chat_id: int, thread_id: int) -> str:
+    async def resolve_page(chat_id: int, thread_id: int, override: str | None = None) -> str:
         del chat_id, thread_id
-        return "Meta:Resolved log"
+        return override or "Meta:Resolved log"
 
     return WikiSectionSink(
         publisher=publisher,
@@ -452,10 +452,37 @@ async def test_page_policy_requires_an_explicit_page() -> None:
 
     # Unconfigured scope: refuse rather than use the operator default.
     with pytest.raises(ActionError, match="/setpage"):
-        await resolve(-1, 0)
+        await resolve(-1, 0, None)
 
     await directory.set_log_page(-1, 0, "WikiProject Foo")
-    assert await resolve(-1, 0) == "WikiProject Foo/Telegram logs"
+    assert await resolve(-1, 0, None) == "WikiProject Foo/Telegram logs"
+
+
+async def test_page_override_goes_through_the_setpage_gate() -> None:
+    directory = ChannelDirectory(
+        store=InMemoryProfiles(),
+        default_log_page="Operator default",
+        default_consent=ConsentMode.IMMEDIATE,
+        default_repo="",
+        page_suffix="Telegram logs",
+    )
+    resolve = explicit_page_resolver(directory)
+
+    # A page= parameter is validated and pinned to the logs leaf — an
+    # admin picks where the report lives, never a bare content page.
+    assert await resolve(-1, 0, "WikiProject Bar") == "WikiProject Bar/Telegram logs"
+    with pytest.raises(ActionError, match="not an allowed title"):
+        await resolve(-1, 0, "Bad|title")
+
+    plain = ChannelDirectory(
+        store=InMemoryProfiles(),
+        default_log_page="Operator default",
+        default_consent=ConsentMode.IMMEDIATE,
+        default_repo="",
+        page_suffix="",  # page targeting disabled on this deployment
+    )
+    with pytest.raises(ActionError, match="aren't available"):
+        await explicit_page_resolver(plain)(-1, 0, "WikiProject Bar")
 
 
 async def test_since_last_run_window_is_a_watermark() -> None:

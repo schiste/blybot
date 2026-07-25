@@ -131,6 +131,19 @@ class ChannelDirectory:
         await self._update(chat_id, thread_id, log_page=page)
         return page
 
+    def compose_page(self, base: str) -> str:
+        """Validate an explicitly supplied page title under the /setpage policy.
+
+        ``page=`` parameters on actions go through the exact same gate as
+        ``/setpage``: the title is validated and pinned to the
+        ``/{page_suffix}`` leaf, so an action can pick *where* its report
+        lives but can never point the shared wiki account at a bare
+        content page. Raises the same exceptions as ``set_log_page``.
+        """
+        if not self.page_suffix:
+            raise SelfServiceUnavailableError
+        return self._compose_page(base)
+
     async def set_consent(self, chat_id: int, mode: ConsentMode) -> None:
         """Set the group's consent policy for ``/log`` (group-wide, thread 0)."""
         await self._update(chat_id, 0, consent_mode=mode)

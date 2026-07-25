@@ -30,6 +30,7 @@ from blybot.domain.models import (
 from blybot.domain.ports import ActionError, PromptError, StorageError
 from blybot.domain.prompts import PromptContractError
 from blybot.observability import log_event
+from blybot.services.directory import PageNotAllowedError, SelfServiceUnavailableError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -267,15 +268,27 @@ class StatsTransform:
 
 def explicit_page_resolver(
     directory: ChannelDirectory,
-) -> Callable[[int, int], Awaitable[str]]:
-    """The wiki sink's page policy: publish only to an explicitly set page.
+) -> Callable[[int, int, str | None], Awaitable[str]]:
+    """The wiki sink's page policy: publish only to a policy-checked page.
 
     Same rule as ``/log`` on self-service deployments — a scope that
     never ran ``/setpage`` is refused (with the fix spelled out) rather
-    than silently writing to the operator default page.
+    than silently writing to the operator default page. A ``page=``
+    override goes through the exact same gate as ``/setpage`` itself
+    (validated, pinned to the ``/{page_suffix}`` leaf), so an action can
+    never point the shared wiki account at a bare content page.
     """
 
-    async def resolve_page(chat_id: int, thread_id: int) -> str:
+    async def resolve_page(chat_id: int, thread_id: int, override: str | None = None) -> str:
+        if override:
+            try:
+                return directory.compose_page(override)
+            except SelfServiceUnavailableError as error:
+                msg = "page= overrides aren't available on this deployment."
+                raise ActionError(msg) from error
+            except PageNotAllowedError as error:
+                msg = f"page={override!r} is not an allowed title."
+                raise ActionError(msg) from error
         settings = await directory.resolve(chat_id, thread_id)
         if not settings.page_explicit:
             msg = (
@@ -294,7 +307,7 @@ class WikiSectionSink:
 
     publisher: WikiPublisher
     sanitizer: Sanitizer
-    resolve_page: Callable[[int, int], Awaitable[str]]
+    resolve_page: Callable[[int, int, str | None], Awaitable[str]]
     page_url_for: Callable[[str], str]
     edit_summary: str
     bot_name: str
@@ -302,8 +315,10 @@ class WikiSectionSink:
     async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         """Render with trusted markup (fields sanitized) and publish."""
         report = _as_report(payload)
-        page = context.spec.sink.param("page") or await self.resolve_page(
-            context.scope.chat_id, context.scope.thread_id
+        page = await self.resolve_page(
+            context.scope.chat_id,
+            context.scope.thread_id,
+            context.spec.sink.param("page") or None,
         )
         heading = f"{context.now:%Y-%m-%d} — {_title(report)}"
         body = self._render(report)

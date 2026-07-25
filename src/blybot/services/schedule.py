@@ -24,7 +24,7 @@ same first-contact rule the repo poll cursors follow.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from blybot.domain.models import TriggerKind
@@ -49,6 +49,9 @@ class ActionScheduler:
     clock: Clock
     counters: Counters
     max_scopes_per_tick: int = 200
+    # Rotates the truncation window across ticks so an overflow defers
+    # scopes instead of permanently starving whatever sorts last.
+    _offset: int = field(default=0, init=False)
 
     async def collect(self) -> list[OutboundMessage]:
         """Return the chat messages produced by every due action this tick."""
@@ -58,7 +61,9 @@ class ActionScheduler:
             return []
         if len(scoped) > self.max_scopes_per_tick:
             log_event("action_tick", "ignored", skipped=len(scoped) - self.max_scopes_per_tick)
-            scoped = scoped[: self.max_scopes_per_tick]
+            start = self._offset % len(scoped)
+            self._offset = start + self.max_scopes_per_tick
+            scoped = (scoped[start:] + scoped[:start])[: self.max_scopes_per_tick]
         messages: list[OutboundMessage] = []
         for scope, actions in scoped:
             if not self.groups.is_allowed(scope.chat_id):

@@ -149,8 +149,17 @@ def benchmark(base: str, model: str, probe: Probe) -> None:
     for attempt in range(1, probe.runs + 1):
         try:
             result = call(base, model, probe)
+        except urllib.error.HTTPError as error:
+            # A 4xx is the model/API rejecting the request itself (a 400
+            # on the reduce probe is the context-length case the closing
+            # guidance talks about); 429/5xx are transport-tier — retry,
+            # or revisit the timeout, never the chunk cap.
+            detail = " ".join(error.read().decode(errors="replace").split())[:200]
+            kind = "request rejected" if error.code < 500 else "transport"  # noqa: PLR2004
+            print(f"  run {attempt}: FAILED ({kind}, HTTP {error.code}) — {detail}")
+            continue
         except (urllib.error.URLError, TimeoutError, KeyError) as error:
-            print(f"  run {attempt}: FAILED — {error}")
+            print(f"  run {attempt}: FAILED (transport — retry, or raise --timeout) — {error}")
             continue
         times.append(float(str(result["seconds"])))
         print(
@@ -223,10 +232,13 @@ def main() -> int:
     print(
         "\nThe worst-case probe should end with finish=length and "
         "completion≈the requested budget — if it stopped early, its "
-        "timing is not a real ceiling measurement. A FAILED reduce probe "
+        "timing is not a real ceiling measurement. A reduce probe FAILED "
+        "with 'request rejected' (HTTP 4xx, typically context length) "
         "means that model cannot take production's largest reduce payload: "
         "lower LLM_MAX_CHUNKS_PER_RUN or route busy scopes to the larger "
-        "model. Record the medians in docs/OPERATIONS.md ('LiftWing LLM "
+        "model. Transport failures (timeouts, 429/5xx) are not that "
+        "signal — retry, or raise the timeout. Record the medians in "
+        "docs/OPERATIONS.md ('LiftWing LLM "
         "endpoints') and size LIFTWING_TIMEOUT_SECONDS above the slowest "
         "probe. For non-English target chats, re-run with --lang <code> "
         "and eyeball the previews (the Phase 0 quality spot-check)."

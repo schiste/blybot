@@ -124,13 +124,26 @@ class ToolsDbArchive:
         return int(rows[0][0]) if rows else 0
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
-        """Re-key every topic's messages after a group→supergroup upgrade."""
-        await self._run(Q_MIGRATE_CLEAR, (new_chat_id,))
-        await self._run(Q_MIGRATE, (new_chat_id, old_chat_id))
+        """Re-key every topic's messages after a group→supergroup upgrade.
+
+        Clear-then-rekey runs in one transaction so a crash between the two
+        cannot drop the destination's rows while leaving the source's.
+        """
+        await self._run_tx(
+            [(Q_MIGRATE_CLEAR, (new_chat_id,)), (Q_MIGRATE, (new_chat_id, old_chat_id))]
+        )
 
     async def _run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         try:
             return await asyncio.to_thread(self._runner.run, query, params)
+        except (pymysql.MySQLError, OSError, KeyError) as error:
+            log_event("archive", "error")
+            msg = "message archive unavailable"
+            raise StorageError(msg) from error
+
+    async def _run_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        try:
+            await asyncio.to_thread(self._runner.run_tx, statements)
         except (pymysql.MySQLError, OSError, KeyError) as error:
             log_event("archive", "error")
             msg = "message archive unavailable"

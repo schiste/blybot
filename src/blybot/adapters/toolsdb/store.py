@@ -151,10 +151,14 @@ Q_VAULT_CLEAR: Final = f"UPDATE profiles SET token_ciphertext = NULL WHERE {_KEY
 
 
 class SqlRunner(Protocol):
-    """Executes one SQL statement synchronously; returns all rows."""
+    """Executes SQL synchronously; returns all rows."""
 
     def run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         """Run ``query`` with ``params``; empty list for writes."""
+        ...
+
+    def run_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        """Run several statements in one all-or-nothing transaction."""
         ...
 
 
@@ -185,6 +189,28 @@ class PymysqlRunner:
             with connection.cursor() as cursor:
                 cursor.execute(query, params)
                 return list(cursor.fetchall())
+        finally:
+            connection.close()
+
+    def run_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        """Run several statements in one transaction; roll back on any error."""
+        user, password = self._credentials()
+        connection = pymysql.connect(
+            host=self._host,
+            user=user,
+            password=password,
+            database=self._database or f"{user}__blybot",
+            autocommit=False,
+            connect_timeout=10,
+        )
+        try:
+            with connection.cursor() as cursor:
+                for query, params in statements:
+                    cursor.execute(query, params)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -284,9 +310,15 @@ class ToolsDbStore:
         await self._run(Q_SET_CURSORS, (payload, chat_id, thread_id, repo))
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
-        """Re-key every topic of a group after a group→supergroup upgrade."""
-        await self._run(Q_MIGRATE_CLEAR, (new_chat_id,))
-        await self._run(Q_MIGRATE, (new_chat_id, old_chat_id))
+        """Re-key every topic of a group after a group→supergroup upgrade.
+
+        The collision-clear and the re-key run in one transaction: a crash
+        between them must not delete the destination's rows while leaving
+        the source's un-moved.
+        """
+        await self._run_tx(
+            [(Q_MIGRATE_CLEAR, (new_chat_id,)), (Q_MIGRATE, (new_chat_id, old_chat_id))]
+        )
 
     async def store_token(self, chat_id: int, thread_id: int, token: str) -> None:
         """Encrypt and persist the (group, topic) token."""
@@ -335,6 +367,14 @@ class ToolsDbStore:
     async def _run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         try:
             return await asyncio.to_thread(self._runner.run, query, params)
+        except (pymysql.MySQLError, OSError, KeyError) as error:
+            log_event("storage", "error")
+            msg = "profile store unavailable"
+            raise StorageError(msg) from error
+
+    async def _run_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        try:
+            await asyncio.to_thread(self._runner.run_tx, statements)
         except (pymysql.MySQLError, OSError, KeyError) as error:
             log_event("storage", "error")
             msg = "profile store unavailable"

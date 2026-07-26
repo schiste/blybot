@@ -12,7 +12,13 @@ from unittest.mock import AsyncMock
 import pytest
 from telegram import Update
 from telegram.error import RetryAfter, TelegramError, TimedOut
-from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler
+from telegram.ext import (
+    AIORateLimiter,
+    Application,
+    ChatMemberHandler,
+    CommandHandler,
+    MessageHandler,
+)
 
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.analyze import AnalysisHandlers
@@ -102,6 +108,12 @@ def test_build_registers_every_handler() -> None:
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
     assert 1 not in application.handlers  # no capture: group 1 stays empty
+
+
+def test_build_paces_outgoing_calls_under_telegram_limits() -> None:
+    """Every send goes through a rate limiter so a fan-out can't flood."""
+    application = build()
+    assert isinstance(application.bot.rate_limiter, AIORateLimiter)
 
 
 def test_run_polling_opts_into_exactly_the_updates_privacy_mode_needs(

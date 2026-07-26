@@ -22,7 +22,14 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from telegram import Update
 from telegram.error import RetryAfter, TelegramError, TimedOut
-from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters
+from telegram.ext import (
+    AIORateLimiter,
+    Application,
+    ChatMemberHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from blybot.adapters.telegram._common import send_threaded
 from blybot.domain.models import OutboundMessage
@@ -263,6 +270,12 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
     application = (
         Application.builder()
         .token(token)
+        # Proactively pace every outgoing call under Telegram's ~30 msg/s
+        # global and ~20 msg/min per-group ceilings. This is what keeps a
+        # multi-scope digest/analysis fan-out from tripping flood control;
+        # `_deliver` only has to mop up the rare RetryAfter that still leaks
+        # through (max_retries=0 here so the two don't both retry).
+        .rate_limiter(AIORateLimiter(max_retries=0))
         .post_init(lifecycle.post_init)
         .post_shutdown(lifecycle.post_shutdown)
         .build()

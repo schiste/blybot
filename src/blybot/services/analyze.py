@@ -277,8 +277,12 @@ class PromptTransform:
 
     @staticmethod
     def _accept(result: PromptResult) -> tuple[str, ...]:
-        if result.finish_reason == "length":
-            msg = "output was truncated"
+        # Only a clean stop is publishable. "length" is truncation; any
+        # other reason (content_filter, or an unexpected/unknown one) may
+        # be partial or filtered output that happens to parse as valid
+        # JSON, so it must never reach the wiki either.
+        if result.finish_reason != "stop":
+            msg = f"model did not stop cleanly (finish_reason={result.finish_reason!r})"
             raise PromptContractError(msg)
         return prompts.parse_items(result.content)
 

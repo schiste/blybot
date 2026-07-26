@@ -222,6 +222,20 @@ async def test_truncated_output_is_never_published() -> None:
     assert counters.snapshot()["analyses_aborted"] == 1
 
 
+async def test_non_stop_finish_reason_is_never_published() -> None:
+    """Even valid-looking JSON must not publish unless the model stopped cleanly."""
+    runner = FakePromptRunner(
+        results=[
+            PromptResult(content='["filtered"]', finish_reason="content_filter"),
+            PromptResult(content='["still filtered"]', finish_reason="content_filter"),
+        ]
+    )
+    transform, counters = make_transform(runner)
+    with pytest.raises(ActionError, match="nothing was published"):
+        await transform.apply(context(), prompt_step(), transcript(msg(1)))
+    assert counters.snapshot()["analyses_aborted"] == 1
+
+
 async def test_analysis_aborts_when_the_token_budget_is_exhausted() -> None:
     """The per-run budget stops retry amplification, publishing nothing."""
     runner = FakePromptRunner(results=[PromptResult(content="not json", prompt_tokens=120)])

@@ -136,9 +136,35 @@ section before enabling.**
    sits — the only thing between chatter and storage is the capture
    policy check, which stores nothing for scopes that didn't opt in.
    Announce the posture change to every community whose group has the
-   bot before flipping. Strongly consider a **separate bot account**
-   for capture deployments (`deploy-instance.sh` supports several
-   instances) so privacy-first groups keep the structural guarantee.
+   bot before flipping (ready-to-post copy below). Strongly consider a
+   **separate bot account** for capture deployments
+   (`deploy-instance.sh` supports several instances) so privacy-first
+   groups keep the structural guarantee.
+
+   Post this (adapted) in every affected chat **before** the flip:
+
+   > ⚙️ Heads-up from the operator of {bot}: on {date} this bot's
+   > Telegram "privacy mode" will be switched off so that chats which
+   > *explicitly opt in* can have their messages archived for public
+   > on-wiki summaries and statistics. What changes for THIS chat:
+   > nothing is collected or stored unless an admin runs /capture on
+   > here (that decision is announced in the chat, permanently).
+   > Technically the bot will now *receive* ordinary messages; its
+   > policy check discards them for chats that have not opted in, and
+   > that code is public: {repo_url}. Archived chats store authors only
+   > as anonymous labels — never usernames or ids. Questions to
+   > {maintainer}.
+
+   And a matching note on the bot's wiki user page or the wiki forum
+   your communities use:
+
+   > {bot} (source: {repo_url}) now supports opt-in channel/group
+   > archiving to power machine-generated summaries and statistics
+   > published on wiki pages chosen by each chat's admins. Sections it
+   > publishes are labeled machine-generated, name no users, and every
+   > model output is sanitized so it cannot alter page structure. The
+   > underlying models run on Wikimedia LiftWing. Operator contact:
+   > {maintainer}.
 3. Group admins enable per scope with `/capture on` (announced in-chat,
    permanently); channels enable by making the bot a channel admin (it
    posts an announcement first — if it cannot post, capture does not
@@ -187,7 +213,10 @@ Verified live on 2026-07-25 (anonymous tier):
 - No API key. Anonymous callers share a ~100 req/h pool; calls from
   Toolforge are effectively unthrottled — measure Toolforge-tier latency
   and long-generation behavior before enabling scheduled analyses
-  (remaining Phase 0 item).
+  (remaining Phase 0 item). From a bastion, `become <tool>` and run
+  `python3 ~/blybot/scripts/liftwing_baseline.py` (stdlib-only, no
+  credentials); record the medians here and size
+  `LIFTWING_TIMEOUT_SECONDS` above the observed maximum.
 - Reference:
   [Machine_Learning/LiftWing/Large_Language_Models/Wikimania_2026](https://wikitech.wikimedia.org/wiki/Machine_Learning/LiftWing/Large_Language_Models/Wikimania_2026)
   on wikitech.

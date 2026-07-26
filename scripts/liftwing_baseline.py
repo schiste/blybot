@@ -30,18 +30,9 @@ SHORT_PROMPT = (
     "matter for collaborative wiki projects. Answer as a JSON array of "
     "three strings and nothing else."
 )
-# The long probe must actually consume the requested budget — an answer
-# that stops early measures nothing. An open-ended enumeration reliably
-# generates until max_tokens cuts it off (expect finish=length).
-LONG_PROMPT = (
-    "Write an exhaustive, numbered list of distinct considerations for "
-    "moderating a large multilingual online community. For every item "
-    "give a two-sentence explanation. Do not summarize or stop early; "
-    "keep adding items until you run out of space."
-)
 # Production /summarize sends up to DEFAULT_CHUNK_CHARS (24,000 chars)
 # of fenced transcript in one request; prefill latency at that size is
-# part of the real envelope, so the baseline includes one such request.
+# part of the real envelope, so the probes carry one such transcript.
 CHUNK_LINE = (
     "[2026-07-25 12:{minute:02d}] {author}: we discussed the proposal about the "
     "upcoming edit-a-thon and whether the documentation page needs a translation "
@@ -49,18 +40,37 @@ CHUNK_LINE = (
 )
 
 
-def chunk_prompt(chars: int) -> str:
-    """A production-shaped prompt: instruction + ~``chars`` of transcript."""
+def synthetic_transcript(chars: int) -> str:
+    """~``chars`` of chat-log-shaped filler (nothing sensitive)."""
     lines: list[str] = []
     minute = 0
     while sum(len(line) for line in lines) < chars:
         author = f"anon{minute % 7:02d}"
         lines.append(CHUNK_LINE.format(minute=minute % 60, author=author))
         minute += 1
-    transcript = "".join(lines)[:chars]
+    return "".join(lines)[:chars]
+
+
+def chunk_prompt(chars: int) -> str:
+    """The everyday production shape: summarize a full transcript chunk."""
     return (
         "Summarize the main discussion threads in the following chat "
-        f"transcript as a JSON array of short strings.\n\n{transcript}"
+        f"transcript as a JSON array of short strings.\n\n{synthetic_transcript(chars)}"
+    )
+
+
+def worst_case_prompt(chars: int) -> str:
+    """Max input AND max output in one request — production's true ceiling.
+
+    The open-ended enumeration reliably generates until ``max_tokens``
+    cuts it off (expect ``finish=length``); an answer that stops early
+    measures nothing.
+    """
+    return (
+        "For every message in the following transcript, write a numbered "
+        "item with a two-sentence commentary. Do not summarize and do "
+        "not stop early; keep adding items until you run out of space."
+        f"\n\n{synthetic_transcript(chars)}"
     )
 
 
@@ -150,23 +160,31 @@ def main() -> int:
 
     short = Probe(SHORT_PROMPT, runs=args.runs, max_tokens=256, timeout=args.timeout)
     chunk = Probe(chunk_prompt(args.chunk_chars), runs=1, max_tokens=1024, timeout=args.timeout)
-    long_probe = Probe(LONG_PROMPT, runs=1, max_tokens=args.long_tokens, timeout=args.timeout)
+    worst = Probe(
+        worst_case_prompt(args.chunk_chars),
+        runs=1,
+        max_tokens=args.long_tokens,
+        timeout=args.timeout,
+    )
     print(f"LiftWing baseline against {args.base}")
     for model in args.models:
         print(f"\n--- {model}: short answers ---")
         benchmark(args.base, model, short)
-        print(f"\n--- {model}: production-shaped chunk ({args.chunk_chars} chars in) ---")
+        print(f"\n--- {model}: production default ({args.chunk_chars} chars in, 1024 out) ---")
         benchmark(args.base, model, chunk)
-        print(f"\n--- {model}: long generation (fills the {args.long_tokens}-token budget) ---")
-        benchmark(args.base, model, long_probe)
+        print(
+            f"\n--- {model}: worst case ({args.chunk_chars} chars in, "
+            f"{args.long_tokens}-token budget out) ---"
+        )
+        benchmark(args.base, model, worst)
     print(
-        "\nA long probe should end with finish=length and completion≈the "
-        "requested budget — if it stopped early, its timing is not a real "
-        "long-generation measurement. Record the medians in "
+        "\nThe worst-case probe should end with finish=length and "
+        "completion≈the requested budget — if it stopped early, its "
+        "timing is not a real ceiling measurement. Record the medians in "
         "docs/OPERATIONS.md ('LiftWing LLM endpoints') and size "
-        "LIFTWING_TIMEOUT_SECONDS above the slowest observation here "
-        "(defaults already match production: 24k-char chunks in, the "
-        "4096-token ceiling out)."
+        "LIFTWING_TIMEOUT_SECONDS above the worst-case probe's time "
+        "(defaults already match production's maxima: 24k-char chunk in "
+        "AND the 4096-token ceiling out, in the same request)."
     )
     return 0
 

@@ -93,6 +93,7 @@ class Config:
     llm_default_lang: str
     llm_max_tokens_ceiling: int
     llm_max_chunks_per_run: int
+    llm_max_tokens_per_run: int
     user_agent: str
 
     @property
@@ -175,6 +176,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         llm_default_lang=source.get("LLM_DEFAULT_LANG", "en"),
         llm_max_tokens_ceiling=_parse_positive_int(source, "LLM_MAX_TOKENS_CEILING", 4096),
         llm_max_chunks_per_run=_parse_positive_int(source, "LLM_MAX_CHUNKS_PER_RUN", 12),
+        # 0 disables the per-run cap; the default bounds a fully-retrying
+        # 12-chunk map-reduce without tripping on a normal analysis.
+        llm_max_tokens_per_run=_parse_non_negative_int(source, "LLM_MAX_TOKENS_PER_RUN", 200_000),
         user_agent=source["USER_AGENT"],
     )
 

@@ -199,6 +199,19 @@ async def test_truncated_output_is_never_published() -> None:
     assert counters.snapshot()["analyses_aborted"] == 1
 
 
+async def test_analysis_aborts_when_the_token_budget_is_exhausted() -> None:
+    """The per-run budget stops retry amplification, publishing nothing."""
+    runner = FakePromptRunner(results=[PromptResult(content="not json", prompt_tokens=120)])
+    transform, counters = make_transform(runner)
+    transform.max_tokens_per_run = 100  # one call's 120 tokens already overruns it
+
+    with pytest.raises(ActionError, match="nothing was published"):
+        await transform.apply(context(), prompt_step(), transcript(msg(1)))
+
+    assert counters.snapshot()["analyses_aborted"] == 1
+    assert len(runner.requests) == 1  # the retry was refused before a second call
+
+
 async def test_transport_failure_aborts_the_analysis() -> None:
     runner = FakePromptRunner(results=[PromptError("endpoint down")])
     transform, counters = make_transform(runner)

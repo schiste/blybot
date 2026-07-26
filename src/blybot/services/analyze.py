@@ -54,6 +54,24 @@ _REPLY_CAP_CHARS: Final = 3500  # stay under Telegram's 4096 with margin
 _ABORT: Final = "The analysis failed and nothing was published — try again later."
 
 
+@dataclass
+class _TokenBudget:
+    """Caps the tokens one analysis run may spend (``limit`` 0 = unlimited)."""
+
+    limit: int
+    spent: int = 0
+
+    def account(self, result: PromptResult) -> None:
+        """Add one call's prompt + completion tokens to the running total."""
+        self.spent += result.prompt_tokens + result.completion_tokens
+
+    def ensure(self) -> None:
+        """Raise :class:`PromptError` if the budget is already spent."""
+        if self.limit and self.spent >= self.limit:
+            msg = f"analysis exceeded its {self.limit}-token budget"
+            raise PromptError(msg)
+
+
 def parse_window(token: str) -> timedelta:
     """Parse ``24h`` / ``7d`` into a bounded timedelta."""
     match = _WINDOW_RE.match(token)
@@ -116,6 +134,10 @@ class PromptTransform:
     max_chunks: int
     counters: Counters
     chunk_chars: int = prompts.DEFAULT_CHUNK_CHARS
+    # Total tokens one analysis may spend across all its map/reduce calls
+    # (0 = unlimited). Bounds the retry-amplification the map-reduce loop
+    # can otherwise reach on adversarial or malformed output.
+    max_tokens_per_run: int = 0
 
     async def apply(
         self, context: ActionContext, step: StepSpec, payload: object
@@ -189,14 +211,15 @@ class PromptTransform:
         self, template: prompts.PromptTemplate, settings: LlmSettings, chunks: list[str]
     ) -> tuple[str, ...]:
         fence = prompts.mint_fence()
+        budget = _TokenBudget(self.max_tokens_per_run)
         partials: list[str] = []
         for chunk in chunks:
             content = prompts.map_prompt(template, settings.lang, fence, chunk)
-            partials.extend(await self._call(settings, content))
+            partials.extend(await self._call(settings, content, budget))
         if len(chunks) == 1:
             return tuple(partials)
         content = prompts.reduce_prompt(template, settings.lang, fence, partials)
-        return tuple(await self._call(settings, content))
+        return tuple(await self._call(settings, content, budget))
 
     def _runner(self, settings: LlmSettings) -> PromptRunner:
         runner = self.runners.get(settings.platform)
@@ -206,7 +229,9 @@ class PromptTransform:
             raise ActionError(msg)
         return runner
 
-    async def _call(self, settings: LlmSettings, user_content: str) -> tuple[str, ...]:
+    async def _call(
+        self, settings: LlmSettings, user_content: str, budget: _TokenBudget
+    ) -> tuple[str, ...]:
         runner = self._runner(settings)
         request = PromptRequest(
             model=settings.model,
@@ -215,7 +240,7 @@ class PromptTransform:
             max_tokens=min(settings.max_tokens, self.max_tokens_ceiling),
             temperature=settings.temperature,
         )
-        result = await runner.run(request)
+        result = await self._run(runner, request, budget)
         try:
             return self._accept(result)
         except PromptContractError:
@@ -229,7 +254,22 @@ class PromptTransform:
                     "code fences, and finish within the length limit."
                 ),
             )
-            return self._accept(await runner.run(retry))
+            return self._accept(await self._run(runner, retry, budget))
+
+    @staticmethod
+    async def _run(
+        runner: PromptRunner, request: PromptRequest, budget: _TokenBudget
+    ) -> PromptResult:
+        """Run one inference within the run's token budget, then account it.
+
+        The budget check raises :class:`PromptError` (not
+        :class:`PromptContractError`), so exhaustion aborts the analysis
+        rather than triggering the malformed-output retry.
+        """
+        budget.ensure()
+        result = await runner.run(request)
+        budget.account(result)
+        return result
 
     @staticmethod
     def _accept(result: PromptResult) -> tuple[str, ...]:

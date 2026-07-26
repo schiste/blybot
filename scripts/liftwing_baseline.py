@@ -21,23 +21,42 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from typing import NamedTuple
 
 DEFAULT_BASE = "https://api.wikimedia.org/service/lw/inference/v1"
 DEFAULT_MODELS = ("llm-qwen3-14b", "llm-qwen36-27b")
-PROMPT = (
+SHORT_PROMPT = (
     "Summarize in exactly three short bullet points why community norms "
     "matter for collaborative wiki projects. Answer as a JSON array of "
     "three strings and nothing else."
 )
+# The long probe must actually consume the requested budget — an answer
+# that stops early measures nothing. An open-ended enumeration reliably
+# generates until max_tokens cuts it off (expect finish=length).
+LONG_PROMPT = (
+    "Write an exhaustive, numbered list of distinct considerations for "
+    "moderating a large multilingual online community. For every item "
+    "give a two-sentence explanation. Do not summarize or stop early; "
+    "keep adding items until you run out of space."
+)
 
 
-def call(base: str, model: str, max_tokens: int, timeout: float) -> dict[str, object]:
+class Probe(NamedTuple):
+    """One benchmark shape: what to ask, how often, and how much to allow."""
+
+    prompt: str
+    runs: int
+    max_tokens: int
+    timeout: float
+
+
+def call(base: str, model: str, probe: Probe) -> dict[str, object]:
     """One chat completion; returns latency and response metadata."""
     url = f"{base}/models/{model}/openai/v1/chat/completions"
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": PROMPT}],
-        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": probe.prompt}],
+        "max_tokens": probe.max_tokens,
         "temperature": 0.2,
     }
     request = urllib.request.Request(  # noqa: S310 -- fixed https base
@@ -46,7 +65,7 @@ def call(base: str, model: str, max_tokens: int, timeout: float) -> dict[str, ob
         headers={"Content-Type": "application/json", "User-Agent": "blybot-baseline/1.0"},
     )
     started = time.monotonic()
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+    with urllib.request.urlopen(request, timeout=probe.timeout) as response:  # noqa: S310
         body = json.load(response)
     elapsed = time.monotonic() - started
     choice = body["choices"][0]
@@ -59,13 +78,13 @@ def call(base: str, model: str, max_tokens: int, timeout: float) -> dict[str, ob
     }
 
 
-def benchmark(base: str, model: str, runs: int, max_tokens: int, timeout: float) -> None:
-    """Run and report one model's short-answer latency envelope."""
-    print(f"\n{model}  ({runs} runs, max_tokens={max_tokens})")
+def benchmark(base: str, model: str, probe: Probe) -> None:
+    """Run and report one probe's latency envelope for one model."""
+    print(f"\n{model}  ({probe.runs} runs, max_tokens={probe.max_tokens})")
     times: list[float] = []
-    for attempt in range(1, runs + 1):
+    for attempt in range(1, probe.runs + 1):
         try:
-            result = call(base, model, max_tokens, timeout)
+            result = call(base, model, probe)
         except (urllib.error.URLError, TimeoutError, KeyError) as error:
             print(f"  run {attempt}: FAILED — {error}")
             continue
@@ -95,15 +114,21 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=180.0, help="per-request timeout (s)")
     args = parser.parse_args()
 
+    short = Probe(SHORT_PROMPT, runs=args.runs, max_tokens=256, timeout=args.timeout)
+    long_probe = Probe(LONG_PROMPT, runs=1, max_tokens=args.long_tokens, timeout=args.timeout)
     print(f"LiftWing baseline against {args.base}")
     for model in args.models:
-        benchmark(args.base, model, args.runs, max_tokens=256, timeout=args.timeout)
-        print(f"\n{model}  (1 long-generation probe, max_tokens={args.long_tokens})")
-        benchmark(args.base, model, 1, max_tokens=args.long_tokens, timeout=args.timeout)
+        print(f"\n--- {model}: short answers (the /summarize shape) ---")
+        benchmark(args.base, model, short)
+        print(f"\n--- {model}: long generation (fills the {args.long_tokens}-token budget) ---")
+        benchmark(args.base, model, long_probe)
     print(
-        "\nRecord the medians and the long-generation behavior in "
-        "docs/OPERATIONS.md ('LiftWing LLM endpoints') and size "
-        "LIFTWING_TIMEOUT_SECONDS above the observed max."
+        "\nA long probe should end with finish=length and completion≈the "
+        "requested budget — if it stopped early, its timing is not a real "
+        "long-generation measurement. Record the medians in "
+        "docs/OPERATIONS.md ('LiftWing LLM endpoints'); run the long probe "
+        "at your LLM_MAX_TOKENS_CEILING (default 4096) and size "
+        "LIFTWING_TIMEOUT_SECONDS above ITS observed max, not the short one."
     )
     return 0
 

@@ -156,6 +156,29 @@ async def test_multi_chunk_windows_map_then_reduce() -> None:
     assert "partial a" in runner.requests[2].user_content  # reduce sees the partials
 
 
+def _fence_of(content: str) -> str:
+    start = content.index("DATA-")
+    return content[start : content.index("\n", start)]
+
+
+async def test_map_and_reduce_use_distinct_fences() -> None:
+    """A map partial must not be able to predict the reduce fence."""
+    runner = FakePromptRunner(
+        results=[
+            PromptResult(content='["a"]'),
+            PromptResult(content='["b"]'),
+            PromptResult(content='["merged"]'),
+        ]
+    )
+    transform, _counters = make_transform(runner, chunk_chars=60)
+
+    await transform.apply(context(), prompt_step(), transcript(msg(1, "x" * 50), msg(2, "y" * 50)))
+
+    fences = [_fence_of(request.user_content) for request in runner.requests]
+    assert fences[0] == fences[1]  # both maps share the one map fence
+    assert fences[2] != fences[0]  # the reduce fence is freshly minted
+
+
 async def test_chunk_cap_samples_the_window_and_says_so() -> None:
     runner = FakePromptRunner(results=[PromptResult(content='["only chunk analyzed"]')])
     transform, _counters = make_transform(runner, max_chunks=1, chunk_chars=60)

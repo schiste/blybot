@@ -218,7 +218,11 @@ class PromptTransform:
             partials.extend(await self._call(settings, content, budget))
         if len(chunks) == 1:
             return tuple(partials)
-        content = prompts.reduce_prompt(template, settings.lang, fence, partials)
+        # A fresh fence for the reduce: the map output is transcript-
+        # influenced, so reusing the map fence would let a crafted chunk
+        # make a partial predict (and try to spoof) the reduce boundary.
+        reduce_fence = prompts.mint_fence()
+        content = prompts.reduce_prompt(template, settings.lang, reduce_fence, partials)
         return tuple(await self._call(settings, content, budget))
 
     def _runner(self, settings: LlmSettings) -> PromptRunner:

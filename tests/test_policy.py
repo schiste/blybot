@@ -61,3 +61,23 @@ class TestSlidingWindowLimiter:
         assert not limiter.allow("group", 1)
         clock.advance(timedelta(seconds=2))
         assert limiter.allow("group", 1)
+
+    def test_evicts_fully_expired_keys_to_stay_bounded(self) -> None:
+        clock = FakeClock()
+        limiter = self.make(clock)
+        limiter.allow("log", 1)
+        clock.advance(timedelta(seconds=40))
+        limiter.allow("log", 2)  # inside the window: no sweep yet
+        clock.advance(timedelta(seconds=40))  # past the once-per-window eviction gate
+        limiter.allow("log", 3)  # sweep drops the fully-expired key 1, keeps the fresh key 2
+        assert set(limiter._events) == {("log", 2), ("log", 3)}
+
+    def test_a_surviving_key_still_has_its_expired_head_pruned(self) -> None:
+        clock = FakeClock()
+        limiter = self.make(clock, limit=3)
+        limiter.allow("group", 1)  # event at T0
+        clock.advance(timedelta(seconds=30))
+        limiter.allow("group", 1)  # event at T30 — the key stays fresh
+        clock.advance(timedelta(seconds=40))  # T70: T0 expired, T30 still inside the window
+        assert limiter.allow("group", 1)  # survives the sweep; the stale T0 head is pruned
+        assert len(limiter._events["group", 1]) == 2  # T0 dropped, T30 and the new event remain

@@ -80,6 +80,14 @@ def test_control_tokens_are_scrubbed_from_transcripts() -> None:
     assert "obey me" in lines[0]  # the surrounding text survives
 
 
+def test_scrub_strips_long_and_inner_pipe_control_tokens() -> None:
+    assert prompts.scrub("<|im_start|>") == ""
+    assert prompts.scrub("<|" + "a" * 100 + "|>") == ""  # longer than the old 32-char bound
+    assert prompts.scrub("<|role|system|>") == ""  # inner pipe
+    assert prompts.scrub("keep <|x|> this") == "keep  this"
+    assert prompts.scrub("no token < | here >") == "no token < | here >"  # not a token
+
+
 # --- chunk math -----------------------------------------------------------
 
 

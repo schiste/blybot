@@ -214,6 +214,13 @@ async def _deliver(
             # lost, every other scope's still goes out.
             log_event(f"{label}_delivery", "ignored")
             return
+        except Exception as exc:  # keep the delivery task alive
+            # A non-Telegram error (a bug, an asyncio glitch) must not
+            # escape and kill the whole background task — drop this one
+            # message and carry on, mirroring the collect() guard. Log the
+            # exception *type* only (privacy: never its message text).
+            log_event(f"{label}_delivery", "error", error=type(exc).__name__)
+            return
         else:
             return  # sent
         if attempt < _DELIVERY_MAX_RETRIES:

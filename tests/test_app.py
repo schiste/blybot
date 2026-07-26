@@ -385,6 +385,23 @@ async def test_deliver_drops_after_persistent_timeout() -> None:
     assert len(waits) == _DELIVERY_MAX_RETRIES
 
 
+async def test_deliver_survives_a_non_telegram_error() -> None:
+    """A bug in one send must not escape and kill the whole delivery task."""
+    _waits, sleep = await _collect_sleeps()
+
+    class Boom:
+        async def send_message(
+            self, chat_id: int, text: str, message_thread_id: int | None = None
+        ) -> None:
+            del chat_id, text, message_thread_id
+            msg = "schema drift"
+            raise RuntimeError(msg)
+
+    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    # Must return (drop the message), not propagate.
+    await _deliver(cast("Any", Boom()), message, "action_tick", sleep)
+
+
 def make_capture_handlers() -> Any:
     store = InMemoryProfiles()
     clock = FakeClock()

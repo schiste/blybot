@@ -47,6 +47,11 @@ class CaptureService:
     # ToolsDB outage). A denied scope is never archived, and each of its
     # messages retries the durable disable until one lands.
     _denied: set[tuple[int, int]] = field(default_factory=set, init=False)
+    # Per-chat cache epoch, bumped by every invalidation (forget_scope /
+    # deny). An `_enabled` read snapshots it before awaiting the store and
+    # refuses to cache if it changed meanwhile — so a consent revocation
+    # that lands mid-read can never be re-poisoned by the stale value.
+    _epoch: dict[int, int] = field(default_factory=dict, init=False)
     # Serializes consent transitions (enable_scope vs. the tombstone
     # retries): a stale in-flight disable must never overwrite a freshly
     # announced enable, and a check-then-write guard alone is TOCTOU.
@@ -76,6 +81,9 @@ class CaptureService:
 
     def forget_scope(self, chat_id: int, thread_id: int) -> None:
         """Drop the scope's cached policy so /capture changes apply promptly."""
+        # Bump the chat's epoch first: any `_enabled` read now mid-await
+        # will see the change and decline to cache its (now stale) result.
+        self._epoch[chat_id] = self._epoch.get(chat_id, 0) + 1
         if thread_id:
             self._enabled_cache.pop((chat_id, thread_id), None)
             return
@@ -143,6 +151,9 @@ class CaptureService:
             except StorageError:
                 return  # storage still down: the tombstone stays
             self._denied.discard(key)
+            # Bust the cache so the freshly durable `False` is served at
+            # once, not up to the TTL later (symmetry with enable_scope).
+            self.forget_scope(chat_id, thread_id)
 
     async def _enabled(self, chat_id: int, thread_id: int) -> bool:
         key = (chat_id, thread_id)
@@ -150,6 +161,7 @@ class CaptureService:
         cached = self._enabled_cache.get(key)
         if cached is not None and cached[1] > now:
             return cached[0]
+        epoch = self._epoch.get(chat_id, 0)
         try:
             profile = await self.store.get(chat_id, thread_id)
             decision = profile.capture_enabled if profile else None
@@ -162,7 +174,12 @@ class CaptureService:
         except StorageError:
             return False  # fail closed, and never cache an outage
         enabled = bool(decision)
-        self._enabled_cache[key] = (enabled, now + self.cache_ttl)
+        if self._epoch.get(chat_id, 0) == epoch:
+            # No invalidation landed while we awaited the store, so this
+            # read still reflects current consent — safe to cache. If one
+            # did (a revocation mid-read), skip the write: it would
+            # re-poison the cache the invalidation just cleared.
+            self._enabled_cache[key] = (enabled, now + self.cache_ttl)
         return enabled
 
 

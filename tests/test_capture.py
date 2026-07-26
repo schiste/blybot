@@ -89,6 +89,32 @@ async def test_policy_is_cached_until_forgotten_or_expired() -> None:
     assert len(archive.messages) == 3
 
 
+async def test_a_revocation_mid_read_never_repoisons_the_cache() -> None:
+    """A consent change landing during a policy read must not be cached."""
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)  # durable True at read time
+    service, _counters = make_service(store, archive, clock)
+    original_get = store.get
+    fired = {"done": False}
+
+    async def racing_get(chat_id: int, thread_id: int) -> GroupProfile | None:
+        # The read observes the stale True, but a revocation lands before
+        # it returns — exactly the deny_scope-vs-in-flight-_enabled race.
+        profile = await original_get(chat_id, thread_id)
+        if not fired["done"]:
+            fired["done"] = True
+            service.deny_scope(chat_id, thread_id)
+        return profile
+
+    store.get = racing_get  # type: ignore[method-assign]
+
+    await service.ingest(msg(1))
+
+    # The epoch guard refused to cache the stale True the read observed, so
+    # nothing lingers to serve capture after consent was revoked.
+    assert (-1, 0) not in service._enabled_cache
+
+
 async def test_ingest_ceiling_throttles_a_flood() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
     await enable(store)

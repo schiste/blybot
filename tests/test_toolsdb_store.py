@@ -327,6 +327,12 @@ async def test_list_event_enabled_filters() -> None:
     assert [profile.chat_id for profile in enabled] == [-100500]
 
 
+def test_scan_queries_request_a_stable_order() -> None:
+    """The scheduler/notifier rotation relies on a deterministic scan order."""
+    for query in (Q_ACTIONS_LIST, Q_LIST_EVENT_ENABLED, Q_LIST_CAPTURE_ENABLED):
+        assert query.rstrip().endswith("ORDER BY chat_id, thread_id")
+
+
 async def test_cursors_roundtrip_and_default() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)

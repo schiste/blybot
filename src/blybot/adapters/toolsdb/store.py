@@ -56,8 +56,17 @@ _PROFILE_COLUMNS: Final = (
 )
 _KEY: Final = "chat_id = %s AND thread_id = %s"
 Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: S608
-Q_LIST_EVENT_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE events_enabled = 1"  # noqa: S608
-Q_LIST_CAPTURE_ENABLED: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE capture_enabled = 1"  # noqa: S608
+# The ORDER BY makes the scan order stable across ticks, which the
+# per-tick rotation in the scheduler/notifier relies on to keep any scope
+# above the cap from being permanently starved.
+Q_LIST_EVENT_ENABLED: Final = (
+    f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE events_enabled = 1 "  # noqa: S608
+    "ORDER BY chat_id, thread_id"
+)
+Q_LIST_CAPTURE_ENABLED: Final = (
+    f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE capture_enabled = 1 "  # noqa: S608
+    "ORDER BY chat_id, thread_id"
+)
 Q_UPSERT: Final = """
 INSERT INTO profiles
     (chat_id, thread_id, log_page, repo, consent_mode, events_enabled,
@@ -125,7 +134,8 @@ ON DUPLICATE KEY UPDATE actions_json = VALUES(actions_json)
 # Scopes with an empty stored list ("[]") have no actions to schedule.
 Q_ACTIONS_LIST: Final = (
     "SELECT chat_id, thread_id, actions_json FROM profiles "
-    "WHERE actions_json IS NOT NULL AND actions_json != '[]'"
+    "WHERE actions_json IS NOT NULL AND actions_json != '[]' "
+    "ORDER BY chat_id, thread_id"  # stable scan order for the scheduler's rotation
 )
 Q_THREAD_IN_PK: Final = """
 SELECT COUNT(*) FROM information_schema.STATISTICS

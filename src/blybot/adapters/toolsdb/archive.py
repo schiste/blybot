@@ -40,7 +40,10 @@ CREATE TABLE IF NOT EXISTS messages (
 
 _KEY: Final = "chat_id = %s AND thread_id = %s"
 # INSERT IGNORE: a redelivered update must not fail the poll loop; the
-# first stored version of a message wins (edits are not tracked in v3).
+# first stored version of a message wins. Neither edits nor deletions are
+# reflected in the archive — edits by v3 design, and deletions because the
+# Telegram Bot API never reports them to bots at all. `/capture purge` is
+# therefore the only erasure path.
 Q_STORE: Final = """
 INSERT IGNORE INTO messages
     (chat_id, thread_id, message_id, posted_at, author, kind, text, reply_to)

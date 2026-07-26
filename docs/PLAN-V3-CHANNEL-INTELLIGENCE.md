@@ -36,10 +36,16 @@ shipped names are `captures[_throttled|_failed]`, `prompts_run`,
 the tentative `archive_rows`/`analyses_published` names below),
 `.env.example` complete, SPECIFICATION §21 accurate, README
 status/architecture-tree refreshed, and the job memory default bumped to
-768Mi (README + `deploy-instance.sh`). Remaining — operator actions, not
-code: the Phase 0 governance items (community announcement, on-wiki
-norms sign-off, Toolforge-tier latency measurement) and media analysis
-(parked: LiftWing has no multimodal input yet).
+768Mi (README + `deploy-instance.sh`). The automatable halves of Phase 0
+are prepared: `scripts/liftwing_baseline.py` measures the Toolforge-tier
+latency envelope (stdlib-only, one command from a bastion), and
+OPERATIONS.md carries ready-to-post announcement copy for the
+privacy-posture change (chat + wiki variants). Remaining — genuinely
+operator-only: run the baseline from Toolforge and record the numbers,
+post the announcements and flip privacy mode, obtain the on-wiki norms
+sign-off for machine-generated sections, estimate archive volume against
+the ToolsDB quota — and media analysis (parked: LiftWing has no
+multimodal input yet).
 
 Blybot v3 turns the bot from a *marked-message logger* into a *channel
 intelligence platform*: it passively archives the content of Telegram

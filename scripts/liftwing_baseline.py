@@ -39,6 +39,29 @@ LONG_PROMPT = (
     "give a two-sentence explanation. Do not summarize or stop early; "
     "keep adding items until you run out of space."
 )
+# Production /summarize sends up to DEFAULT_CHUNK_CHARS (24,000 chars)
+# of fenced transcript in one request; prefill latency at that size is
+# part of the real envelope, so the baseline includes one such request.
+CHUNK_LINE = (
+    "[2026-07-25 12:{minute:02d}] {author}: we discussed the proposal about the "
+    "upcoming edit-a-thon and whether the documentation page needs a translation "
+    "sweep before the announcement goes out to the mailing list.\n"
+)
+
+
+def chunk_prompt(chars: int) -> str:
+    """A production-shaped prompt: instruction + ~``chars`` of transcript."""
+    lines: list[str] = []
+    minute = 0
+    while sum(len(line) for line in lines) < chars:
+        author = f"anon{minute % 7:02d}"
+        lines.append(CHUNK_LINE.format(minute=minute % 60, author=author))
+        minute += 1
+    transcript = "".join(lines)[:chars]
+    return (
+        "Summarize the main discussion threads in the following chat "
+        f"transcript as a JSON array of short strings.\n\n{transcript}"
+    )
 
 
 class Probe(NamedTuple):
@@ -110,25 +133,40 @@ def main() -> int:
     parser.add_argument("--base", default=DEFAULT_BASE, help="LiftWing inference base URL")
     parser.add_argument("--models", nargs="*", default=list(DEFAULT_MODELS))
     parser.add_argument("--runs", type=int, default=3, help="short-answer runs per model")
-    parser.add_argument("--long-tokens", type=int, default=512, help="long-generation probe size")
-    parser.add_argument("--timeout", type=float, default=180.0, help="per-request timeout (s)")
+    parser.add_argument(
+        "--long-tokens",
+        type=int,
+        default=4096,  # LLM_MAX_TOKENS_CEILING's default: measure the worst case
+        help="long-generation probe size (match your LLM_MAX_TOKENS_CEILING)",
+    )
+    parser.add_argument(
+        "--chunk-chars",
+        type=int,
+        default=24_000,  # the prompt transform's DEFAULT_CHUNK_CHARS
+        help="transcript size for the production-shaped prefill probe",
+    )
+    parser.add_argument("--timeout", type=float, default=600.0, help="per-request timeout (s)")
     args = parser.parse_args()
 
     short = Probe(SHORT_PROMPT, runs=args.runs, max_tokens=256, timeout=args.timeout)
+    chunk = Probe(chunk_prompt(args.chunk_chars), runs=1, max_tokens=1024, timeout=args.timeout)
     long_probe = Probe(LONG_PROMPT, runs=1, max_tokens=args.long_tokens, timeout=args.timeout)
     print(f"LiftWing baseline against {args.base}")
     for model in args.models:
-        print(f"\n--- {model}: short answers (the /summarize shape) ---")
+        print(f"\n--- {model}: short answers ---")
         benchmark(args.base, model, short)
+        print(f"\n--- {model}: production-shaped chunk ({args.chunk_chars} chars in) ---")
+        benchmark(args.base, model, chunk)
         print(f"\n--- {model}: long generation (fills the {args.long_tokens}-token budget) ---")
         benchmark(args.base, model, long_probe)
     print(
         "\nA long probe should end with finish=length and completion≈the "
         "requested budget — if it stopped early, its timing is not a real "
         "long-generation measurement. Record the medians in "
-        "docs/OPERATIONS.md ('LiftWing LLM endpoints'); run the long probe "
-        "at your LLM_MAX_TOKENS_CEILING (default 4096) and size "
-        "LIFTWING_TIMEOUT_SECONDS above ITS observed max, not the short one."
+        "docs/OPERATIONS.md ('LiftWing LLM endpoints') and size "
+        "LIFTWING_TIMEOUT_SECONDS above the slowest observation here "
+        "(defaults already match production: 24k-char chunks in, the "
+        "4096-token ceiling out)."
     )
     return 0
 

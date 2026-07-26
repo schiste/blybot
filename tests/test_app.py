@@ -11,14 +11,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 from telegram import Update
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler
 
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.analyze import AnalysisHandlers
 from blybot.adapters.telegram.app import (
+    _DELIVERY_MAX_RETRIES,
     Lifecycle,
     Maintenance,
+    _deliver,
     build_application,
     message_loop,
     run_polling,
@@ -318,6 +320,69 @@ async def test_notify_loop_survives_a_crashing_collect() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls["n"] >= 2  # it kept polling after the crash
+
+
+class _Flaky:
+    """A bot that fails the first ``fail`` sends with ``error``, then succeeds."""
+
+    def __init__(self, error: TelegramError, fail: int) -> None:
+        self._error = error
+        self._remaining = fail
+        self.sent: list[str] = []
+
+    async def send_message(
+        self, chat_id: int, text: str, message_thread_id: int | None = None
+    ) -> None:
+        del chat_id, message_thread_id
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise self._error
+        self.sent.append(text)
+
+
+async def _collect_sleeps() -> tuple[list[float], Any]:
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    return waits, sleep
+
+
+async def test_deliver_waits_out_flood_control_then_sends() -> None:
+    waits, sleep = await _collect_sleeps()
+    bot = _Flaky(RetryAfter(2), fail=1)
+    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    await _deliver(cast("Any", bot), message, "repo_poll", sleep)
+    assert bot.sent == ["hi"]
+    assert waits == [3.0]  # retry_after (2) + a 1s margin, then the retry lands
+
+
+async def test_deliver_retries_a_timeout_then_sends() -> None:
+    waits, sleep = await _collect_sleeps()
+    bot = _Flaky(TimedOut(), fail=1)
+    message = OutboundMessage(chat_id=-1, thread_id=7, text="hi")
+    await _deliver(cast("Any", bot), message, "action_tick", sleep)
+    assert bot.sent == ["hi"]
+    assert waits == [1.0]
+
+
+async def test_deliver_drops_after_persistent_flood_control() -> None:
+    waits, sleep = await _collect_sleeps()
+    bot = _Flaky(RetryAfter(1), fail=99)  # never recovers within the budget
+    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    await _deliver(cast("Any", bot), message, "repo_poll", sleep)
+    assert bot.sent == []  # dropped, not retried forever
+    assert len(waits) == _DELIVERY_MAX_RETRIES  # bounded retries, then give up
+
+
+async def test_deliver_drops_after_persistent_timeout() -> None:
+    waits, sleep = await _collect_sleeps()
+    bot = _Flaky(TimedOut(), fail=99)
+    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    await _deliver(cast("Any", bot), message, "action_tick", sleep)
+    assert bot.sent == []
+    assert len(waits) == _DELIVERY_MAX_RETRIES
 
 
 def make_capture_handlers() -> Any:

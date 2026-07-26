@@ -17,10 +17,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from telegram import Update
-from telegram.error import TelegramError
+from telegram.error import RetryAfter, TelegramError, TimedOut
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters
 
 from blybot.adapters.telegram._common import send_threaded
@@ -175,24 +176,71 @@ class MessageCollector(Protocol):
         ...
 
 
+_DELIVERY_MAX_RETRIES: Final = 3
+
+
+async def _deliver(
+    bot: Bot,
+    message: OutboundMessage,
+    label: str,
+    sleep: Callable[[float], Awaitable[None]],
+) -> None:
+    """Send one message, honoring Telegram flood-control.
+
+    ``RetryAfter`` (the bot is rate-limited) is waited out and retried;
+    ``TimedOut`` is a transient network blip and retried after a short
+    pause. Both are bounded by ``_DELIVERY_MAX_RETRIES`` — a scope that
+    stays rate-limited past the budget is dropped like any other
+    undeliverable message, never retried forever. Every other
+    ``TelegramError`` (kicked, muted, chat-not-found) is permanent for
+    this message and dropped at once. These three are *subclasses* of
+    ``TelegramError``, so they must be caught before it.
+    """
+    reason = ""
+    delay = 0.0
+    for attempt in range(_DELIVERY_MAX_RETRIES + 1):
+        try:
+            await send_threaded(bot, message.chat_id, message.thread_id, message.text)
+        except RetryAfter as exc:
+            # retry_after is a timedelta under PTB_TIMEDELTA (an int on the
+            # legacy path); honor the stated wait plus a 1s margin.
+            wait = exc.retry_after
+            seconds = wait.total_seconds() if isinstance(wait, timedelta) else wait
+            reason, delay = "flood", seconds + 1
+        except TimedOut:
+            reason, delay = "timeout", 1.0
+        except TelegramError:
+            # Kicked from the group, muted, etc. — that scope's message is
+            # lost, every other scope's still goes out.
+            log_event(f"{label}_delivery", "ignored")
+            return
+        else:
+            return  # sent
+        if attempt < _DELIVERY_MAX_RETRIES:
+            await sleep(delay)
+    # Still rate-limited/timing-out past the retry budget: drop like any
+    # other undeliverable message rather than retry forever.
+    log_event(f"{label}_delivery", "ignored", reason=reason)
+
+
 async def message_loop(
-    bot: Bot, collector: MessageCollector, interval_seconds: float, label: str
+    bot: Bot,
+    collector: MessageCollector,
+    interval_seconds: float,
+    label: str,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
 ) -> None:
     """Poll ``collector`` and deliver its messages until cancelled."""
     while True:
-        await asyncio.sleep(interval_seconds)
+        await sleep(interval_seconds)
         try:
             messages = await collector.collect()
         except Exception:
             log_event(label, "error")
             continue
         for message in messages:
-            try:
-                await send_threaded(bot, message.chat_id, message.thread_id, message.text)
-            except TelegramError:
-                # Kicked from the group, muted, etc. — that scope's
-                # message is lost, every other scope's still goes out.
-                log_event(f"{label}_delivery", "ignored")
+            await _deliver(bot, message, label, sleep)
 
 
 def build_application(  # noqa: PLR0913 -- one handler bundle per concern

@@ -305,11 +305,12 @@ async def test_topic_without_its_own_settings_inherits_the_group_default() -> No
 async def test_storage_outage_falls_back_to_deployment_defaults() -> None:
     store = InMemoryProfiles(fail=True)
     runner = FakePromptRunner(results=[PromptResult(content='["ok"]')])
-    transform, _counters = make_transform(runner, store=store)
+    transform, counters = make_transform(runner, store=store)
 
     report = await transform.apply(context(), prompt_step(), transcript(msg(1)))
 
     assert report.model_label == "default model on liftwing"
+    assert counters.snapshot()["llm_settings_unavailable"] == 1  # the downgrade is visible
 
 
 async def test_stats_narrative_feeds_numbers_not_content() -> None:

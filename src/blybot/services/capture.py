@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import GroupProfile, OutboundMessage
 from blybot.domain.ports import StorageError
+from blybot.observability import log_event
 
 if TYPE_CHECKING:
     from blybot.domain.models import CapturedMessage
@@ -212,6 +213,7 @@ class CaptureReminder:
         try:
             profiles = await self.store.list_capture_enabled()
         except StorageError:
+            log_event("capture_remind", "error")  # don't hide a persistent outage
             return []
         now = self.clock.now()
         messages: list[OutboundMessage] = []

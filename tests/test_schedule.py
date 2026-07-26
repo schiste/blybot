@@ -136,9 +136,10 @@ async def test_disallowed_groups_are_skipped() -> None:
 
 async def test_storage_outage_yields_an_empty_tick() -> None:
     store, clock = InMemoryActions(fail=True), FakeClock()
-    scheduler, _counters = make_scheduler(store, clock)
+    scheduler, counters = make_scheduler(store, clock)
 
     assert await scheduler.collect() == []
+    assert counters.snapshot()["action_ticks_failed"] == 1  # not a silent empty tick
 
 
 async def test_broken_scope_never_blocks_other_scopes() -> None:
@@ -147,12 +148,13 @@ async def test_broken_scope_never_blocks_other_scopes() -> None:
     await seed(store, clock, chat_id=-2)
     clock.advance(timedelta(hours=6))
     store.fail_writes_for = {(-1, 0)}  # scope -1's last_run write explodes
-    scheduler, _counters = make_scheduler(store, clock)
+    scheduler, counters = make_scheduler(store, clock)
 
     # Scope -1's tick is lost to its storage error; scope -2 still runs.
     assert await scheduler.collect() == [REPLY]
     (stored,) = store.actions[-2, 0]
     assert stored.last_run == clock.now()
+    assert counters.snapshot()["action_ticks_failed"] == 1  # the lost scope is counted
 
 
 async def test_scope_overflow_is_truncated_per_tick() -> None:

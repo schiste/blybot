@@ -68,6 +68,11 @@ class ActionScheduler:
         try:
             scoped = await self.store.list_scheduled()
         except StorageError:
+            # A silent empty tick used to hide a persistent outage that
+            # stopped every scheduled analysis — count and log it so the
+            # heartbeat and the logs both show the degradation.
+            self.counters.increment("action_ticks_failed")
+            log_event("action_tick", "error")
             return []
         if len(scoped) > self.max_scopes_per_tick:
             log_event("action_tick", "ignored", skipped=len(scoped) - self.max_scopes_per_tick)
@@ -84,6 +89,7 @@ class ActionScheduler:
                 # Per-scope isolation boundary (docstring contract):
                 # storage hiccups or corrupt stored specs in one scope
                 # must not abort the whole tick. Deliberately broad.
+                self.counters.increment("action_ticks_failed")
                 log_event("action_tick", "error")
         return messages
 

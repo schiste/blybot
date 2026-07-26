@@ -196,7 +196,12 @@ class PromptTransform:
                 if (profile is None or profile.llm is None) and context.scope.thread_id:
                     profile = await self.store.get(context.scope.chat_id, 0)
             except StorageError:
-                profile = None  # analyses still run on deployment defaults
+                # Run on deployment defaults rather than abort — but count
+                # and log it: silently downgrading a scope's language/model
+                # on a flapping store should be visible to the operator.
+                profile = None
+                self.counters.increment("llm_settings_unavailable")
+                log_event("analysis", "ignored", reason="settings_unavailable")
             if profile is not None and profile.llm is not None:
                 settings = profile.llm
         if model := step.param("model"):

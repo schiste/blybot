@@ -38,6 +38,9 @@ class CaptureService:
     clock: Clock
     counters: Counters
     cache_ttl: timedelta = timedelta(seconds=60)
+    # Age past which archived messages are purged on the maintenance tick.
+    # 0 keeps the archive forever (the historical behavior).
+    retention_window: timedelta = timedelta(0)
     # (chat_id, thread_id) → (capture_enabled, valid_until). High-volume
     # scopes must not cost one profile read per message.
     _enabled_cache: dict[tuple[int, int], tuple[bool, datetime]] = field(
@@ -136,6 +139,30 @@ class CaptureService:
         """
         for key in list(self._denied):
             await self._retry_disable(key)
+
+    async def sweep_retention(self) -> None:
+        """Purge messages older than the retention window (0 = keep forever).
+
+        Bounds unbounded archive growth on shared ToolsDB. A per-scope
+        storage error is isolated so one bad scope never stops the sweep.
+        """
+        if self.retention_window <= timedelta(0):
+            return
+        try:
+            profiles = await self.store.list_capture_enabled()
+        except StorageError:
+            log_event("archive_retention", "error")
+            return
+        before = self.clock.now() - self.retention_window
+        removed = 0
+        for profile in profiles:
+            try:
+                removed += await self.archive.purge(profile.chat_id, profile.thread_id, before)
+            except StorageError:
+                log_event("archive_retention", "error")
+        if removed:
+            self.counters.increment("archive_pruned", removed)
+            log_event("archive_retention", "ok", pruned=removed)
 
     async def _retry_disable(self, key: tuple[int, int]) -> None:
         """Try to make a denied scope's disable durable; keep denying on failure."""

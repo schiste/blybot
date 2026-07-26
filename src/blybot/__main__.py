@@ -266,6 +266,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             ),
             clock=clock,
             counters=counters,
+            retention_window=timedelta(days=config.capture_retention_days),
         )
         capture_handlers = CaptureHandlers(
             service=capture_service,

@@ -33,7 +33,7 @@ from blybot.adapters.telegram.app import (
     run_polling,
 )
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
-from blybot.domain.models import ConsentMode, GroupProfile, OutboundMessage
+from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile, OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
@@ -630,6 +630,46 @@ async def test_heartbeat_reports_archive_size(caplog: pytest.LogCaptureFixture) 
         with pytest.raises(asyncio.CancelledError):
             await task
     assert any("archive_size" in message and "error" in message for message in caplog.messages)
+
+
+async def test_maintenance_sweeps_archive_retention_on_the_heartbeat() -> None:
+    clock = FakeClock()
+    store, archive = InMemoryProfiles(), InMemoryArchive()
+    await store.upsert(GroupProfile(chat_id=-1, capture_enabled=True))
+    archive.messages.append(
+        CapturedMessage(
+            chat_id=-1,
+            thread_id=0,
+            message_id=1,
+            posted_at=clock.now() - timedelta(days=100),
+            author="a",
+        )
+    )
+    service = CaptureService(
+        store=store,
+        archive=archive,
+        limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
+        clock=clock,
+        counters=Counters(),
+        retention_window=timedelta(days=7),
+    )
+    sessions = SessionRegistry(
+        pseudonyms=SequentialPseudonyms(), clock=clock, ttl=timedelta(minutes=45)
+    )
+    # archive left None: also exercises the archive-absent branch at the heartbeat.
+    maintenance = Maintenance(
+        sessions=sessions, counters=Counters(), capture=service, heartbeat_every_ticks=1
+    )
+    maintenance.interval_seconds = 0
+
+    task = asyncio.ensure_future(maintenance.run_forever())
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert archive.messages == []  # the 100-day-old message was purged on the tick
 
 
 async def test_post_init_starts_the_reminder_task_when_configured() -> None:

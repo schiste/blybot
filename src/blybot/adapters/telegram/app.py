@@ -83,8 +83,11 @@ class Maintenance:
             self.tick(ticks)
             if self.capture is not None:
                 await self.capture.retry_denied()
-            if self.archive is not None and ticks % self.heartbeat_every_ticks == 0:
-                await _archive_heartbeat(self.archive)
+            if ticks % self.heartbeat_every_ticks == 0:
+                if self.capture is not None:
+                    await self.capture.sweep_retention()
+                if self.archive is not None:
+                    await _archive_heartbeat(self.archive)
 
     def tick(self, ticks: int) -> None:
         """Sweep expired sessions; prove liveness every Nth tick."""

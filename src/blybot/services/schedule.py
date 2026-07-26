@@ -24,7 +24,9 @@ same first-contact rule the repo poll cursors follow.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from blybot.domain.models import TriggerKind
@@ -32,7 +34,7 @@ from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from blybot.domain.models import ActionScope, ActionSpec, OutboundMessage
+    from blybot.domain.models import ActionScope, ActionSpec, OutboundMessage, Schedule
     from blybot.domain.ports import ActionStore, Clock
     from blybot.observability import Counters
     from blybot.services.engine import ActionEngine
@@ -49,6 +51,14 @@ class ActionScheduler:
     clock: Clock
     counters: Counters
     max_scopes_per_tick: int = 200
+    # Most scheduled actions one scope runs per tick. Excess due actions are
+    # left un-stamped (still due) and drain over the next few ticks, so one
+    # scope with many aligned schedules can't fire a burst of LLM calls at
+    # once. MAX_ACTIONS is 20, so 10 halves the worst case.
+    max_actions_per_scope: int = 10
+    # Spreads synchronized daily/weekly slots (e.g. everyone at 06:00 UTC)
+    # across ticks with a stable per-action offset. 0 disables it.
+    jitter_window: timedelta = timedelta(minutes=30)
     # Rotates the truncation window across ticks so an overflow defers
     # scopes instead of permanently starving whatever sorts last.
     _offset: int = field(default=0, init=False)
@@ -90,8 +100,12 @@ class ActionScheduler:
             if spec.last_run is None:  # baseline: next slot, never a replay
                 updated[index] = replace(spec, last_run=now)
                 continue
-            if not schedule.is_due(now, spec.last_run):
+            # Shift the due check earlier by this action's jitter, so a
+            # slot shared by many scopes fires spread across ticks.
+            if not schedule.is_due(now - self._jitter(scope, spec, schedule), spec.last_run):
                 continue
+            if len(due) >= self.max_actions_per_scope:
+                continue  # per-tick cap: leave un-stamped, still due next tick
             updated[index] = replace(spec, last_run=now)
             due.append(spec)  # the *old* last_run feeds since_last_run windows
         if tuple(updated) != actions:
@@ -110,3 +124,19 @@ class ActionScheduler:
                 self.counters.increment("actions_failed")
                 log_event("action_run", "error")
         return messages
+
+    def _jitter(self, scope: ActionScope, spec: ActionSpec, schedule: Schedule) -> timedelta:
+        """A stable per-action offset that desynchronizes shared slots.
+
+        Zero for ``every`` schedules (already phase-spread by when each was
+        created) and when the window is off. Otherwise a deterministic
+        value in ``[0, jitter_window)`` derived from the scope and action
+        id — identical across restarts, because a random jitter would let a
+        slot fire twice.
+        """
+        if self.jitter_window <= timedelta(0) or schedule.kind == "every":
+            return timedelta(0)
+        seed = f"{scope.chat_id}:{scope.thread_id}:{spec.action_id}".encode()
+        digest = hashlib.blake2b(seed, digest_size=8).digest()
+        offset = int.from_bytes(digest, "big") % int(self.jitter_window.total_seconds())
+        return timedelta(seconds=offset)

@@ -74,6 +74,31 @@ def worst_case_prompt(chars: int) -> str:
     )
 
 
+def reduce_prompt(chars: int) -> str:
+    """The map-reduce *reduce* shape: every chunk's partials in one request.
+
+    At the defaults this is the largest input production can send —
+    LLM_MAX_CHUNKS_PER_RUN (12) chunks x 12 items x 600 chars = 86,400
+    characters. A FAILED run here is itself a finding: that payload can
+    exceed a model's context window, meaning busiest-window analyses
+    would abort on the reduce step until the operator lowers
+    LLM_MAX_CHUNKS_PER_RUN or moves the scope to the larger model.
+    """
+    line = (
+        "- The participants compared several scheduling options for the "
+        "documentation sprint and agreed the translation review must land "
+        "before the announcement; two volunteers offered to draft the "
+        "outreach message and collect feedback from the regional groups "
+        "before the next weekly sync happens on the usual channel.\n"
+    )
+    partials = (line * (chars // len(line) + 1))[:chars]
+    return (
+        "The following are partial analysis results from consecutive "
+        "windows of one discussion. Merge them into a single JSON array "
+        f"of at most 12 strings.\n\n{partials}"
+    )
+
+
 class Probe(NamedTuple):
     """One benchmark shape: what to ask, how often, and how much to allow."""
 
@@ -81,14 +106,19 @@ class Probe(NamedTuple):
     runs: int
     max_tokens: int
     timeout: float
+    lang: str = ""  # pin the output language and show a quality preview
 
 
 def call(base: str, model: str, probe: Probe) -> dict[str, object]:
     """One chat completion; returns latency and response metadata."""
     url = f"{base}/models/{model}/openai/v1/chat/completions"
+    messages: list[dict[str, str]] = []
+    if probe.lang:
+        messages.append({"role": "system", "content": f"Respond only in language '{probe.lang}'."})
+    messages.append({"role": "user", "content": probe.prompt})
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": probe.prompt}],
+        "messages": messages,
         "max_tokens": probe.max_tokens,
         "temperature": 0.2,
     }
@@ -108,6 +138,7 @@ def call(base: str, model: str, probe: Probe) -> dict[str, object]:
         "finish_reason": choice.get("finish_reason"),
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
+        "content": choice.get("message", {}).get("content", ""),
     }
 
 
@@ -128,6 +159,9 @@ def benchmark(base: str, model: str, probe: Probe) -> None:
             f"  prompt={result['prompt_tokens']}t"
             f"  completion={result['completion_tokens']}t"
         )
+        if probe.lang:  # the Phase 0 language spot-check: eyeball the quality
+            preview = " ".join(str(result["content"]).split())[:300]
+            print(f"  [{probe.lang}] {preview}")
     if times:
         print(
             f"  → median {statistics.median(times):.1f}s"
@@ -155,23 +189,32 @@ def main() -> int:
         default=24_000,  # the prompt transform's DEFAULT_CHUNK_CHARS
         help="transcript size for the production-shaped prefill probe",
     )
+    parser.add_argument(
+        "--reduce-chars",
+        type=int,
+        default=86_400,  # LLM_MAX_CHUNKS_PER_RUN (12) x 12 items x 600 chars
+        help="partials size for the reduce-step probe (production's input ceiling)",
+    )
+    parser.add_argument(
+        "--lang",
+        default="",
+        help="pin the output language and print a preview (the Phase 0 quality spot-check)",
+    )
     parser.add_argument("--timeout", type=float, default=600.0, help="per-request timeout (s)")
     args = parser.parse_args()
 
-    short = Probe(SHORT_PROMPT, runs=args.runs, max_tokens=256, timeout=args.timeout)
-    chunk = Probe(chunk_prompt(args.chunk_chars), runs=1, max_tokens=1024, timeout=args.timeout)
-    worst = Probe(
-        worst_case_prompt(args.chunk_chars),
-        runs=1,
-        max_tokens=args.long_tokens,
-        timeout=args.timeout,
-    )
+    short = Probe(SHORT_PROMPT, args.runs, 256, args.timeout, args.lang)
+    chunk = Probe(chunk_prompt(args.chunk_chars), 1, 1024, args.timeout, args.lang)
+    worst = Probe(worst_case_prompt(args.chunk_chars), 1, args.long_tokens, args.timeout)
+    reduce_probe = Probe(reduce_prompt(args.reduce_chars), 1, 1024, args.timeout, args.lang)
     print(f"LiftWing baseline against {args.base}")
     for model in args.models:
         print(f"\n--- {model}: short answers ---")
         benchmark(args.base, model, short)
-        print(f"\n--- {model}: production default ({args.chunk_chars} chars in, 1024 out) ---")
+        print(f"\n--- {model}: map step ({args.chunk_chars} chars in, 1024 out) ---")
         benchmark(args.base, model, chunk)
+        print(f"\n--- {model}: reduce step ({args.reduce_chars} chars in — the input ceiling) ---")
+        benchmark(args.base, model, reduce_probe)
         print(
             f"\n--- {model}: worst case ({args.chunk_chars} chars in, "
             f"{args.long_tokens}-token budget out) ---"
@@ -180,11 +223,13 @@ def main() -> int:
     print(
         "\nThe worst-case probe should end with finish=length and "
         "completion≈the requested budget — if it stopped early, its "
-        "timing is not a real ceiling measurement. Record the medians in "
-        "docs/OPERATIONS.md ('LiftWing LLM endpoints') and size "
-        "LIFTWING_TIMEOUT_SECONDS above the worst-case probe's time "
-        "(defaults already match production's maxima: 24k-char chunk in "
-        "AND the 4096-token ceiling out, in the same request)."
+        "timing is not a real ceiling measurement. A FAILED reduce probe "
+        "means that model cannot take production's largest reduce payload: "
+        "lower LLM_MAX_CHUNKS_PER_RUN or route busy scopes to the larger "
+        "model. Record the medians in docs/OPERATIONS.md ('LiftWing LLM "
+        "endpoints') and size LIFTWING_TIMEOUT_SECONDS above the slowest "
+        "probe. For non-English target chats, re-run with --lang <code> "
+        "and eyeball the previews (the Phase 0 quality spot-check)."
     )
     return 0
 

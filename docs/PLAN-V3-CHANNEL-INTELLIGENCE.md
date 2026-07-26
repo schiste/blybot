@@ -42,6 +42,8 @@ latency envelope (stdlib-only, one command from a bastion), and
 OPERATIONS.md carries ready-to-post announcement copy for the
 privacy-posture change (chat + wiki variants). Remaining — genuinely
 operator-only: run the baseline from Toolforge and record the numbers,
+spot-check output quality in the target channels' actual languages
+(re-run the baseline with `--lang <code>` and eyeball the previews),
 post the announcements and flip privacy mode, obtain the on-wiki norms
 sign-off for machine-generated sections, estimate archive volume against
 the ToolsDB quota — and media analysis (parked: LiftWing has no

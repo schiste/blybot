@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol
@@ -237,24 +238,44 @@ async def _deliver(
     log_event(f"{label}_delivery", "ignored", reason=reason)
 
 
-async def message_loop(
+def _next_deadline(previous: float, interval: float, now: float) -> float:
+    """The next tick deadline: anchored to the schedule, missed ticks not replayed.
+
+    When the work finished within the interval the cadence stays exactly
+    on ``previous + interval`` (no drift); when it overran, the deadline
+    resyncs to ``now + interval`` so a slow tick does not trigger a burst
+    of catch-up ticks.
+    """
+    candidate = previous + interval
+    return candidate if candidate > now else now + interval
+
+
+async def message_loop(  # noqa: PLR0913 -- sleep/monotonic are injected test seams
     bot: Bot,
     collector: MessageCollector,
     interval_seconds: float,
     label: str,
     *,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
-    """Poll ``collector`` and deliver its messages until cancelled."""
+    """Poll ``collector`` and deliver its messages until cancelled.
+
+    The cadence is anchored to a fixed deadline rather than sleeping a
+    whole interval *after* the work, so a slow tick (e.g. a minutes-long
+    analysis) does not push every later tick progressively late.
+    """
+    next_at = monotonic() + interval_seconds
     while True:
-        await sleep(interval_seconds)
+        await sleep(max(0.0, next_at - monotonic()))
         try:
             messages = await collector.collect()
         except Exception:
             log_event(label, "error")
-            continue
+            messages = []
         for message in messages:
             await _deliver(bot, message, label, sleep)
+        next_at = _next_deadline(next_at, interval_seconds, monotonic())
 
 
 def build_application(  # noqa: PLR0913 -- one handler bundle per concern

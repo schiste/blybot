@@ -27,6 +27,7 @@ from blybot.adapters.telegram.app import (
     Lifecycle,
     Maintenance,
     _deliver,
+    _next_deadline,
     build_application,
     message_loop,
     run_polling,
@@ -395,6 +396,13 @@ async def test_deliver_drops_after_persistent_timeout() -> None:
     await _deliver(cast("Any", bot), message, "action_tick", sleep)
     assert bot.sent == []
     assert len(waits) == _DELIVERY_MAX_RETRIES
+
+
+def test_next_deadline_holds_cadence_and_resyncs_after_overrun() -> None:
+    # Work fit inside the interval: stay exactly on previous + interval.
+    assert _next_deadline(previous=10.0, interval=5.0, now=12.0) == 15.0
+    # Work overran the interval: resync to now + interval, no catch-up burst.
+    assert _next_deadline(previous=10.0, interval=5.0, now=18.0) == 23.0
 
 
 async def test_deliver_survives_a_non_telegram_error() -> None:

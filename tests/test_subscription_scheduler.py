@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import GroupProfile, OutboundMessage, Schedule
+from blybot.domain.models import GroupProfile, OutboundMessage, Schedule, Scope
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
 from blybot.services.engine import ActionEngine
@@ -19,7 +19,7 @@ from tests.fakes import (
 )
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
-DIGEST = OutboundMessage(chat_id=-100, thread_id=0, text="digest")
+DIGEST = OutboundMessage(scope=Scope("telegram", "-100"), text="digest")
 
 
 def make(
@@ -53,9 +53,8 @@ def a_sub(
 ) -> Subscription:
     return Subscription(
         sub_id=sub_id,
-        dm_chat_id=dm,
-        chat_id=chat,
-        thread_id=0,
+        dm=Scope("telegram", str(dm)),
+        scope=Scope("telegram", str(chat)),
         schedule=Schedule(kind="daily", hour=8),
         recipe=recipe,
         lang="en",
@@ -64,7 +63,9 @@ def a_sub(
 
 
 def subscribable(chat_id: int = -100) -> GroupProfile:
-    return GroupProfile(chat_id=chat_id, capture_enabled=True, subscribe_code="code")
+    return GroupProfile(
+        scope=Scope("telegram", str(chat_id)), capture_enabled=True, subscribe_code="code"
+    )
 
 
 async def test_unstamped_subscription_is_baselined_not_delivered() -> None:
@@ -94,7 +95,7 @@ async def test_due_subscription_delivers_a_dm_digest() -> None:
     messages = await scheduler.collect()
 
     # re-targeted from the scope (-100) to the subscriber's DM (500):
-    assert messages == [OutboundMessage(chat_id=500, thread_id=0, text="digest")]
+    assert messages == [OutboundMessage(scope=Scope("telegram", "500"), text="digest")]
     assert subs.subs["s1"].last_run == NOW  # watermark stamped before delivery
     assert counters.snapshot()["subscription_digests"] == 1
 
@@ -113,7 +114,9 @@ async def test_skips_when_scope_not_subscribable_or_missing() -> None:
     await subs.add(a_sub("s1", chat=-100, last_run=NOW - timedelta(days=1)))  # code cleared
     await subs.add(a_sub("s2", chat=-200, last_run=NOW - timedelta(days=1)))  # no profile
     profiles = InMemoryProfiles()
-    await profiles.upsert(GroupProfile(chat_id=-100, capture_enabled=True, subscribe_code=None))
+    await profiles.upsert(
+        GroupProfile(scope=Scope("telegram", "-100"), capture_enabled=True, subscribe_code=None)
+    )
     scheduler, counters = make(subs, profiles)
 
     assert await scheduler.collect() == []

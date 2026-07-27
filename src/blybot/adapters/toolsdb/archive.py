@@ -16,12 +16,14 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pymysql
 
+from blybot.adapters.toolsdb.store import _target
 from blybot.domain.models import CapturedMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
     from blybot.adapters.toolsdb.store import SqlRunner
+    from blybot.domain.models import Scope
 
 MESSAGES_SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -79,11 +81,12 @@ class ToolsDbArchive:
 
     async def store(self, message: CapturedMessage) -> None:
         """Persist one captured message (idempotent per message id)."""
+        chat_id, thread_id = _target(message.scope)
         await self._run(
             Q_STORE,
             (
-                message.chat_id,
-                message.thread_id,
+                chat_id,
+                thread_id,
                 message.message_id,
                 message.posted_at.astimezone(UTC).replace(tzinfo=None),
                 message.author,
@@ -93,10 +96,9 @@ class ToolsDbArchive:
             ),
         )
 
-    async def window(
-        self, chat_id: int, thread_id: int, since: datetime, until: datetime
-    ) -> list[CapturedMessage]:
+    async def window(self, scope: Scope, since: datetime, until: datetime) -> list[CapturedMessage]:
         """Return the scope's messages with ``since <= posted_at < until``, oldest first."""
+        chat_id, thread_id = _target(scope)
         rows = await self._run(
             Q_WINDOW,
             (
@@ -106,10 +108,11 @@ class ToolsDbArchive:
                 until.astimezone(UTC).replace(tzinfo=None),
             ),
         )
-        return [_message_from_row(chat_id, thread_id, row) for row in rows]
+        return [_message_from_row(scope, row) for row in rows]
 
-    async def purge(self, chat_id: int, thread_id: int, before: datetime | None = None) -> int:
+    async def purge(self, scope: Scope, before: datetime | None = None) -> int:
         """Hard-delete the scope's archive (older than ``before`` if given)."""
+        chat_id, thread_id = _target(scope)
         if before is None:
             count_query, purge_query = Q_COUNT, Q_PURGE
             params: tuple[Any, ...] = (chat_id, thread_id)
@@ -126,12 +129,13 @@ class ToolsDbArchive:
         rows = await self._run(Q_TOTAL, ())
         return int(rows[0][0]) if rows else 0
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+    async def migrate(self, old: Scope, new: Scope) -> None:
         """Re-key every topic's messages after a group→supergroup upgrade.
 
         Clear-then-rekey runs in one transaction so a crash between the two
         cannot drop the destination's rows while leaving the source's.
         """
+        old_chat_id, new_chat_id = int(old.channel), int(new.channel)
         await self._run_tx(
             [(Q_MIGRATE_CLEAR, (new_chat_id,)), (Q_MIGRATE, (new_chat_id, old_chat_id))]
         )
@@ -153,11 +157,10 @@ class ToolsDbArchive:
             raise StorageError(msg) from error
 
 
-def _message_from_row(chat_id: int, thread_id: int, row: tuple[Any, ...]) -> CapturedMessage:
+def _message_from_row(scope: Scope, row: tuple[Any, ...]) -> CapturedMessage:
     message_id, posted_at, author, kind, text, reply_to = row
     return CapturedMessage(
-        chat_id=chat_id,
-        thread_id=thread_id,
+        scope=scope,
         message_id=int(message_id),
         posted_at=posted_at.replace(tzinfo=UTC),
         author=author or "",

@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
 
-    from blybot.domain.models import ActionScope, ActionSpec
+    from blybot.domain.models import ActionSpec, Scope
     from blybot.domain.ports import Clock, Sink, Source, Transform
     from blybot.observability import Counters
 
@@ -42,7 +42,7 @@ class ActionEngine:
 
     async def run(
         self,
-        scope: ActionScope,
+        scope: Scope,
         spec: ActionSpec,
         now: datetime | None = None,
         payload: object | None = None,

@@ -94,6 +94,52 @@ class ConsentMode(Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class Scope:
+    """An opaque, platform-tagged address for one channel/topic a pipeline serves.
+
+    Replaces the Telegram-specific ``(chat_id:int, thread_id:int)`` pair. All
+    three parts are **opaque strings** the owning platform adapter mints and
+    interprets — the core never parses them, only compares and stores them.
+    ``thread`` is ``""`` when the platform has no threads, or the address is the
+    channel default (what Telegram encoded as ``thread_id == 0``).
+
+    A direct-message target is just a ``Scope`` whose ``channel`` is the DM
+    handle: on Telegram that handle equals the user id (the R6 subscription
+    carve-out), on Discord it is the DM channel id — distinct from the user id.
+    This keeps a single addressing type for both group and DM delivery.
+    """
+
+    platform: str
+    channel: str
+    thread: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.platform:
+            msg = "Scope.platform must be non-empty"
+            raise ValueError(msg)
+        if not self.channel:
+            msg = "Scope.channel must be non-empty"
+            raise ValueError(msg)
+        # The canonical key joins the parts on reserved separators; forbidding
+        # those characters in the (opaque, adapter-minted) parts keeps the key
+        # collision-free without escaping. Every platform's ids already avoid
+        # them (Telegram ints, Discord/Slack snowflakes, IRC "#name").
+        reserved = "".join(sorted(_SCOPE_SEPARATORS))
+        for part in (self.platform, self.channel, self.thread):
+            if _SCOPE_SEPARATORS & set(part):
+                msg = f"Scope parts must not contain {reserved!r}: {part!r}"
+                raise ValueError(msg)
+
+    @property
+    def key(self) -> str:
+        """A stable, collision-free string key for dict/registry/log use."""
+        return f"{self.platform}:{self.channel}/{self.thread}"
+
+
+_SCOPE_SEPARATORS: Final = frozenset(":/")
+
+
+@dataclass(frozen=True, slots=True)
 class LogMedia:
     """One anonymous media attachment selected for wiki publication.
 
@@ -176,13 +222,12 @@ class GroupProfile:
     """Self-service configuration one group's admins chose from Telegram.
 
     The only identifiers the bot persists are group structure — the
-    *chat id* and (for forum groups) the *topic thread id* — never a
+    :class:`Scope` (platform + channel + optional topic thread) — never a
     user id, name, or message. ``None`` fields fall back to the group
     default and then the operator's environment defaults.
     """
 
-    chat_id: int
-    thread_id: int = 0  # forum topic; 0 = the group default (General)
+    scope: Scope
     log_page: str | None = None
     repo: str | None = None
     consent_mode: ConsentMode | None = None
@@ -421,28 +466,23 @@ class ActionSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class ActionScope:
-    """The (group, topic) a pipeline runs for — group structure only, never a user."""
-
-    chat_id: int
-    thread_id: int = 0
-
-
-@dataclass(frozen=True, slots=True)
 class ActionContext:
     """Everything a pipeline step may know about the run it is part of."""
 
-    scope: ActionScope
+    scope: Scope
     spec: ActionSpec
     now: datetime
 
 
 @dataclass(frozen=True, slots=True)
 class OutboundMessage:
-    """One chat message a pipeline asks the transport layer to send."""
+    """One chat message a pipeline asks the transport layer to send.
 
-    chat_id: int
-    thread_id: int
+    ``scope`` addresses where it goes — a group/topic, or (for a private
+    digest) a DM scope the collector re-targeted it to.
+    """
+
+    scope: Scope
     text: str
 
 
@@ -532,12 +572,11 @@ class CapturedMessage:
     derives (HMAC) — never a Telegram user id, username, or display
     name; a broadcast channel post has no author (``""``). ``kind`` is
     ``text`` or ``media_note`` (media itself is not archived; the note
-    only feeds activity stats). ``chat_id``/``thread_id`` are group
-    structure, which the profile store already persists (spec 11).
+    only feeds activity stats). ``scope`` is group structure, which the
+    profile store already persists (spec 11).
     """
 
-    chat_id: int
-    thread_id: int
+    scope: Scope
     message_id: int
     posted_at: datetime
     author: str = ""

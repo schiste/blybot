@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Final
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 
-from blybot.adapters.telegram._common import thread_of
+from blybot.adapters.telegram._common import group_scope, scope_of, thread_of
 from blybot.domain.models import CapturedMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from telegram import Message, Update
     from telegram.ext import ContextTypes
 
+    from blybot.domain.models import Scope
     from blybot.services.capture import CaptureService
     from blybot.services.directory import ChannelDirectory
     from blybot.services.policy import GroupPolicy
@@ -84,21 +85,21 @@ class CaptureHandlers:
         """Archive one broadcast-channel post (author-less by nature)."""
         del context
         post = update.channel_post
-        if post is None or not self.groups.is_allowed(post.chat.id):
+        if post is None or not self.groups.is_allowed(group_scope(post.chat.id)):
             return
-        await self.service.ingest(_as_captured(post, thread_id=0, author=""))
+        await self.service.ingest(_as_captured(post, group_scope(post.chat.id), author=""))
 
     async def on_group_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Archive one group message for a capture-enabled scope."""
         del context
         message = update.effective_message
-        if message is None or not self.groups.is_allowed(message.chat.id):
+        if message is None or not self.groups.is_allowed(group_scope(message.chat.id)):
             return
         thread_id = thread_of(update)
         author = ""
         if message.from_user is not None:
             author = self.masker.mask(message.chat.id, thread_id, message.from_user.id)
-        await self.service.ingest(_as_captured(message, thread_id=thread_id, author=author))
+        await self.service.ingest(_as_captured(message, scope_of(update), author=author))
 
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Track the bot's channel admin status — the structural opt-in.
@@ -116,38 +117,39 @@ class CaptureHandlers:
         admin = ChatMemberStatus.ADMINISTRATOR
         was_admin = change.old_chat_member.status == admin
         is_admin = change.new_chat_member.status == admin
+        scope = group_scope(change.chat.id)
         if was_admin and not is_admin:
             # Revocations run regardless of the serving allowlist: consent
             # ends when admin status does, even for a channel the operator
             # currently excludes — otherwise a stale durable enable could
             # resume archiving if the channel is ever re-allowed.
-            await self._end_channel_capture(change.chat.id)
-        elif is_admin and not was_admin and self.groups.is_allowed(change.chat.id):
-            await self._begin_channel_capture(change.chat.id, context)
+            await self._end_channel_capture(scope)
+        elif is_admin and not was_admin and self.groups.is_allowed(scope):
+            await self._begin_channel_capture(scope, context)
         # admin→admin is a permissions edit; anything else is not ours.
 
-    async def _end_channel_capture(self, chat_id: int) -> None:
+    async def _end_channel_capture(self, scope: Scope) -> None:
         """Demotion revokes the structural opt-in: capture must not survive it."""
         try:
-            await self.directory.set_capture(chat_id, 0, enabled=False)
+            await self.directory.set_capture(scope, enabled=False)
         except StorageError:
             # A demoted bot still *receives* channel posts (it stays a
             # member), so the stale durable True must not resume once
             # storage recovers: tombstone the scope — denied in memory,
             # with each incoming post retrying the durable disable.
-            self.service.deny_scope(chat_id, 0)
+            self.service.deny_scope(scope)
             log_event("capture_enable", "error")
             return
-        self.service.clear_denial(chat_id, 0)
+        self.service.clear_denial(scope)
         log_event("capture_enable", "ok", enabled=0)
 
     async def _begin_channel_capture(
-        self, chat_id: int, context: ContextTypes.DEFAULT_TYPE
+        self, scope: Scope, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """Announce first (loud opt-in, R-v3.1), then enable; never claim falsely."""
         try:
             await context.bot.send_message(
-                chat_id=chat_id,
+                chat_id=int(scope.channel),
                 text=CHANNEL_ANNOUNCEMENT.format(bot_name=self.bot_name),
             )
         except TelegramError:
@@ -156,20 +158,20 @@ class CaptureHandlers:
             # recorded) must not survive either. A demote + re-promote
             # retries the whole sequence.
             log_event("capture_announce", "error")
-            await self._end_channel_capture(chat_id)
+            await self._end_channel_capture(scope)
             return
         try:
             # Serialized against the tombstone retries: a stale in-flight
             # disable can never overwrite this freshly announced consent.
-            await self.service.enable_scope(chat_id, 0)
+            await self.service.enable_scope(scope)
         except StorageError:
             log_event("capture_enable", "error")
-            await self._retract_if_verifiably_off(chat_id, context)
+            await self._retract_if_verifiably_off(scope, context)
             return
         log_event("capture_enable", "ok")
 
     async def _retract_if_verifiably_off(
-        self, chat_id: int, context: ContextTypes.DEFAULT_TYPE
+        self, scope: Scope, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """After a failed enable write, correct the announcement — but only truthfully.
 
@@ -182,27 +184,26 @@ class CaptureHandlers:
         not happen), which is the privacy-safe direction to be wrong in.
         """
         try:
-            await self.directory.set_capture(chat_id, 0, enabled=False)
+            await self.directory.set_capture(scope, enabled=False)
         except StorageError:
             # Unknowable durable state: tombstone it fail-closed.
-            self.service.deny_scope(chat_id, 0)
+            self.service.deny_scope(scope)
             log_event("capture_enable", "error")
             return
-        self.service.clear_denial(chat_id, 0)
+        self.service.clear_denial(scope)
         try:
             await context.bot.send_message(
-                chat_id=chat_id,
+                chat_id=int(scope.channel),
                 text=CHANNEL_RETRACTION.format(bot_name=self.bot_name),
             )
         except TelegramError:
             log_event("capture_announce", "error")
 
 
-def _as_captured(message: Message, thread_id: int, author: str) -> CapturedMessage:
+def _as_captured(message: Message, scope: Scope, author: str) -> CapturedMessage:
     text = message.text or message.caption or ""
     return CapturedMessage(
-        chat_id=message.chat.id,
-        thread_id=thread_id,
+        scope=scope,
         message_id=message.message_id,
         posted_at=message.date,
         author=author,

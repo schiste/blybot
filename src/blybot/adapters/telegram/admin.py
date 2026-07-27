@@ -9,15 +9,21 @@ only the ``/log`` flow's transient messages self-delete.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
 from telegram.constants import ChatMemberStatus
 from telegram.error import TelegramError
 
-from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
-from blybot.domain.models import ConsentMode, LlmSettings
+from blybot.adapters.telegram._common import (
+    GROUP_TYPES,
+    group_scope,
+    scope_of,
+    send_threaded,
+    thread_of,
+)
+from blybot.domain.models import ConsentMode, LlmSettings, Scope
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
 from blybot.services.actions import (
@@ -38,7 +44,7 @@ from blybot.services.subscriptions import mint_subscribe_code
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from telegram import Bot, Chat, Update
+    from telegram import Bot, Update
     from telegram.ext import ContextTypes
 
     from blybot.domain.ports import ActionStore, Clock, MessageArchive, TokenVault
@@ -200,8 +206,13 @@ async def is_group_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     return member.status in _ADMIN_STATUSES
 
 
-def _scope(thread_id: int) -> str:
-    return "this topic" if thread_id else "the group default"
+def _scope(scope: Scope) -> str:
+    return "this topic" if scope.thread else "the group default"
+
+
+def _target(scope: Scope) -> tuple[int, int]:
+    """The scope's Telegram ``(chat_id, thread_id)`` for topic-routed replies."""
+    return int(scope.channel), int(scope.thread) if scope.thread else 0
 
 
 # Sentinel distinguishing "no before: given" (None) from "unparsable".
@@ -244,129 +255,127 @@ class AdminHandlers:
 
     async def on_setup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain the self-service commands to an admin."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is not None:
-            chat, thread_id = resolved
+        scope = await self._admin_chat(update, context)
+        if scope is not None:
+            chat_id, thread_id = _target(scope)
             text = SETUP_TEXT.format(suffix=self.directory.page_suffix or "<disabled>")
-            await self._reply(context, chat.id, thread_id, text)
+            await self._reply(context, chat_id, thread_id, text)
 
     async def on_setpage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Point this group's /log at a page under the allowed prefix."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         title = " ".join(context.args or ()).strip()
         if not title:
             usage = REPLY_SETPAGE_USAGE.format(suffix=self.directory.page_suffix)
-            await self._reply(context, chat.id, thread_id, usage)
+            await self._reply(context, chat_id, thread_id, usage)
             return
         try:
-            normalized = await self.directory.set_log_page(chat.id, thread_id, title)
+            normalized = await self.directory.set_log_page(scope, title)
         except PageNotAllowedError:
             refused = REPLY_PAGE_REFUSED.format(suffix=self.directory.page_suffix)
-            await self._reply(context, chat.id, thread_id, refused)
+            await self._reply(context, chat_id, thread_id, refused)
             return
         except SelfServiceUnavailableError:
-            await self._reply(context, chat.id, thread_id, REPLY_SELF_SERVICE_OFF)
+            await self._reply(context, chat_id, thread_id, REPLY_SELF_SERVICE_OFF)
             return
         except StorageError:
-            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
+            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
             return
         self.counters.increment("profiles_configured")
         log_event("profile_update", "ok")
-        confirmation = REPLY_PAGE_SET.format(
-            url=self.page_url_for(normalized), scope=_scope(thread_id)
-        )
-        await self._reply(context, chat.id, thread_id, confirmation)
+        confirmation = REPLY_PAGE_SET.format(url=self.page_url_for(normalized), scope=_scope(scope))
+        await self._reply(context, chat_id, thread_id, confirmation)
 
     async def on_setconsent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Set this group's consent policy for /log."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         argument = (context.args or [""])[0]
         if argument not in {ConsentMode.IMMEDIATE.value, ConsentMode.AUTHOR_ONLY.value}:
-            await self._reply(context, chat.id, thread_id, REPLY_CONSENT_USAGE)
+            await self._reply(context, chat_id, thread_id, REPLY_CONSENT_USAGE)
             return
         try:
-            await self.directory.set_consent(chat.id, ConsentMode(argument))
+            await self.directory.set_consent(scope, ConsentMode(argument))
         except StorageError:
-            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
+            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("profile_update", "ok")
-        await self._reply(context, chat.id, thread_id, REPLY_CONSENT_SET.format(mode=argument))
+        await self._reply(context, chat_id, thread_id, REPLY_CONSENT_SET.format(mode=argument))
 
     async def on_setrepo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Bind this group to a GitHub repository and start the token flow."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         repo = ((context.args or [""])[0]).strip()
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or ".." in repo:
-            await self._reply(context, chat.id, thread_id, REPLY_SETREPO_USAGE)
+            await self._reply(context, chat_id, thread_id, REPLY_SETREPO_USAGE)
             return
         try:
-            await self.directory.set_repo(chat.id, thread_id, repo)
+            await self.directory.set_repo(scope, repo)
             if self.vault is not None:
                 # A token consented for the previous repo must never be
                 # replayed against the new one.
-                await self.vault.delete_token(chat.id, thread_id)
+                await self.vault.delete_token(scope)
         except StorageError:
-            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
+            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("profile_update", "ok")
-        nonce = self.binding.mint_link(chat.id, thread_id)
+        nonce = self.binding.mint_link(scope)
         link = f"https://t.me/{context.bot.username}?start=cfg_{nonce}"
         await self._reply(
             context,
-            chat.id,
+            chat_id,
             thread_id,
-            REPLY_REPO_BOUND.format(repo=repo, link=link, scope=_scope(thread_id)),
+            REPLY_REPO_BOUND.format(repo=repo, link=link, scope=_scope(scope)),
         )
 
     async def on_subscribable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Toggle whether members may subscribe to this scope's digest (§21)."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         argument = ((context.args or [""])[0]).lower()
         if argument not in {"on", "off"}:
-            await self._reply(context, chat.id, thread_id, REPLY_SUBSCRIBABLE_USAGE)
+            await self._reply(context, chat_id, thread_id, REPLY_SUBSCRIBABLE_USAGE)
             return
         try:
             if argument == "on":
                 code = mint_subscribe_code()
-                await self.directory.set_subscribe_code(chat.id, thread_id, code)
+                await self.directory.set_subscribe_code(scope, code)
                 link = f"https://t.me/{context.bot.username}?start=sub_{code}"
-                reply = REPLY_SUBSCRIBABLE_ON.format(scope=_scope(thread_id), link=link)
+                reply = REPLY_SUBSCRIBABLE_ON.format(scope=_scope(scope), link=link)
             else:
-                await self.directory.set_subscribe_code(chat.id, thread_id, None)
-                reply = REPLY_SUBSCRIBABLE_OFF.format(scope=_scope(thread_id))
+                await self.directory.set_subscribe_code(scope, None)
+                reply = REPLY_SUBSCRIBABLE_OFF.format(scope=_scope(scope))
             log_event("profile_update", "ok")
         except StorageError:
             reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat.id, thread_id, reply)
+        await self._reply(context, chat_id, thread_id, reply)
 
     async def on_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Discard this group's stored API token."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         if self.vault is None:
-            await self._reply(context, chat.id, thread_id, REPLY_SELF_SERVICE_OFF)
+            await self._reply(context, chat_id, thread_id, REPLY_SELF_SERVICE_OFF)
             return
         try:
-            await self.vault.delete_token(chat.id, thread_id)
+            await self.vault.delete_token(scope)
         except StorageError:
-            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
+            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("token_revoked", "ok")
-        await self._reply(context, chat.id, thread_id, REPLY_PAT_REVOKED)
+        await self._reply(context, chat_id, thread_id, REPLY_PAT_REVOKED)
 
     async def on_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch this (group, topic)'s rule-driven notifications on or off.
@@ -375,55 +384,53 @@ class AdminHandlers:
         rules when none exist, so it works out of the box; the rules
         themselves decide what is delivered.
         """
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         argument = (context.args or [""])[0].lower()
         if argument not in {"on", "off"}:
-            await self._reply(context, chat.id, thread_id, REPLY_EVENTS_USAGE)
+            await self._reply(context, chat_id, thread_id, REPLY_EVENTS_USAGE)
             return
         try:
-            reply = await self._toggle_events(chat.id, thread_id, enabled=argument == "on")
+            reply = await self._toggle_events(scope, enabled=argument == "on")
         except StorageError:
             reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat.id, thread_id, reply)
+        await self._reply(context, chat_id, thread_id, reply)
 
-    async def _toggle_events(self, chat_id: int, thread_id: int, *, enabled: bool) -> str:
+    async def _toggle_events(self, scope: Scope, *, enabled: bool) -> str:
         if not enabled:
-            await self.directory.set_events(chat_id, thread_id, enabled=False)
+            await self.directory.set_events(scope, enabled=False)
             log_event("profile_update", "ok")
             return REPLY_EVENTS_SET.format(state="off")
-        own = await self.directory.profile_of(chat_id, thread_id)
+        own = await self.directory.profile_of(scope)
         if not own.repo:
             # A topic that only inherits the group repo can't get its own
             # notifications — the notifier polls per bound-repo row.
             return REPLY_EVENTS_NEED_REPO
         seed = tuple(parse_rule(spec) for spec in DEFAULT_RULES)
-        seeded = await self.directory.enable_events(chat_id, thread_id, seed)
+        seeded = await self.directory.enable_events(scope, seed)
         log_event("profile_update", "ok")
         return REPLY_EVENTS_SEEDED if seeded else REPLY_EVENTS_SET.format(state="on")
 
     async def on_capture(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch this scope's message capture on/off, or erase its archive."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         args = list(context.args or [""])
         argument = args[0].lower() if args else ""
         before = _parse_before(args[1] if len(args) > 1 else "")
         if argument not in {"on", "off", "purge"} or before is _BAD_DATE:
-            await self._reply(context, chat.id, thread_id, REPLY_CAPTURE_USAGE)
+            await self._reply(context, chat_id, thread_id, REPLY_CAPTURE_USAGE)
             return
         archive, service = self.archive, self.capture_service
         if archive is None or service is None:
-            await self._reply(context, chat.id, thread_id, REPLY_CAPTURE_OFF_DEPLOY)
+            await self._reply(context, chat_id, thread_id, REPLY_CAPTURE_OFF_DEPLOY)
             return
         try:
-            reply = await self._apply_capture(
-                chat.id, thread_id, argument, archive, service, before
-            )
+            reply = await self._apply_capture(scope, argument, archive, service, before)
         except StorageError:
             if argument == "off":
                 # The durable disable never landed. Tombstone the scope so
@@ -432,226 +439,219 @@ class AdminHandlers:
                 # recovers — mirroring the channel-demotion path. `on`
                 # already fails safe (stays off) and `purge` touches no
                 # consent, so only `off` needs this.
-                service.deny_scope(chat.id, thread_id)
+                service.deny_scope(scope)
             reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat.id, thread_id, reply)
+        await self._reply(context, chat_id, thread_id, reply)
 
-    async def _apply_capture(  # noqa: PLR0913 -- one narrowed dependency per argument
+    async def _apply_capture(
         self,
-        chat_id: int,
-        thread_id: int,
+        scope: Scope,
         argument: str,
         archive: MessageArchive,
         service: CaptureService,
         before: datetime | None,
     ) -> str:
-        scope = _scope(thread_id)
+        label = _scope(scope)
         if argument == "purge":
-            count = await archive.purge(chat_id, thread_id, before)
+            count = await archive.purge(scope, before)
             log_event("capture_purge", "ok")
-            return REPLY_CAPTURE_PURGED.format(scope=scope, count=count)
+            return REPLY_CAPTURE_PURGED.format(scope=label, count=count)
         enabled = argument == "on"
-        await self.directory.set_capture(chat_id, thread_id, enabled=enabled)
-        service.forget_scope(chat_id, thread_id)
+        await self.directory.set_capture(scope, enabled=enabled)
+        service.forget_scope(scope)
         self.counters.increment("profiles_configured")
         log_event("profile_update", "ok")
         if enabled:
             # The confirmation *is* the permanent in-chat announcement.
-            return CAPTURE_ANNOUNCEMENT.format(scope=scope)
-        return REPLY_CAPTURE_DISABLED.format(scope=scope)
+            return CAPTURE_ANNOUNCEMENT.format(scope=label)
+        return REPLY_CAPTURE_DISABLED.format(scope=label)
 
     async def on_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or list this scope's scheduled actions (v3 phase 4)."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         actions, clock = self.actions, self.clock
         if actions is None or clock is None:
-            await self._reply(context, chat.id, thread_id, REPLY_ACTIONS_OFF_DEPLOY)
+            await self._reply(context, chat_id, thread_id, REPLY_ACTIONS_OFF_DEPLOY)
             return
         args = list(context.args or ())
         sub = args[0].lower() if args else ""
         try:
             if sub == "add" and len(args) > 1:
-                reply = await self._action_add(chat.id, thread_id, args[1:], actions, clock)
+                reply = await self._action_add(scope, args[1:], actions, clock)
             elif sub == "remove" and len(args) == 2:  # noqa: PLR2004 -- "remove <id>"
-                reply = await self._action_remove(chat.id, thread_id, args[1], actions)
+                reply = await self._action_remove(scope, args[1], actions)
             elif sub == "list":
-                reply = await self._action_list(chat.id, thread_id, actions)
+                reply = await self._action_list(scope, actions)
             else:
                 reply = REPLY_ACTION_USAGE
         except StorageError:
             reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat.id, thread_id, reply)
+        await self._reply(context, chat_id, thread_id, reply)
 
     async def _action_add(
-        self, chat_id: int, thread_id: int, tokens: list[str], actions: ActionStore, clock: Clock
+        self, scope: Scope, tokens: list[str], actions: ActionStore, clock: Clock
     ) -> str:
         try:
             spec = parse_action(" ".join(tokens), now_iso=clock.now().isoformat())
         except ActionParseError as error:
             return str(error)
-        current = await actions.get_actions(chat_id, thread_id)
+        current = await actions.get_actions(scope)
         if len(current) >= MAX_ACTIONS:
-            return REPLY_ACTIONS_FULL.format(max=MAX_ACTIONS, scope=_scope(thread_id))
-        await actions.set_actions(chat_id, thread_id, (*current, spec))
+            return REPLY_ACTIONS_FULL.format(max=MAX_ACTIONS, scope=_scope(scope))
+        await actions.set_actions(scope, (*current, spec))
         self.counters.increment("actions_configured")
         log_event("profile_update", "ok")
-        return REPLY_ACTION_ADDED.format(scope=_scope(thread_id), desc=describe_action(spec))
+        return REPLY_ACTION_ADDED.format(scope=_scope(scope), desc=describe_action(spec))
 
-    async def _action_remove(
-        self, chat_id: int, thread_id: int, action_id: str, actions: ActionStore
-    ) -> str:
-        current = await actions.get_actions(chat_id, thread_id)
+    async def _action_remove(self, scope: Scope, action_id: str, actions: ActionStore) -> str:
+        current = await actions.get_actions(scope)
         kept = tuple(spec for spec in current if spec.action_id != action_id)
         if len(kept) == len(current):
-            return REPLY_ACTION_UNKNOWN.format(id=action_id, scope=_scope(thread_id))
-        await actions.set_actions(chat_id, thread_id, kept)
+            return REPLY_ACTION_UNKNOWN.format(id=action_id, scope=_scope(scope))
+        await actions.set_actions(scope, kept)
         log_event("profile_update", "ok")
-        return REPLY_ACTION_REMOVED.format(id=action_id, scope=_scope(thread_id))
+        return REPLY_ACTION_REMOVED.format(id=action_id, scope=_scope(scope))
 
-    async def _action_list(self, chat_id: int, thread_id: int, actions: ActionStore) -> str:
-        current = await actions.get_actions(chat_id, thread_id)
+    async def _action_list(self, scope: Scope, actions: ActionStore) -> str:
+        current = await actions.get_actions(scope)
         if not current:
-            return REPLY_ACTIONS_NONE.format(scope=_scope(thread_id))
+            return REPLY_ACTIONS_NONE.format(scope=_scope(scope))
         lines = "\n".join(describe_action(spec) for spec in current)
-        return REPLY_ACTIONS_LIST.format(scope=_scope(thread_id), lines=lines)
+        return REPLY_ACTIONS_LIST.format(scope=_scope(scope), lines=lines)
 
     async def on_llm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show, set, or reset this scope's LLM settings (v3 §2.4)."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         defaults = self.llm_defaults
         if defaults is None:
-            await self._reply(context, chat.id, thread_id, REPLY_LLM_OFF_DEPLOY)
+            await self._reply(context, chat_id, thread_id, REPLY_LLM_OFF_DEPLOY)
             return
         args = list(context.args or ())
         sub = args[0].lower() if args else ""
         try:
             if sub == "show":
-                reply = await self._llm_show(chat.id, thread_id, defaults)
+                reply = await self._llm_show(scope, defaults)
             elif sub == "set" and len(args) > 1:
-                reply = await self._llm_set(chat.id, thread_id, args[1:], defaults)
+                reply = await self._llm_set(scope, args[1:], defaults)
             elif sub == "reset":
-                await self.directory.set_llm(chat.id, thread_id, None)
+                await self.directory.set_llm(scope, None)
                 log_event("profile_update", "ok")
-                reply = REPLY_LLM_RESET.format(scope=_scope(thread_id))
+                reply = REPLY_LLM_RESET.format(scope=_scope(scope))
             else:
                 reply = REPLY_LLM_USAGE
         except StorageError:
             reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat.id, thread_id, reply)
+        await self._reply(context, chat_id, thread_id, reply)
 
-    async def _effective_llm(
-        self, chat_id: int, thread_id: int, defaults: LlmSettings
-    ) -> tuple[LlmSettings, str]:
+    async def _effective_llm(self, scope: Scope, defaults: LlmSettings) -> tuple[LlmSettings, str]:
         """Resolve topic override → group default → deployment defaults."""
-        own = await self.directory.profile_of(chat_id, thread_id)
+        own = await self.directory.profile_of(scope)
         if own.llm:
             return own.llm, "set for this scope"
-        if thread_id:
-            group = await self.directory.profile_of(chat_id, 0)
+        if scope.thread:
+            group = await self.directory.profile_of(replace(scope, thread=""))
             if group.llm:
                 return group.llm, "inherited from the group"
         return defaults, "deployment defaults"
 
-    async def _llm_show(self, chat_id: int, thread_id: int, defaults: LlmSettings) -> str:
-        settings, origin = await self._effective_llm(chat_id, thread_id, defaults)
+    async def _llm_show(self, scope: Scope, defaults: LlmSettings) -> str:
+        settings, origin = await self._effective_llm(scope, defaults)
         return REPLY_LLM_SHOW.format(
-            scope=_scope(thread_id), origin=origin, line=describe_llm(settings)
+            scope=_scope(scope), origin=origin, line=describe_llm(settings)
         )
 
-    async def _llm_set(
-        self, chat_id: int, thread_id: int, tokens: list[str], defaults: LlmSettings
-    ) -> str:
+    async def _llm_set(self, scope: Scope, tokens: list[str], defaults: LlmSettings) -> str:
         # Partial edits build on what the scope actually runs with — for
         # a topic that inherits, that's the group settings, not the
         # deployment defaults (otherwise `set temp:0.4` would silently
         # reset an inherited model/lang).
-        base, _ = await self._effective_llm(chat_id, thread_id, defaults)
+        base, _ = await self._effective_llm(scope, defaults)
         try:
             settings = parse_llm_args(" ".join(tokens), base, self.llm_max_tokens_ceiling)
         except LlmParseError as error:
             return str(error)
-        await self.directory.set_llm(chat_id, thread_id, settings)
+        await self.directory.set_llm(scope, settings)
         log_event("profile_update", "ok")
-        return REPLY_LLM_SET.format(scope=_scope(thread_id), line=describe_llm(settings))
+        return REPLY_LLM_SET.format(scope=_scope(scope), line=describe_llm(settings))
 
     async def on_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or clear this (group, topic)'s composable event rules."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         args = list(context.args or ())
         sub = args[0].lower() if args else ""
         try:
             if sub == "add":
-                reply = await self._rule_add(chat.id, thread_id, args[1:])
+                reply = await self._rule_add(scope, args[1:])
             elif sub == "remove" and len(args) == 2:  # noqa: PLR2004 -- "remove <id>"
-                reply = await self._rule_remove(chat.id, thread_id, args[1])
+                reply = await self._rule_remove(scope, args[1])
             elif sub == "clear":
-                reply = await self._rule_clear(chat.id, thread_id)
+                reply = await self._rule_clear(scope)
             else:
                 reply = REPLY_RULE_USAGE
         except StorageError:
             reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat.id, thread_id, reply)
+        await self._reply(context, chat_id, thread_id, reply)
 
-    async def _rule_add(self, chat_id: int, thread_id: int, tokens: list[str]) -> str:
+    async def _rule_add(self, scope: Scope, tokens: list[str]) -> str:
         try:
             rule = parse_rule(" ".join(tokens))
         except RuleParseError as error:
             return str(error)
         try:
-            await self.directory.add_rule(chat_id, thread_id, rule)
+            await self.directory.add_rule(scope, rule)
         except TooManyRulesError:
-            return REPLY_RULES_FULL.format(max=MAX_RULES, scope=_scope(thread_id))
+            return REPLY_RULES_FULL.format(max=MAX_RULES, scope=_scope(scope))
         log_event("profile_update", "ok")
-        return REPLY_RULE_ADDED.format(scope=_scope(thread_id), desc=describe_rule(rule))
+        return REPLY_RULE_ADDED.format(scope=_scope(scope), desc=describe_rule(rule))
 
-    async def _rule_remove(self, chat_id: int, thread_id: int, rule_id: str) -> str:
-        if not await self.directory.remove_rule(chat_id, thread_id, rule_id):
-            return REPLY_RULE_UNKNOWN.format(id=rule_id, scope=_scope(thread_id))
+    async def _rule_remove(self, scope: Scope, rule_id: str) -> str:
+        if not await self.directory.remove_rule(scope, rule_id):
+            return REPLY_RULE_UNKNOWN.format(id=rule_id, scope=_scope(scope))
         log_event("profile_update", "ok")
-        return REPLY_RULE_REMOVED.format(id=rule_id, scope=_scope(thread_id))
+        return REPLY_RULE_REMOVED.format(id=rule_id, scope=_scope(scope))
 
-    async def _rule_clear(self, chat_id: int, thread_id: int) -> str:
-        count = await self.directory.clear_rules(chat_id, thread_id)
+    async def _rule_clear(self, scope: Scope) -> str:
+        count = await self.directory.clear_rules(scope)
         log_event("profile_update", "ok")
-        return REPLY_RULES_CLEARED.format(count=count, scope=_scope(thread_id))
+        return REPLY_RULES_CLEARED.format(count=count, scope=_scope(scope))
 
     async def on_rules(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List this (group, topic)'s event rules with their ids."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         try:
-            rules = await self.directory.list_rules(chat.id, thread_id)
+            rules = await self.directory.list_rules(scope)
         except StorageError:
             text = REPLY_STORAGE_DOWN
         else:
             if rules:
                 lines = "\n".join(describe_rule(rule) for rule in rules)
-                text = REPLY_RULES_LIST.format(scope=_scope(thread_id), lines=lines)
+                text = REPLY_RULES_LIST.format(scope=_scope(scope), lines=lines)
             else:
-                text = REPLY_RULES_NONE.format(scope=_scope(thread_id))
-        await self._reply(context, chat.id, thread_id, text)
+                text = REPLY_RULES_NONE.format(scope=_scope(scope))
+        await self._reply(context, chat_id, thread_id, text)
 
     async def on_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show this group's effective configuration."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
-        settings = await self.directory.resolve(chat.id, thread_id)
-        own = await self.directory.profile_of(chat.id, thread_id)
+        chat_id, thread_id = _target(scope)
+        settings = await self.directory.resolve(scope)
+        own = await self.directory.profile_of(scope)
         text = SETTINGS_TEMPLATE.format(
-            scope=_scope(thread_id),
+            scope=_scope(scope),
             customized="" if settings.customized else " (all defaults)",
             log_page=self.page_url_for(settings.log_page),
             consent=settings.consent_mode.value,
@@ -660,21 +660,21 @@ class AdminHandlers:
             events=(f"on ({len(own.rules)} rule(s))" if own.events_enabled else "off"),
             capture="on" if own.capture_enabled else "off",
         )
-        await self._reply(context, chat.id, thread_id, text)
+        await self._reply(context, chat_id, thread_id, text)
 
     async def on_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Forget this group's profile entirely."""
-        resolved = await self._admin_chat(update, context)
-        if resolved is None:
+        scope = await self._admin_chat(update, context)
+        if scope is None:
             return
-        chat, thread_id = resolved
+        chat_id, thread_id = _target(scope)
         try:
-            await self.directory.reset(chat.id, thread_id)
+            await self.directory.reset(scope)
         except StorageError:
-            await self._reply(context, chat.id, thread_id, REPLY_STORAGE_DOWN)
+            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
             return
         log_event("profile_reset", "ok")
-        await self._reply(context, chat.id, thread_id, REPLY_RESET.format(scope=_scope(thread_id)))
+        await self._reply(context, chat_id, thread_id, REPLY_RESET.format(scope=_scope(scope)))
 
     @staticmethod
     async def _reply(
@@ -682,15 +682,13 @@ class AdminHandlers:
     ) -> None:
         await send_threaded(context.bot, chat_id, thread_id, text)
 
-    async def _admin_chat(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> tuple[Chat, int] | None:
-        """Return (group chat, topic) when the sender is one of its admins."""
+    async def _admin_chat(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> Scope | None:
+        """Return the addressed :class:`Scope` when the sender is a group admin."""
         chat = update.effective_chat
         message = update.effective_message
         if chat is None or message is None or chat.type not in GROUP_TYPES:
             return None
-        if not self.groups.is_allowed(chat.id):
+        if not self.groups.is_allowed(group_scope(chat.id)):
             return None  # unlisted groups get silence, same as /log
         if not self.directory.self_service_enabled:
             # v1 deployment: stay silent (and skip the getChatMember
@@ -702,4 +700,4 @@ class AdminHandlers:
         if user is None or not await is_group_admin(context.bot, chat.id, user.id):
             await self._reply(context, chat.id, thread_id, REPLY_NOT_ADMIN)
             return None
-        return chat, thread_id
+        return scope_of(update)

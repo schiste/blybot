@@ -7,11 +7,19 @@ from telegram import Update
 
 from blybot.adapters.telegram import subscribe as sub
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
-from blybot.domain.models import GroupProfile, Schedule
+from blybot.domain.models import GroupProfile, Schedule, Scope
 from blybot.domain.subscriptions import Subscription
 from blybot.services.subscriptions import SubscriptionBinding
 from tests import tg
 from tests.fakes import FakeClock, InMemoryProfiles, InMemorySubscriptions
+
+
+def gscope(chat_id: int, thread_id: int = 0) -> Scope:
+    return Scope("telegram", str(chat_id), str(thread_id) if thread_id else "")
+
+
+def dmscope(chat_id: int) -> Scope:
+    return Scope("telegram", str(chat_id))
 
 
 def make() -> (
@@ -32,17 +40,17 @@ def dm(text: str = "/x") -> Update:
 
 async def test_redeem_valid_code_arms_and_prompts() -> None:
     handlers, profiles, _subs, binding = make()
-    await profiles.upsert(GroupProfile(chat_id=-100, thread_id=0, subscribe_code="code123"))
+    await profiles.upsert(GroupProfile(scope=gscope(-100), subscribe_code="code123"))
     context, bot = tg.make_context()
-    await handlers.redeem_link(context, dm_chat_id=777, code="code123")
-    assert binding.pending_target(777) == (-100, 0)
+    await handlers.redeem_link(context, dmscope(777), "code123")
+    assert binding.pending_target(dmscope(777)) == gscope(-100)
     assert "subscribing" in tg.sent_texts(bot)[0].lower()
 
 
 async def test_redeem_invalid_code_is_refused() -> None:
     handlers, _profiles, _subs, _binding = make()
     context, bot = tg.make_context()
-    await handlers.redeem_link(context, dm_chat_id=777, code="nope")
+    await handlers.redeem_link(context, dmscope(777), "nope")
     assert tg.sent_texts(bot) == [sub.REPLY_LINK_INVALID]
 
 
@@ -50,7 +58,7 @@ async def test_redeem_reports_storage_outage() -> None:
     handlers, profiles, _subs, _binding = make()
     profiles.fail = True
     context, bot = tg.make_context()
-    await handlers.redeem_link(context, dm_chat_id=777, code="code123")
+    await handlers.redeem_link(context, dmscope(777), "code123")
     assert tg.sent_texts(bot) == [sub.REPLY_STORAGE_DOWN]
 
 
@@ -63,19 +71,19 @@ async def test_subscribe_without_a_tapped_link_explains() -> None:
 
 async def test_subscribe_creates_the_subscription() -> None:
     handlers, _profiles, subs, binding = make()
-    binding.open_entry(dm_chat_id=777, chat_id=-100, thread_id=0)
+    binding.open_entry(dmscope(777), gscope(-100))
     context, bot = tg.make_context(args=["daily@09:00", "stats"])
     await handlers.on_subscribe(dm(), context)
     (created,) = list(subs.subs.values())
-    assert (created.dm_chat_id, created.chat_id, created.recipe) == (777, -100, "stats")
+    assert (created.dm.channel, created.scope.channel, created.recipe) == ("777", "-100", "stats")
     assert created.schedule.token == "daily@09:00"  # noqa: S105 -- schedule token
-    assert binding.pending_target(777) is None  # consumed
+    assert binding.pending_target(dmscope(777)) is None  # consumed
     assert tg.sent_texts(bot)[0].startswith("Subscribed [")
 
 
 async def test_subscribe_rejects_bad_options() -> None:
     handlers, _profiles, subs, binding = make()
-    binding.open_entry(dm_chat_id=777, chat_id=-100, thread_id=0)
+    binding.open_entry(dmscope(777), gscope(-100))
     context, bot = tg.make_context(args=["gibberish@nope"])
     await handlers.on_subscribe(dm(), context)
     assert subs.subs == {}
@@ -84,7 +92,7 @@ async def test_subscribe_rejects_bad_options() -> None:
 
 async def test_subscribe_reports_storage_outage() -> None:
     handlers, _profiles, subs, binding = make()
-    binding.open_entry(dm_chat_id=777, chat_id=-100, thread_id=0)
+    binding.open_entry(dmscope(777), gscope(-100))
     subs.fail = True
     context, bot = tg.make_context()
     await handlers.on_subscribe(dm(), context)
@@ -149,9 +157,8 @@ async def test_commands_ignore_updates_without_a_chat(method: str) -> None:
 def _a_sub(sub_id: str, dm: int) -> Subscription:
     return Subscription(
         sub_id=sub_id,
-        dm_chat_id=dm,
-        chat_id=-100,
-        thread_id=0,
+        dm=dmscope(dm),
+        scope=gscope(-100),
         schedule=Schedule(kind="daily", hour=8),
         recipe="summarize",
         lang="en",

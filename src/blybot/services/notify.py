@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import (
-    ActionScope,
     ActionSpec,
     DeliveryMode,
     OutboundMessage,
@@ -66,10 +65,10 @@ class RepoEventsSource:
 
     async def fetch(self, context: ActionContext) -> RepoEventsBatch | None:
         """Return the scope's fresh events with the rules to match them against."""
-        profile = await self.store.get(context.scope.chat_id, context.scope.thread_id)
+        profile = await self.store.get(context.scope)
         if profile is None or not profile.repo or not profile.rules:
             return None
-        token = await self.vault.fetch_token(profile.chat_id, profile.thread_id)
+        token = await self.vault.fetch_token(profile.scope)
         if not token:
             return None
         events = await self._poll(profile, profile.repo, token)
@@ -78,7 +77,7 @@ class RepoEventsSource:
         return RepoEventsBatch(repo=profile.repo, rules=profile.rules, events=tuple(events))
 
     async def _poll(self, profile: GroupProfile, repo: str, token: str) -> list[RepoEvent]:
-        cursors = await self.store.get_cursors(profile.chat_id, profile.thread_id)
+        cursors = await self.store.get_cursors(profile.scope)
         collected: list[RepoEvent] = []
         changed = False
         for resource in sorted(resources_for(profile.rules), key=lambda item: item.value):
@@ -89,7 +88,7 @@ class RepoEventsSource:
                 cursors[resource.value] = new_cursor
                 changed = True
         if changed:
-            await self.store.set_cursors(profile.chat_id, profile.thread_id, cursors, repo)
+            await self.store.set_cursors(profile.scope, cursors, repo)
         return collected
 
 
@@ -144,12 +143,7 @@ class ChatMessagesSink:
         if not (isinstance(payload, tuple) and all(isinstance(line, str) for line in payload)):
             msg = "the chat sink needs a tuple of message lines to send"
             raise ActionError(msg)
-        return tuple(
-            OutboundMessage(
-                chat_id=context.scope.chat_id, thread_id=context.scope.thread_id, text=line
-            )
-            for line in payload
-        )
+        return tuple(OutboundMessage(scope=context.scope, text=line) for line in payload)
 
 
 @dataclass(eq=False)
@@ -180,11 +174,10 @@ class RepoNotifier:
             profiles = (profiles[start:] + profiles[:start])[: self.max_groups_per_tick]
         messages: list[OutboundMessage] = []
         for profile in profiles:
-            if not self.groups.is_allowed(profile.chat_id):
+            if not self.groups.is_allowed(profile.scope):
                 continue  # never push into groups the operator excluded
-            scope = ActionScope(chat_id=profile.chat_id, thread_id=profile.thread_id)
             try:
-                outcome = await self.engine.run(scope, REPO_DIGEST_ACTION)
+                outcome = await self.engine.run(profile.scope, REPO_DIGEST_ACTION)
                 messages.extend(outcome.messages)
             except Exception:
                 # Per-scope isolation boundary: a broken repo, missing

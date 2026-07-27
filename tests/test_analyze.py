@@ -9,13 +9,13 @@ import pytest
 
 from blybot.domain.models import (
     ActionContext,
-    ActionScope,
     AnalysisReport,
     CapturedMessage,
     ConsentMode,
     GroupProfile,
     LlmSettings,
     PromptResult,
+    Scope,
     StatsReport,
     StepSpec,
     Transcript,
@@ -42,13 +42,12 @@ from tests.fakes import (
 )
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
-SCOPE = ActionScope(chat_id=-1)
+SCOPE = Scope("telegram", "-1")
 
 
 def msg(message_id: int, text: str = "hello", **extra: object) -> CapturedMessage:
     return CapturedMessage(
-        chat_id=-1,
-        thread_id=0,
+        scope=Scope("telegram", "-1"),
         message_id=message_id,
         posted_at=extra.pop("posted_at", NOW - timedelta(minutes=message_id)),  # type: ignore[arg-type]
         author=extra.pop("author", "abc123"),  # type: ignore[arg-type]
@@ -113,7 +112,7 @@ async def test_source_reads_the_scope_window_and_is_quiet_when_empty() -> None:
     assert payload.until == NOW
 
     empty = await source.fetch(
-        ActionContext(scope=ActionScope(chat_id=-9), spec=context().spec, now=NOW)
+        ActionContext(scope=Scope("telegram", "-9"), spec=context().spec, now=NOW)
     )
     assert empty is None
 
@@ -270,7 +269,10 @@ async def test_unknown_template_and_payload_fail_with_admin_messages() -> None:
 async def test_scope_settings_and_step_params_override_defaults() -> None:
     store = InMemoryProfiles()
     await store.upsert(
-        GroupProfile(chat_id=-1, llm=LlmSettings(model="large", lang="fr", temperature=0.7))
+        GroupProfile(
+            scope=Scope("telegram", "-1"),
+            llm=LlmSettings(model="large", lang="fr", temperature=0.7),
+        )
     )
     runner = FakePromptRunner(results=[PromptResult(content='["oui"]')])
     transform, _counters = make_transform(runner, store=store)
@@ -289,11 +291,13 @@ async def test_scope_settings_and_step_params_override_defaults() -> None:
 
 async def test_topic_without_its_own_settings_inherits_the_group_default() -> None:
     store = InMemoryProfiles()
-    await store.upsert(GroupProfile(chat_id=-1, llm=LlmSettings(model="large", lang="fr")))
-    await store.upsert(GroupProfile(chat_id=-1, thread_id=7))  # topic row, no /llm
+    await store.upsert(
+        GroupProfile(scope=Scope("telegram", "-1"), llm=LlmSettings(model="large", lang="fr"))
+    )
+    await store.upsert(GroupProfile(scope=Scope("telegram", "-1", "7")))  # topic row, no /llm
     runner = FakePromptRunner(results=[PromptResult(content='["oui"]')])
     transform, _counters = make_transform(runner, store=store)
-    topic = ActionContext(scope=ActionScope(chat_id=-1, thread_id=7), spec=context().spec, now=NOW)
+    topic = ActionContext(scope=Scope("telegram", "-1", "7"), spec=context().spec, now=NOW)
 
     report = await transform.apply(topic, prompt_step(), transcript(msg(1)))
 
@@ -368,8 +372,8 @@ async def test_stats_are_computed_deterministically() -> None:
 
 
 def make_wiki_sink(publisher: FakePublisher) -> WikiSectionSink:
-    async def resolve_page(chat_id: int, thread_id: int, override: str | None = None) -> str:
-        del chat_id, thread_id
+    async def resolve_page(scope: Scope, override: str | None = None) -> str:
+        del scope
         return override or "Meta:Resolved log"
 
     return WikiSectionSink(
@@ -458,7 +462,7 @@ async def test_telegram_sink_renders_and_bounds_the_reply() -> None:
     sink = TelegramReplySink()
 
     (message,) = await sink.deliver(context(), analysis_report())
-    assert message.chat_id == SCOPE.chat_id
+    assert message.scope == SCOPE
     assert "• point {{one}}" in message.text
 
     huge = analysis_report(items=tuple(f"item {i} " + "x" * 590 for i in range(10)))
@@ -503,10 +507,10 @@ async def test_page_policy_requires_an_explicit_page() -> None:
 
     # Unconfigured scope: refuse rather than use the operator default.
     with pytest.raises(ActionError, match="/setpage"):
-        await resolve(-1, 0, None)
+        await resolve(Scope("telegram", "-1"), None)
 
-    await directory.set_log_page(-1, 0, "WikiProject Foo")
-    assert await resolve(-1, 0, None) == "WikiProject Foo/Telegram logs"
+    await directory.set_log_page(Scope("telegram", "-1"), "WikiProject Foo")
+    assert await resolve(Scope("telegram", "-1"), None) == "WikiProject Foo/Telegram logs"
 
 
 async def test_page_override_goes_through_the_setpage_gate() -> None:
@@ -521,9 +525,11 @@ async def test_page_override_goes_through_the_setpage_gate() -> None:
 
     # A page= parameter is validated and pinned to the logs leaf — an
     # admin picks where the report lives, never a bare content page.
-    assert await resolve(-1, 0, "WikiProject Bar") == "WikiProject Bar/Telegram logs"
+    assert (
+        await resolve(Scope("telegram", "-1"), "WikiProject Bar") == "WikiProject Bar/Telegram logs"
+    )
     with pytest.raises(ActionError, match="not an allowed title"):
-        await resolve(-1, 0, "Bad|title")
+        await resolve(Scope("telegram", "-1"), "Bad|title")
 
     plain = ChannelDirectory(
         store=InMemoryProfiles(),
@@ -533,7 +539,7 @@ async def test_page_override_goes_through_the_setpage_gate() -> None:
         page_suffix="",  # page targeting disabled on this deployment
     )
     with pytest.raises(ActionError, match="aren't available"):
-        await explicit_page_resolver(plain)(-1, 0, "WikiProject Bar")
+        await explicit_page_resolver(plain)(Scope("telegram", "-1"), "WikiProject Bar")
 
 
 async def test_since_last_run_window_is_a_watermark() -> None:
@@ -586,7 +592,9 @@ async def test_injection_shaped_content_is_counted_not_gated() -> None:
 
 async def test_unknown_platform_fails_with_the_available_list() -> None:
     store = InMemoryProfiles()
-    await store.upsert(GroupProfile(chat_id=-1, llm=LlmSettings(platform="liftwing")))
+    await store.upsert(
+        GroupProfile(scope=Scope("telegram", "-1"), llm=LlmSettings(platform="liftwing"))
+    )
     transform, _counters = make_transform(FakePromptRunner(), store=store)
     transform.runners = {}  # a deployment with no platforms registered
 

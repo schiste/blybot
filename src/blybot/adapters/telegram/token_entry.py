@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from telegram import Update
     from telegram.ext import ContextTypes
 
+    from blybot.domain.models import Scope
     from blybot.domain.ports import RepoActions, TokenVault
     from blybot.observability import Counters
     from blybot.services.binding import TokenBinding
@@ -63,42 +64,41 @@ class TokenEntryHandler:
     vault: TokenVault | None
     counters: Counters
 
-    def claims_next_message(self, dm_chat_id: int) -> tuple[int, int] | None:
-        """The (group, topic) awaiting a token in this DM, if entry is armed."""
-        return self.binding.pending_target(dm_chat_id)
+    def claims_next_message(self, dm: Scope) -> Scope | None:
+        """The group scope awaiting a token in this DM, if entry is armed."""
+        return self.binding.pending_target(dm)
 
     async def redeem_link(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE, dm_chat_id: int, nonce: str
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE, dm: Scope, nonce: str
     ) -> None:
         """Validate a ``cfg_<nonce>`` deep link and arm the token prompt."""
         target = self.binding.peek_link(nonce)
         message = update.effective_message
         user = message.from_user if message else None
         if target is None:
-            await self._reply(context, dm_chat_id, REPLY_LINK_EXPIRED)
+            await self._reply(context, dm, REPLY_LINK_EXPIRED)
             return
-        group_chat_id, thread_id = target
-        if user is None or not await is_group_admin(context.bot, group_chat_id, user.id):
+        if user is None or not await is_group_admin(context.bot, int(target.channel), user.id):
             # Deliberately NOT consumed: a non-admin tapping the public
             # link must not burn it for the real admin.
-            await self._reply(context, dm_chat_id, REPLY_LINK_NOT_ADMIN)
+            await self._reply(context, dm, REPLY_LINK_NOT_ADMIN)
             return
         if self.binding.redeem_link(nonce) is None:  # consumed in a race
-            await self._reply(context, dm_chat_id, REPLY_LINK_EXPIRED)
+            await self._reply(context, dm, REPLY_LINK_EXPIRED)
             return
-        settings = await self.directory.resolve(group_chat_id, thread_id)
+        settings = await self.directory.resolve(target)
         if not settings.repo:
-            await self._reply(context, dm_chat_id, REPLY_PAT_NO_REPO)
+            await self._reply(context, dm, REPLY_PAT_NO_REPO)
             return
-        self.binding.open_entry(dm_chat_id, group_chat_id, thread_id)
+        self.binding.open_entry(dm, target)
         log_event("token_entry_opened", "ok")
-        await self._reply(context, dm_chat_id, REPLY_PAT_PROMPT.format(repo=settings.repo))
+        await self._reply(context, dm, REPLY_PAT_PROMPT.format(repo=settings.repo))
 
     async def accept_token(
         self,
         context: ContextTypes.DEFAULT_TYPE,
-        dm_chat_id: int,
-        target: tuple[int, int],
+        dm: Scope,
+        target: Scope,
         message_id: int,
         text: str,
     ) -> None:
@@ -106,33 +106,32 @@ class TokenEntryHandler:
         # Remove the pasted secret from the chat first — bots may delete
         # messages in private chats, so don't rely on the admin doing it.
         try:
-            await context.bot.delete_message(chat_id=dm_chat_id, message_id=message_id)
+            await context.bot.delete_message(chat_id=int(dm.channel), message_id=message_id)
         except TelegramError:
             log_event("command_cleanup", "ignored")
-        group_chat_id, thread_id = target
         if self.gateway is None or self.vault is None:
-            self.binding.close_entry(dm_chat_id)
-            await self._reply(context, dm_chat_id, REPLY_PAT_NO_REPO)
+            self.binding.close_entry(dm)
+            await self._reply(context, dm, REPLY_PAT_NO_REPO)
             return
-        settings = await self.directory.resolve(group_chat_id, thread_id)
+        settings = await self.directory.resolve(target)
         if not settings.repo:
-            self.binding.close_entry(dm_chat_id)
-            await self._reply(context, dm_chat_id, REPLY_PAT_NO_REPO)
+            self.binding.close_entry(dm)
+            await self._reply(context, dm, REPLY_PAT_NO_REPO)
             return
         token = text.strip()
         if not await self.gateway.validate_token(settings.repo, token):
-            await self._reply(context, dm_chat_id, REPLY_PAT_INVALID)  # stays armed for a retry
+            await self._reply(context, dm, REPLY_PAT_INVALID)  # stays armed for a retry
             return
         try:
-            await self.vault.store_token(group_chat_id, thread_id, token)
+            await self.vault.store_token(target, token)
         except StorageError:
-            await self._reply(context, dm_chat_id, REPLY_PAT_STORE_FAILED)  # stays armed
+            await self._reply(context, dm, REPLY_PAT_STORE_FAILED)  # stays armed
             return
-        self.binding.close_entry(dm_chat_id)
+        self.binding.close_entry(dm)
         self.counters.increment("tokens_bound")
         log_event("token_bound", "ok")
-        await self._reply(context, dm_chat_id, REPLY_PAT_SAVED)
+        await self._reply(context, dm, REPLY_PAT_SAVED)
 
     @staticmethod
-    async def _reply(context: ContextTypes.DEFAULT_TYPE, dm_chat_id: int, text: str) -> None:
-        await context.bot.send_message(chat_id=dm_chat_id, text=text)
+    async def _reply(context: ContextTypes.DEFAULT_TYPE, dm: Scope, text: str) -> None:
+        await context.bot.send_message(chat_id=int(dm.channel), text=text)

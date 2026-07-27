@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from blybot.domain.models import Pseudonym, Session, TimestampGranularity
+from blybot.domain.models import Pseudonym, Scope, Session, TimestampGranularity
 from blybot.domain.ports import WikiWriteError
 from blybot.services.sessions import SessionRegistry
 from blybot.services.transcribe import DmTranscriptionService
@@ -22,6 +22,10 @@ from tests.fakes import (
 
 TTL = timedelta(minutes=45)
 PAGE = "Meta talk:Community/Discussions"
+
+
+def dm(chat_id: int) -> Scope:
+    return Scope("telegram", str(chat_id))
 
 
 def make_service(
@@ -45,8 +49,8 @@ def make_service(
 async def test_messages_land_in_the_session_section_with_growing_indentation() -> None:
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock())
-    session = await service.record(chat_id=1, text="hello")
-    await service.record(chat_id=1, text="and then")
+    session = await service.record(dm(1), text="hello")
+    await service.record(dm(1), text="and then")
 
     # The first flush OPENS the session's section; later ones continue it.
     assert publisher.started == [
@@ -61,15 +65,15 @@ async def test_messages_land_in_the_session_section_with_growing_indentation() -
 async def test_sanitizer_runs_on_every_dm_line() -> None:
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock())
-    await service.record(chat_id=1, text="{{Delete}}")
+    await service.record(dm(1), text="{{Delete}}")
     assert "[sanitized]{{Delete}}" in publisher.started[0][2]
 
 
 async def test_burst_is_coalesced_into_one_edit_with_stepped_indentation() -> None:
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock(), debounce_seconds=0.05)
-    await service.record(chat_id=1, text="one")
-    await service.record(chat_id=1, text="two")
+    await service.record(dm(1), text="one")
+    await service.record(dm(1), text="two")
     assert publisher.started == []  # still inside the window
 
     await asyncio.sleep(0.1)
@@ -82,9 +86,9 @@ async def test_burst_is_coalesced_into_one_edit_with_stepped_indentation() -> No
 async def test_messages_after_a_flush_continue_the_same_discussion_deeper() -> None:
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock(), debounce_seconds=0.03)
-    await service.record(chat_id=1, text="one")
+    await service.record(dm(1), text="one")
     await asyncio.sleep(0.06)
-    await service.record(chat_id=1, text="two")
+    await service.record(dm(1), text="two")
     await asyncio.sleep(0.06)
 
     assert [entry[1] for entry in publisher.started] == ["Anon-1"]
@@ -95,8 +99,8 @@ async def test_messages_after_a_flush_continue_the_same_discussion_deeper() -> N
 async def test_concurrent_sessions_never_share_a_section() -> None:
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock())
-    await service.record(chat_id=1, text="from A")
-    await service.record(chat_id=2, text="from B")
+    await service.record(dm(1), text="from A")
+    await service.record(dm(2), text="from B")
     assert {entry[1] for entry in publisher.started} == {"Anon-1", "Anon-2"}
 
 
@@ -105,9 +109,9 @@ async def test_session_rollover_mid_buffer_splits_the_sections() -> None:
     publisher = FakePublisher()
     clock = FakeClock()
     service = make_service(publisher, clock, debounce_seconds=10)
-    await service.record(chat_id=1, text="before")
+    await service.record(dm(1), text="before")
     clock.advance(TTL)  # session expires inside the debounce window
-    await service.record(chat_id=1, text="after")
+    await service.record(dm(1), text="after")
     await service.flush_all()
 
     by_heading = {heading: text for (_, heading, text, _) in publisher.started}
@@ -119,7 +123,7 @@ async def test_session_rollover_mid_buffer_splits_the_sections() -> None:
 async def test_flush_all_drains_pending_buffers() -> None:
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock(), debounce_seconds=60)
-    await service.record(chat_id=1, text="pending")
+    await service.record(dm(1), text="pending")
     assert publisher.started == []
     await service.flush_all()
     assert len(publisher.started) == 1
@@ -130,24 +134,24 @@ async def test_flush_all_drains_pending_buffers() -> None:
 async def test_debounced_flush_failure_is_contained() -> None:
     """A failed background flush is logged, never raised into the handler."""
     service = make_service(FailingPublisher(), FakeClock(), debounce_seconds=0.02)
-    await service.record(chat_id=1, text="doomed")
+    await service.record(dm(1), text="doomed")
     await asyncio.sleep(0.05)  # the flusher task must swallow the error
 
 
 async def test_immediate_flush_failure_propagates() -> None:
     service = make_service(FailingPublisher(), FakeClock())
     with pytest.raises(WikiWriteError):
-        await service.record(chat_id=1, text="doomed")
+        await service.record(dm(1), text="doomed")
 
 
 def test_peek_reports_live_sessions_without_minting() -> None:
     clock = FakeClock()
     sessions = SessionRegistry(pseudonyms=SequentialPseudonyms(), clock=clock, ttl=TTL)
-    assert sessions.peek(chat_id=1) is None
-    minted = sessions.touch(chat_id=1)
-    assert sessions.peek(chat_id=1) == minted
+    assert sessions.peek(dm(1)) is None
+    minted = sessions.touch(dm(1))
+    assert sessions.peek(dm(1)) == minted
     clock.advance(TTL)
-    assert sessions.peek(chat_id=1) is None
+    assert sessions.peek(dm(1)) is None
 
 
 async def test_rollover_flush_failure_never_swallows_the_new_message() -> None:
@@ -166,9 +170,9 @@ async def test_rollover_flush_failure_never_swallows_the_new_message() -> None:
         debounce_seconds=60,
         timestamp_granularity=TimestampGranularity.NONE,
     )
-    await service.record(chat_id=1, text="before")
+    await service.record(dm(1), text="before")
     clock.advance(TTL)
-    await service.record(chat_id=1, text="after")  # rollover flush fails; must not raise
+    await service.record(dm(1), text="after")  # rollover flush fails; must not raise
     await service.flush_all()
 
     assert [entry[1] for entry in publisher.recorder.started] == ["Anon-2"]
@@ -177,15 +181,15 @@ async def test_rollover_flush_failure_never_swallows_the_new_message() -> None:
 
 async def test_flush_all_contains_write_failures() -> None:
     service = make_service(FailingPublisher(), FakeClock(), debounce_seconds=60)
-    await service.record(chat_id=1, text="pending")
+    await service.record(dm(1), text="pending")
     await service.flush_all()  # failure is logged, never raised at shutdown
 
 
 async def test_target_page_can_be_overridden_per_dm_session() -> None:
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock())
-    session = await service.record(chat_id=1, text="hello", target_page="Project/Telegram logs")
-    await service.record(chat_id=1, text="again", target_page="Project/Telegram logs")
+    session = await service.record(dm(1), text="hello", target_page="Project/Telegram logs")
+    await service.record(dm(1), text="again", target_page="Project/Telegram logs")
 
     assert publisher.started[0][0] == "Project/Telegram logs"
     assert publisher.continued[0][0] == "Project/Telegram logs"
@@ -195,8 +199,8 @@ async def test_target_page_can_be_overridden_per_dm_session() -> None:
 async def test_target_page_change_flushes_the_previous_buffer() -> None:
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock(), debounce_seconds=60)
-    await service.record(chat_id=1, text="one", target_page="A")
-    await service.record(chat_id=1, text="two", target_page="B")
+    await service.record(dm(1), text="one", target_page="A")
+    await service.record(dm(1), text="two", target_page="B")
     await service.flush_all()
 
     assert [entry[0] for entry in publisher.started] == ["A", "B"]
@@ -207,7 +211,7 @@ async def test_flush_of_an_unknown_chat_is_a_quiet_noop() -> None:
     was already drained by flush_all or a rollover."""
     publisher = FakePublisher()
     service = make_service(publisher, FakeClock())
-    await service._flush(chat_id=999)
+    await service._flush(dm(999))
     assert publisher.wrote_nothing
 
 
@@ -227,9 +231,9 @@ async def test_minute_granularity_headings_carry_session_start_time() -> None:
     clock = FakeClock()
     publisher = FakePublisher()
     service = make_service(publisher, clock, granularity=TimestampGranularity.MINUTE)
-    session = await service.record(chat_id=1, text="first")
+    session = await service.record(dm(1), text="first")
     clock.advance(timedelta(minutes=7))  # later burst, same session
-    await service.record(chat_id=1, text="second")
+    await service.record(dm(1), text="second")
 
     headings = [publisher.started[0][1], publisher.continued[0][1]]
     assert headings == ["2026-07-10 - 12:00 UTC : Anon-1"] * 2  # start time, not send time

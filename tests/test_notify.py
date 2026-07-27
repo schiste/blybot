@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from blybot.domain.models import EventType, GroupProfile, RepoEvent, Resource, Rule, RuleFilter
+from blybot.domain.models import (
+    EventType,
+    GroupProfile,
+    RepoEvent,
+    Resource,
+    Rule,
+    RuleFilter,
+    Scope,
+)
 from blybot.observability import Counters
 from blybot.services.engine import ActionEngine
 from blybot.services.notify import (
@@ -53,15 +61,16 @@ async def enable(
     *,
     primed: bool = True,
 ) -> None:
+    scope = Scope("telegram", str(chat_id))
     await store.upsert(
-        GroupProfile(chat_id=chat_id, repo="x/y", events_enabled=True, rules=_rules(*specs))
+        GroupProfile(scope=scope, repo="x/y", events_enabled=True, rules=_rules(*specs))
     )
     if token:
-        await store.store_token(chat_id, 0, token)
+        await store.store_token(scope, token)
     if primed:
         # A non-empty cursor per resource takes poll_resource off its
         # baseline so the fake returns its scripted events.
-        await store.set_cursors(chat_id, 0, {r.value: "seed" for r in Resource}, "x/y")
+        await store.set_cursors(scope, {r.value: "seed" for r in Resource}, "x/y")
 
 
 async def test_digest_carries_only_matching_events() -> None:
@@ -69,7 +78,7 @@ async def test_digest_carries_only_matching_events() -> None:
     gateway.events = [RELEASE, MERGE, ISSUE]
     await enable(store)  # release + pr.merged digest rules (issues never polled)
     (message,) = await make_notifier(store, gateway).collect()
-    chat_id, digest = message.chat_id, message.text
+    chat_id, digest = int(message.scope.channel), message.text
     assert chat_id == -1
     assert "Release 1.0" in digest
     assert "fix" in digest
@@ -106,7 +115,9 @@ async def test_first_poll_baselines_without_announcing() -> None:
     gateway.events = [RELEASE]
     await enable(store, specs=("release digest",), primed=False)  # no cursors yet
     assert await make_notifier(store, gateway).collect() == []
-    assert store.cursors[-1, 0] == {"releases": "releases|next"}  # baseline written
+    assert store.cursors[Scope("telegram", "-1")] == {
+        "releases": "releases|next"
+    }  # baseline written
 
 
 async def test_scopes_missing_token_repo_or_rules_are_skipped() -> None:
@@ -114,11 +125,18 @@ async def test_scopes_missing_token_repo_or_rules_are_skipped() -> None:
     gateway.events = [RELEASE]
     await enable(store, chat_id=-1, token=None)  # no token
     await store.upsert(
-        GroupProfile(chat_id=-2, repo=None, events_enabled=True, rules=_rules("release digest"))
+        GroupProfile(
+            scope=Scope("telegram", "-2"),
+            repo=None,
+            events_enabled=True,
+            rules=_rules("release digest"),
+        )
     )
-    await store.store_token(-2, 0, "ghp_ok")  # has token but no repo
-    await store.upsert(GroupProfile(chat_id=-3, repo="x/y", events_enabled=True))  # no rules
-    await store.store_token(-3, 0, "ghp_ok")
+    await store.store_token(Scope("telegram", "-2"), "ghp_ok")  # has token but no repo
+    await store.upsert(
+        GroupProfile(scope=Scope("telegram", "-3"), repo="x/y", events_enabled=True)
+    )  # no rules
+    await store.store_token(Scope("telegram", "-3"), "ghp_ok")
     assert await make_notifier(store, gateway).collect() == []
 
 
@@ -128,7 +146,7 @@ async def test_one_broken_scope_never_blocks_the_others() -> None:
     await enable(store, chat_id=-1, token="ghp_bad")  # noqa: S106 -- rejected by gateway
     await enable(store, chat_id=-2)
     (message,) = await make_notifier(store, gateway).collect()
-    chat_id = message.chat_id
+    chat_id = int(message.scope.channel)
     assert chat_id == -2
 
 
@@ -142,12 +160,14 @@ async def test_a_bad_stored_regex_in_one_scope_never_blocks_the_others() -> None
         trigger=EventType.RELEASE,
         filter=RuleFilter(title_match="[", title_is_regex=True),
     )
-    await store.upsert(GroupProfile(chat_id=-1, repo="x/y", events_enabled=True, rules=(bad,)))
-    await store.store_token(-1, 0, "ghp_ok")
-    await store.set_cursors(-1, 0, {r.value: "seed" for r in Resource}, "x/y")
+    await store.upsert(
+        GroupProfile(scope=Scope("telegram", "-1"), repo="x/y", events_enabled=True, rules=(bad,))
+    )
+    await store.store_token(Scope("telegram", "-1"), "ghp_ok")
+    await store.set_cursors(Scope("telegram", "-1"), {r.value: "seed" for r in Resource}, "x/y")
     await enable(store, chat_id=-2, specs=("release digest",))  # healthy scope
     (message,) = await make_notifier(store, gateway).collect()
-    chat_id = message.chat_id
+    chat_id = int(message.scope.channel)
     assert chat_id == -2  # the broken scope was isolated, the healthy one delivered
 
 
@@ -176,7 +196,7 @@ async def test_capped_fan_out_rotates_across_ticks() -> None:
 
     served: set[int] = set()
     for _ in range(3):  # ceil(5 / 2) ticks cover every scope
-        served.update(m.chat_id for m in await notifier.collect())
+        served.update(int(m.scope.channel) for m in await notifier.collect())
 
     assert served == {-5, -4, -3, -2, -1}  # nobody is permanently starved
 
@@ -204,9 +224,11 @@ async def test_unchanged_cursor_is_not_rewritten() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
     gateway.events = []
     await enable(store, specs=("release digest",), primed=False)
-    await store.set_cursors(-1, 0, {"releases": "releases|next"}, "x/y")  # already at head
+    await store.set_cursors(
+        Scope("telegram", "-1"), {"releases": "releases|next"}, "x/y"
+    )  # already at head
     assert await make_notifier(store, gateway).collect() == []
-    assert store.cursors[-1, 0] == {"releases": "releases|next"}
+    assert store.cursors[Scope("telegram", "-1")] == {"releases": "releases|next"}
 
 
 async def test_notifications_never_go_to_unlisted_groups() -> None:

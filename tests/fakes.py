@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 
 from blybot.domain.models import (
     ActionContext,
-    ActionScope,
     ActionSpec,
     CapturedMessage,
     GroupProfile,
@@ -18,6 +17,7 @@ from blybot.domain.models import (
     RepoEvent,
     RepoSummary,
     Resource,
+    Scope,
     StepSpec,
 )
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
@@ -150,11 +150,11 @@ class SequentialPseudonyms:
 
 @dataclass
 class InMemoryProfiles:
-    """ProfileStore + TokenVault keyed by (chat_id, thread_id)."""
+    """ProfileStore + TokenVault keyed by :class:`Scope`."""
 
-    profiles: dict[tuple[int, int], GroupProfile] = field(default_factory=dict)
-    tokens: dict[tuple[int, int], str] = field(default_factory=dict)
-    cursors: dict[tuple[int, int], dict[str, str]] = field(default_factory=dict)
+    profiles: dict[Scope, GroupProfile] = field(default_factory=dict)
+    tokens: dict[Scope, str] = field(default_factory=dict)
+    cursors: dict[Scope, dict[str, str]] = field(default_factory=dict)
     fail: bool = False
     fail_upserts: bool = False
     fail_token_writes: bool = False
@@ -164,13 +164,12 @@ class InMemoryProfiles:
         if self.fail:
             raise StorageError
 
-    async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
+    async def get(self, scope: Scope) -> GroupProfile | None:
         self._check()
-        key = (chat_id, thread_id)
-        profile = self.profiles.get(key)
+        profile = self.profiles.get(scope)
         if profile is None:
             return None
-        return replace(profile, has_token=key in self.tokens)
+        return replace(profile, has_token=scope in self.tokens)
 
     async def get_by_subscribe_code(self, code: str) -> GroupProfile | None:
         self._check()
@@ -183,14 +182,13 @@ class InMemoryProfiles:
         self._check()
         if self.fail_upserts:
             raise StorageError
-        self.profiles[profile.chat_id, profile.thread_id] = profile
+        self.profiles[profile.scope] = profile
 
-    async def delete(self, chat_id: int, thread_id: int) -> None:
+    async def delete(self, scope: Scope) -> None:
         self._check()
-        key = (chat_id, thread_id)
-        self.profiles.pop(key, None)
-        self.tokens.pop(key, None)
-        self.cursors.pop(key, None)
+        self.profiles.pop(scope, None)
+        self.tokens.pop(scope, None)
+        self.cursors.pop(scope, None)
 
     async def list_event_enabled(self) -> list[GroupProfile]:
         self._check()
@@ -204,45 +202,43 @@ class InMemoryProfiles:
         self._check()
         return [profile for profile in self.profiles.values() if profile.capture_enabled]
 
-    async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:
+    async def get_cursors(self, scope: Scope) -> dict[str, str]:
         self._check()
-        return dict(self.cursors.get((chat_id, thread_id), {}))
+        return dict(self.cursors.get(scope, {}))
 
-    async def set_cursors(
-        self, chat_id: int, thread_id: int, cursors: dict[str, str], repo: str = ""
-    ) -> None:
+    async def set_cursors(self, scope: Scope, cursors: dict[str, str], repo: str = "") -> None:
         self._check()
-        key = (chat_id, thread_id)
-        profile = self.profiles.get(key)
+        profile = self.profiles.get(scope)
         if repo and (profile is None or profile.repo != repo):
             return  # repo guard: stale in-flight cursor writes are dropped
-        self.cursors[key] = dict(cursors)
+        self.cursors[scope] = dict(cursors)
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+    async def migrate(self, old: Scope, new: Scope) -> None:
         self._check()
-        for mapping in (self.profiles, self.tokens, self.cursors):
-            for chat_id, thread_id in list(mapping):
-                if chat_id == old_chat_id:
-                    value = mapping.pop((chat_id, thread_id))
-                    if isinstance(value, GroupProfile):
-                        value = replace(value, chat_id=new_chat_id)
-                    mapping[new_chat_id, thread_id] = value  # type: ignore[assignment]
+        for key in list(self.profiles):
+            if key.channel == old.channel:
+                moved = replace(key, channel=new.channel)
+                self.profiles[moved] = replace(self.profiles.pop(key), scope=moved)
+        for mapping in (self.tokens, self.cursors):
+            for key in list(mapping):
+                if key.channel == old.channel:
+                    mapping[replace(key, channel=new.channel)] = mapping.pop(key)  # type: ignore[assignment]
 
-    async def store_token(self, chat_id: int, thread_id: int, token: str) -> None:
+    async def store_token(self, scope: Scope, token: str) -> None:
         self._check()
         if self.fail_token_writes:
             raise StorageError
-        self.tokens[chat_id, thread_id] = token
+        self.tokens[scope] = token
 
-    async def fetch_token(self, chat_id: int, thread_id: int) -> str | None:
+    async def fetch_token(self, scope: Scope) -> str | None:
         self._check()
         if self.fail_token_reads:
             raise StorageError
-        return self.tokens.get((chat_id, thread_id))
+        return self.tokens.get(scope)
 
-    async def delete_token(self, chat_id: int, thread_id: int) -> None:
+    async def delete_token(self, scope: Scope) -> None:
         self._check()
-        self.tokens.pop((chat_id, thread_id), None)
+        self.tokens.pop(scope, None)
 
 
 @dataclass
@@ -335,32 +331,26 @@ class FakeSink:
 
 @dataclass
 class InMemoryActions:
-    """ActionStore fake keyed by (chat_id, thread_id)."""
+    """ActionStore fake keyed by :class:`Scope`."""
 
-    actions: dict[tuple[int, int], tuple[ActionSpec, ...]] = field(default_factory=dict)
+    actions: dict[Scope, tuple[ActionSpec, ...]] = field(default_factory=dict)
     fail: bool = False
-    fail_writes_for: set[tuple[int, int]] = field(default_factory=set)
+    fail_writes_for: set[Scope] = field(default_factory=set)
 
-    async def get_actions(self, chat_id: int, thread_id: int) -> tuple[ActionSpec, ...]:
+    async def get_actions(self, scope: Scope) -> tuple[ActionSpec, ...]:
         if self.fail:
             raise StorageError
-        return self.actions.get((chat_id, thread_id), ())
+        return self.actions.get(scope, ())
 
-    async def set_actions(
-        self, chat_id: int, thread_id: int, actions: tuple[ActionSpec, ...]
-    ) -> None:
-        if self.fail or (chat_id, thread_id) in self.fail_writes_for:
+    async def set_actions(self, scope: Scope, actions: tuple[ActionSpec, ...]) -> None:
+        if self.fail or scope in self.fail_writes_for:
             raise StorageError
-        self.actions[chat_id, thread_id] = actions
+        self.actions[scope] = actions
 
-    async def list_scheduled(self) -> list[tuple[ActionScope, tuple[ActionSpec, ...]]]:
+    async def list_scheduled(self) -> list[tuple[Scope, tuple[ActionSpec, ...]]]:
         if self.fail:
             raise StorageError
-        return [
-            (ActionScope(chat_id=chat_id, thread_id=thread_id), specs)
-            for (chat_id, thread_id), specs in self.actions.items()
-            if specs
-        ]
+        return [(scope, specs) for scope, specs in self.actions.items() if specs]
 
 
 @dataclass
@@ -378,17 +368,17 @@ class InMemorySubscriptions:
         self._check()
         self.subs[subscription.sub_id] = subscription
 
-    async def remove(self, dm_chat_id: int, sub_id: str) -> bool:
+    async def remove(self, dm: Scope, sub_id: str) -> bool:
         self._check()
         found = self.subs.get(sub_id)
-        if found is None or found.dm_chat_id != dm_chat_id:
+        if found is None or found.dm != dm:
             return False
         del self.subs[sub_id]
         return True
 
-    async def list_for_user(self, dm_chat_id: int) -> list[Subscription]:
+    async def list_for_user(self, dm: Scope) -> list[Subscription]:
         self._check()
-        mine = [s for s in self.subs.values() if s.dm_chat_id == dm_chat_id]
+        mine = [s for s in self.subs.values() if s.dm == dm]
         return sorted(mine, key=lambda s: s.sub_id)
 
     async def list_all(self) -> list[Subscription]:
@@ -400,11 +390,11 @@ class InMemorySubscriptions:
         if sub_id in self.subs:
             self.subs[sub_id] = replace(self.subs[sub_id], last_run=last_run)
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+    async def migrate(self, old: Scope, new: Scope) -> None:
         self._check()
         for sub_id, s in list(self.subs.items()):
-            if s.chat_id == old_chat_id:
-                self.subs[sub_id] = replace(s, chat_id=new_chat_id)
+            if s.scope.channel == old.channel:
+                self.subs[sub_id] = replace(s, scope=replace(s.scope, channel=new.channel))
 
 
 @dataclass
@@ -417,31 +407,24 @@ class InMemoryArchive:
     async def store(self, message: CapturedMessage) -> None:
         if self.fail:
             raise StorageError
-        key = (message.chat_id, message.thread_id, message.message_id)
-        if any((m.chat_id, m.thread_id, m.message_id) == key for m in self.messages):
+        key = (message.scope, message.message_id)
+        if any((m.scope, m.message_id) == key for m in self.messages):
             return  # idempotent per message id, like INSERT IGNORE
         self.messages.append(message)
 
-    async def window(
-        self, chat_id: int, thread_id: int, since: datetime, until: datetime
-    ) -> list[CapturedMessage]:
+    async def window(self, scope: Scope, since: datetime, until: datetime) -> list[CapturedMessage]:
         if self.fail:
             raise StorageError
-        matching = [
-            m
-            for m in self.messages
-            if (m.chat_id, m.thread_id) == (chat_id, thread_id) and since <= m.posted_at < until
-        ]
+        matching = [m for m in self.messages if m.scope == scope and since <= m.posted_at < until]
         return sorted(matching, key=lambda m: (m.posted_at, m.message_id))
 
-    async def purge(self, chat_id: int, thread_id: int, before: datetime | None = None) -> int:
+    async def purge(self, scope: Scope, before: datetime | None = None) -> int:
         if self.fail:
             raise StorageError
         kept = [
             m
             for m in self.messages
-            if (m.chat_id, m.thread_id) != (chat_id, thread_id)
-            or (before is not None and m.posted_at >= before)
+            if m.scope != scope or (before is not None and m.posted_at >= before)
         ]
         removed = len(self.messages) - len(kept)
         self.messages = kept
@@ -452,13 +435,15 @@ class InMemoryArchive:
             raise StorageError
         return len(self.messages)
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+    async def migrate(self, old: Scope, new: Scope) -> None:
         if self.fail:
             raise StorageError
         self.messages = [
-            replace(m, chat_id=new_chat_id) if m.chat_id == old_chat_id else m
+            replace(m, scope=replace(m.scope, channel=new.channel))
+            if m.scope.channel == old.channel
+            else m
             for m in self.messages
-            if m.chat_id != new_chat_id  # new id wins, like the adapter's clear
+            if m.scope.channel != new.channel  # new id wins, like the adapter's clear
         ]
 
 

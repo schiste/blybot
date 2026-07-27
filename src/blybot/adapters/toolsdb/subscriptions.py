@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pymysql
 
+from blybot.adapters.toolsdb.store import _scope_of, _target
 from blybot.domain.ports import StorageError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
@@ -23,6 +24,7 @@ from blybot.services.actions import parse_schedule
 
 if TYPE_CHECKING:
     from blybot.adapters.toolsdb.store import SqlRunner
+    from blybot.domain.models import Scope
 
 SUBSCRIPTIONS_SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS subscriptions (
@@ -69,13 +71,14 @@ class ToolsDbSubscriptions:
     async def add(self, subscription: Subscription) -> None:
         """Persist a new subscription."""
         last_run = subscription.last_run.isoformat() if subscription.last_run else None
+        chat_id, thread_id = _target(subscription.scope)
         await self._run(
             Q_ADD,
             (
                 subscription.sub_id,
-                subscription.dm_chat_id,
-                subscription.chat_id,
-                subscription.thread_id,
+                int(subscription.dm.channel),
+                chat_id,
+                thread_id,
                 subscription.schedule.token,
                 subscription.recipe,
                 subscription.lang,
@@ -83,20 +86,21 @@ class ToolsDbSubscriptions:
             ),
         )
 
-    async def remove(self, dm_chat_id: int, sub_id: str) -> bool:
+    async def remove(self, dm: Scope, sub_id: str) -> bool:
         """Delete the caller's subscription; return whether one existed.
 
-        Scoped to ``dm_chat_id`` so a user can only remove their own —
+        Scoped to the DM scope so a user can only remove their own —
         guessing another user's ``sub_id`` deletes nothing.
         """
+        dm_chat_id = int(dm.channel)
         if not await self._run(Q_OWNED, (sub_id, dm_chat_id)):
             return False
         await self._run(Q_DELETE, (sub_id, dm_chat_id))
         return True
 
-    async def list_for_user(self, dm_chat_id: int) -> list[Subscription]:
-        """Return every subscription this DM chat owns, oldest first."""
-        rows = await self._run(Q_LIST_FOR_USER, (dm_chat_id,))
+    async def list_for_user(self, dm: Scope) -> list[Subscription]:
+        """Return every subscription this DM scope owns, oldest first."""
+        rows = await self._run(Q_LIST_FOR_USER, (int(dm.channel),))
         return [_subscription_from_row(row) for row in rows]
 
     async def list_all(self) -> list[Subscription]:
@@ -108,9 +112,9 @@ class ToolsDbSubscriptions:
         """Advance a subscription's ``last_run`` watermark durably."""
         await self._run(Q_STAMP, (last_run.isoformat(), sub_id))
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+    async def migrate(self, old: Scope, new: Scope) -> None:
         """Re-key a group's subscriptions after a group→supergroup upgrade."""
-        await self._run_tx([(Q_MIGRATE, (new_chat_id, old_chat_id))])
+        await self._run_tx([(Q_MIGRATE, (int(new.channel), int(old.channel)))])
 
     async def _run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         try:
@@ -133,9 +137,8 @@ def _subscription_from_row(row: tuple[Any, ...]) -> Subscription:
     sub_id, dm_chat_id, chat_id, thread_id, schedule, recipe, lang, last_run = row
     return Subscription(
         sub_id=sub_id,
-        dm_chat_id=int(dm_chat_id),
-        chat_id=int(chat_id),
-        thread_id=int(thread_id),
+        dm=_scope_of(int(dm_chat_id), 0),
+        scope=_scope_of(int(chat_id), int(thread_id)),
         schedule=parse_schedule(schedule),
         recipe=recipe,
         lang=lang,

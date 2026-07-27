@@ -13,9 +13,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
-from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
+from blybot.adapters.telegram._common import (
+    GROUP_TYPES,
+    scope_of,
+    send_threaded,
+    telegram_target,
+    thread_of,
+)
 from blybot.adapters.telegram.admin import REPLY_NOT_ADMIN, is_group_admin
-from blybot.domain.models import ActionScope
 from blybot.domain.ports import ActionError
 from blybot.observability import log_event
 from blybot.services.actions import ActionParseError, command_action
@@ -24,6 +29,7 @@ if TYPE_CHECKING:
     from telegram import Update
     from telegram.ext import ContextTypes
 
+    from blybot.domain.models import Scope
     from blybot.domain.ports import Clock
     from blybot.observability import Counters
     from blybot.services.engine import ActionEngine
@@ -76,10 +82,11 @@ class AnalysisHandlers:
         recipe: str,
         arg_tokens: list[str] | None = None,
     ) -> None:
-        gated = await self._admin_scope(update, context)
-        if gated is None:
+        scope = await self._admin_scope(update, context)
+        if scope is None:
             return
-        chat_id, thread_id = gated
+        chat_id, thread_id = telegram_target(scope)
+        thread_id = thread_id or 0
         if not self.limiter.allow("analysis", chat_id):
             await send_threaded(context.bot, chat_id, thread_id, REPLY_THROTTLED)
             return
@@ -90,7 +97,6 @@ class AnalysisHandlers:
             await send_threaded(context.bot, chat_id, thread_id, str(error))
             return
         await send_threaded(context.bot, chat_id, thread_id, REPLY_WORKING)
-        scope = ActionScope(chat_id=chat_id, thread_id=thread_id)
         try:
             outcome = await self.engine.run(scope, spec, self.clock.now())
         except ActionError as error:
@@ -108,27 +114,29 @@ class AnalysisHandlers:
             await send_threaded(context.bot, chat_id, thread_id, REPLY_EMPTY)
             return
         for message in outcome.messages:
-            await send_threaded(context.bot, message.chat_id, message.thread_id, message.text)
+            target_chat, target_thread = telegram_target(message.scope)
+            await send_threaded(context.bot, target_chat, target_thread or 0, message.text)
 
     async def _admin_scope(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> tuple[int, int] | None:
+    ) -> Scope | None:
         chat = update.effective_chat
         message = update.effective_message
         if chat is None or message is None or chat.type not in GROUP_TYPES:
             return None
-        if not self.groups.is_allowed(chat.id):
+        if not self.groups.is_allowed(scope_of(update)):
             return None
         thread_id = thread_of(update)
         user = message.from_user
         if user is None or not await is_group_admin(context.bot, chat.id, user.id):
             await send_threaded(context.bot, chat.id, thread_id, REPLY_NOT_ADMIN)
             return None
-        return chat.id, thread_id
+        return scope_of(update)
 
     async def _maybe_reply(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
     ) -> None:
-        gated = await self._admin_scope(update, context)
-        if gated is not None:
-            await send_threaded(context.bot, gated[0], gated[1], text)
+        scope = await self._admin_scope(update, context)
+        if scope is not None:
+            chat_id, thread_id = telegram_target(scope)
+            await send_threaded(context.bot, chat_id, thread_id or 0, text)

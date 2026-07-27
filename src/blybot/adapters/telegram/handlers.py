@@ -28,8 +28,15 @@ from telegram import (
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 
-from blybot.adapters.telegram._common import GROUP_TYPES, send_threaded, thread_of
-from blybot.domain.models import ActionScope, ConsentMode, LogContent, LogMedia
+from blybot.adapters.telegram._common import (
+    GROUP_TYPES,
+    dm_scope,
+    group_scope,
+    scope_of,
+    send_threaded,
+    thread_of,
+)
+from blybot.domain.models import ConsentMode, LogContent, LogMedia, Scope
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 from blybot.observability import Counters, log_event
 from blybot.services.feedback import BUG_ACTION
@@ -187,6 +194,9 @@ _MEMBER_STATUSES: Final = frozenset(
 # Errors from the bound-repo services that map to a user-facing reply.
 _REPO_ERRORS: Final = (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError)
 _SUPPORTED_IMAGE_TYPES: Final = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
+# The /bug pipeline runs on a placeholder scope so no private chat id (a
+# user identifier) ever enters the engine; the handler routes the reply.
+_BUG_SENTINEL_SCOPE: Final = Scope("telegram", "0")
 
 
 def _same_author(command: Message, target: Message) -> bool:
@@ -309,7 +319,8 @@ class GroupHandlers:
                 # Silence here reads as breakage; explain the gesture instead.
                 await context.bot.send_message(chat_id=chat.id, text=REPLY_LOG_IS_GROUP_ONLY)
             return
-        if not self.groups.is_allowed(chat.id):
+        scope = scope_of(update)
+        if not self.groups.is_allowed(scope):
             log_event("log_command", "ignored")
             return
         await self._schedule_cleanup(
@@ -329,7 +340,7 @@ class GroupHandlers:
         if target is None:
             await reply(REPLY_LOGMEDIA_USAGE if include_media else REPLY_USAGE)
             return
-        settings = await self.directory.resolve(chat.id, thread_id)
+        settings = await self.directory.resolve(scope)
         if (decline := self._log_decline(settings, message, target)) is not None:
             await reply(decline)
             return
@@ -339,7 +350,7 @@ class GroupHandlers:
                 context.bot, target, include_media=include_media
             )
             outcome = await self.engine.run(
-                ActionScope(chat_id=chat.id, thread_id=thread_id),
+                scope,
                 log_action(settings.log_page),
                 payload=content,
             )
@@ -390,7 +401,7 @@ class GroupHandlers:
         change = update.my_chat_member
         if change is None or change.chat.type not in GROUP_TYPES:
             return
-        if not _just_joined(change) or not self.groups.is_allowed(change.chat.id):
+        if not _just_joined(change) or not self.groups.is_allowed(group_scope(change.chat.id)):
             return
         await context.bot.send_message(chat_id=change.chat.id, text=self.group_greeting_text)
         log_event("greeting", "ok")
@@ -416,16 +427,18 @@ class GroupHandlers:
         message = update.effective_message
         if message is None or message.migrate_to_chat_id is None:
             return
-        applied = self.groups.migrate(message.chat.id, message.migrate_to_chat_id)
+        old = group_scope(message.chat.id)
+        new = group_scope(message.migrate_to_chat_id)
+        applied = self.groups.migrate(old, new)
         try:
-            await self.directory.migrate(message.chat.id, message.migrate_to_chat_id)
+            await self.directory.migrate(old, new)
             if self.archive is not None:
                 # The captured messages move with the profiles: rows left
                 # under the dead chat id would vanish from analyses and be
                 # unreachable by /capture purge.
-                await self.archive.migrate(message.chat.id, message.migrate_to_chat_id)
+                await self.archive.migrate(old, new)
             if self.subscriptions is not None:
-                await self.subscriptions.migrate(message.chat.id, message.migrate_to_chat_id)
+                await self.subscriptions.migrate(old, new)
         except StorageError:
             log_event("chat_migration", "error")
             return
@@ -455,7 +468,7 @@ class GroupHandlers:
             await send_threaded(bot, chat.id, thread_id, REPLY_THROTTLED)
             return
         try:
-            url = await self.repo_service.file_issue(chat.id, thread_id, description)
+            url = await self.repo_service.file_issue(scope_of(update), description)
         except _REPO_ERRORS as error:
             await send_threaded(bot, chat.id, thread_id, _repo_error_reply(error))
         else:
@@ -477,7 +490,7 @@ class GroupHandlers:
             await send_threaded(bot, chat.id, thread_id, REPLY_THROTTLED)
             return
         try:
-            summary = await self.repo_service.summary(chat.id, thread_id)
+            summary = await self.repo_service.summary(scope_of(update))
         except _REPO_ERRORS as error:
             await send_threaded(bot, chat.id, thread_id, _repo_error_reply(error))
         else:
@@ -495,7 +508,9 @@ class GroupHandlers:
     def _served_group(self, update: Update) -> Chat | None:
         """Return the chat when this is a group the bot serves."""
         chat = update.effective_chat
-        if chat is None or chat.type not in GROUP_TYPES or not self.groups.is_allowed(chat.id):
+        if chat is None or chat.type not in GROUP_TYPES:
+            return None
+        if not self.groups.is_allowed(group_scope(chat.id)):
             return None
         return chat
 
@@ -505,7 +520,7 @@ class GroupHandlers:
         if chat is None:
             return
         thread_id = thread_of(update)
-        settings = await self.directory.resolve(chat.id, thread_id)
+        settings = await self.directory.resolve(scope_of(update))
         page_url = self.page_url_for(settings.log_page)
         text = HELP_GROUP
         if self.directory.self_service_enabled:
@@ -551,7 +566,7 @@ class GroupHandlers:
         change = update.chat_member
         if change is None or change.chat.type not in GROUP_TYPES:
             return
-        if not _just_joined(change) or not self.groups.is_allowed(change.chat.id):
+        if not _just_joined(change) or not self.groups.is_allowed(group_scope(change.chat.id)):
             return
         if change.new_chat_member.user.is_bot:
             return
@@ -598,10 +613,10 @@ class PrivateHandlers:
             return
         payload = (context.args or [""])[0]
         if payload.startswith("cfg_"):
-            await self.token_entry.redeem_link(update, context, chat.id, payload[4:])
+            await self.token_entry.redeem_link(update, context, dm_scope(chat.id), payload[4:])
             return
         if payload.startswith("sub_") and self.subscriptions is not None:
-            await self.subscriptions.redeem_link(context, chat.id, payload[4:])
+            await self.subscriptions.redeem_link(context, dm_scope(chat.id), payload[4:])
             return
         await context.bot.send_message(chat_id=chat.id, text=self.welcome_text)
         log_event("welcome_delivered", "ok")
@@ -615,8 +630,9 @@ class PrivateHandlers:
         chat = self._private_chat(update)
         if chat is None:
             return
-        session = self.sessions.reset(chat.id)
-        route = self.routes.route_for(chat.id)
+        dm = dm_scope(chat.id)
+        session = self.sessions.reset(dm)
+        route = self.routes.route_for(dm)
         notice = self._opened_session_notice(session, route.page if route else None)
         await context.bot.send_message(chat_id=chat.id, text=f"{REPLY_FLUSHED}{notice}")
 
@@ -625,11 +641,12 @@ class PrivateHandlers:
         chat = self._private_chat(update)
         if chat is None:
             return
-        session = self.sessions.peek(chat.id)
+        dm = dm_scope(chat.id)
+        session = self.sessions.peek(dm)
         if session is None:
             await context.bot.send_message(chat_id=chat.id, text=REPLY_NO_SESSION)
             return
-        route = self.routes.route_for(chat.id)
+        route = self.routes.route_for(dm)
         info = REPLY_SESSION_INFO.format(
             pseudonym=session.pseudonym.value,
             page=self.transcription.page_for(session, route.page if route else None),
@@ -668,7 +685,7 @@ class PrivateHandlers:
             # Sentinel scope: a private chat id is a user identifier and
             # must never enter the pipeline — this handler routes the
             # confirmation itself.
-            outcome = await self.engine.run(ActionScope(chat_id=0), BUG_ACTION, payload=description)
+            outcome = await self.engine.run(_BUG_SENTINEL_SCOPE, BUG_ACTION, payload=description)
         except IssueTrackerError:
             log_event("bug_report", "error")
             await reply(REPLY_BUG_FAILED.format(url=self.issues_url))
@@ -692,24 +709,25 @@ class PrivateHandlers:
             return
         if message is None or not message.text:
             return
+        dm = dm_scope(chat.id)
         # An armed token entry claims the next message BEFORE anything
         # can transcribe it: a pasted secret must never reach the wiki.
-        pending = self.token_entry.claims_next_message(chat.id)
+        pending = self.token_entry.claims_next_message(dm)
         if pending is not None:
             await self.token_entry.accept_token(
-                context, chat.id, pending, message.message_id, message.text
+                context, dm, pending, message.message_id, message.text
             )
             return
-        route = self.routes.route_for(chat.id)
+        route = self.routes.route_for(dm)
         if route is None:
-            request_id = self.routes.open_pending(chat.id, message.text)
+            request_id = self.routes.open_pending(dm, message.text)
             await context.bot.send_message(
                 chat_id=chat.id,
                 text=REPLY_DM_DESTINATION_REQUIRED,
                 reply_markup=_destination_keyboard(request_id),
             )
             return
-        await self._record_dm(chat.id, message.text, context, route.page)
+        await self._record_dm(dm, message.text, context, route.page)
 
     async def on_chat_shared(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Route a queued private message to a user-selected group."""
@@ -718,7 +736,8 @@ class PrivateHandlers:
         shared = message.chat_shared if message else None
         if chat is None or shared is None:
             return
-        text = self.routes.pop_pending(chat.id, shared.request_id)
+        dm = dm_scope(chat.id)
+        text = self.routes.pop_pending(dm, shared.request_id)
         if text is None:
             await context.bot.send_message(
                 chat_id=chat.id,
@@ -726,14 +745,15 @@ class PrivateHandlers:
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
-        if not self.groups.is_allowed(shared.chat_id):
+        group = group_scope(shared.chat_id)
+        if not self.groups.is_allowed(group):
             await context.bot.send_message(
                 chat_id=chat.id,
                 text=REPLY_DM_DESTINATION_NOT_SERVED,
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
-        settings = await self.directory.resolve(shared.chat_id, 0)
+        settings = await self.directory.resolve(group)
         if (decline := self._dm_route_decline(settings)) is not None:
             await context.bot.send_message(
                 chat_id=chat.id,
@@ -741,28 +761,29 @@ class PrivateHandlers:
                 reply_markup=ReplyKeyboardRemove(),
             )
             return
-        route = self.routes.save_route(chat.id, shared.chat_id, 0, settings.log_page)
+        route = self.routes.save_route(dm, group, settings.log_page)
         await context.bot.send_message(
             chat_id=chat.id,
             text=REPLY_DM_DESTINATION_SET.format(page=route.page),
             reply_markup=ReplyKeyboardRemove(),
         )
-        await self._record_dm(chat.id, text, context, route.page)
+        await self._record_dm(dm, text, context, route.page)
 
     async def _record_dm(
         self,
-        chat_id: int,
+        dm: Scope,
         text: str,
         context: ContextTypes.DEFAULT_TYPE,
         target_page: str,
     ) -> None:
-        is_new_session = self.sessions.peek(chat_id) is None
+        chat_id = int(dm.channel)
+        is_new_session = self.sessions.peek(dm) is None
         try:
-            session = await self.transcription.record(chat_id, text, target_page=target_page)
+            session = await self.transcription.record(dm, text, target_page=target_page)
         except WikiWriteError:
             await context.bot.send_message(chat_id=chat_id, text=REPLY_WIKI_ERROR)
             return
-        self.routes.touch_route(chat_id)
+        self.routes.touch_route(dm)
         if is_new_session:
             # Sessions can also start (or roll over) mid-conversation;
             # tell the user which identity their words appear under.

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import pytest
 
 from blybot.domain import prompts
-from blybot.domain.models import CapturedMessage
+from blybot.domain.models import CapturedMessage, Scope
 from blybot.domain.prompts import PromptContractError
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
@@ -16,8 +16,7 @@ NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
 
 def msg(message_id: int, text: str, author: str = "abc123", **extra: object) -> CapturedMessage:
     return CapturedMessage(
-        chat_id=-1,
-        thread_id=0,
+        scope=Scope("telegram", "-1"),
         message_id=message_id,
         posted_at=NOW,
         author=author,

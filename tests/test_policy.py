@@ -4,28 +4,33 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from blybot.domain.models import Scope
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests.fakes import FakeClock
 
 
+def _scope(chat_id: int) -> Scope:
+    return Scope("telegram", str(chat_id))
+
+
 class TestGroupPolicy:
     def test_empty_allowlist_serves_any_group(self) -> None:
-        assert GroupPolicy(allowed=set()).is_allowed(-100123)
+        assert GroupPolicy(allowed=set()).is_allowed(_scope(-100123))
 
     def test_non_empty_allowlist_restricts(self) -> None:
         policy = GroupPolicy(allowed={-100123})
-        assert policy.is_allowed(-100123)
-        assert not policy.is_allowed(-100999)
+        assert policy.is_allowed(_scope(-100123))
+        assert not policy.is_allowed(_scope(-100999))
 
     def test_supergroup_migration_rewrites_the_reference(self) -> None:
         policy = GroupPolicy(allowed={-123})
-        assert policy.migrate(-123, -100456)
-        assert not policy.is_allowed(-123)
-        assert policy.is_allowed(-100456)
+        assert policy.migrate(_scope(-123), _scope(-100456))
+        assert not policy.is_allowed(_scope(-123))
+        assert policy.is_allowed(_scope(-100456))
 
     def test_migration_of_unlisted_group_is_a_noop(self) -> None:
         policy = GroupPolicy(allowed={-1})
-        assert not policy.migrate(-2, -3)
+        assert not policy.migrate(_scope(-2), _scope(-3))
         assert policy.allowed == {-1}
 
 

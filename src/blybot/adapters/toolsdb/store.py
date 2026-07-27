@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import pymysql
 from cryptography.fernet import Fernet, InvalidToken
 
-from blybot.domain.models import ActionScope, ConsentMode, GroupProfile
+from blybot.domain.models import ConsentMode, GroupProfile, Scope
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 from blybot.services.actions import dumps_actions, loads_actions
@@ -31,6 +31,24 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from blybot.domain.models import ActionSpec
+
+# This adapter is one of the two int↔Scope edges (spec R6 / scope PR-1).
+# SQL columns stay BIGINT chat_id/thread_id; a Scope is split into the
+# pair on the way in and rebuilt on the way out. Every scope here is on
+# the Telegram platform.
+_PLATFORM: Final = "telegram"
+
+
+def _target(scope: Scope) -> tuple[int, int]:
+    """Split a :class:`Scope` into the table's ``(chat_id, thread_id)`` pair."""
+    assert scope.platform == _PLATFORM  # noqa: S101 -- single-platform invariant this PR
+    return int(scope.channel), int(scope.thread) if scope.thread else 0
+
+
+def _scope_of(chat_id: int, thread_id: int) -> Scope:
+    """Rebuild a :class:`Scope` from a ``(chat_id, thread_id)`` row."""
+    return Scope(_PLATFORM, str(chat_id), str(thread_id) if thread_id else "")
+
 
 SCHEMA: Final = """
 CREATE TABLE IF NOT EXISTS profiles (
@@ -260,9 +278,9 @@ class ToolsDbStore:
             await self._run(MIGRATE_REBUILD_PK, ())
             log_event("storage_migrated", "ok")
 
-    async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
-        """Return the (group, topic) profile, or ``None`` if unconfigured."""
-        rows = await self._run(Q_GET, (chat_id, thread_id))
+    async def get(self, scope: Scope) -> GroupProfile | None:
+        """Return the scope's profile, or ``None`` if unconfigured."""
+        rows = await self._run(Q_GET, _target(scope))
         return _profile_from_row(rows[0]) if rows else None
 
     async def get_by_subscribe_code(self, code: str) -> GroupProfile | None:
@@ -272,11 +290,12 @@ class ToolsDbStore:
 
     async def upsert(self, profile: GroupProfile) -> None:
         """Create or update the profile (token and cursors are untouched)."""
+        chat_id, thread_id = _target(profile.scope)
         await self._run(
             Q_UPSERT,
             (
-                profile.chat_id,
-                profile.thread_id,
+                chat_id,
+                thread_id,
                 profile.log_page,
                 profile.repo,
                 profile.consent_mode.value if profile.consent_mode else None,
@@ -288,9 +307,9 @@ class ToolsDbStore:
             ),
         )
 
-    async def delete(self, chat_id: int, thread_id: int) -> None:
-        """Forget everything about the (group, topic), token and cursor included."""
-        await self._run(Q_DELETE, (chat_id, thread_id))
+    async def delete(self, scope: Scope) -> None:
+        """Forget everything about the scope, token and cursor included."""
+        await self._run(Q_DELETE, _target(scope))
 
     async def list_event_enabled(self) -> list[GroupProfile]:
         """Return every profile with repo notifications switched on."""
@@ -302,50 +321,51 @@ class ToolsDbStore:
         rows = await self._run(Q_LIST_CAPTURE_ENABLED, ())
         return [_profile_from_row(row) for row in rows]
 
-    async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:
-        """Return the (group, topic) per-resource poll cursor map."""
-        rows = await self._run(Q_GET_CURSORS, (chat_id, thread_id))
+    async def get_cursors(self, scope: Scope) -> dict[str, str]:
+        """Return the scope's per-resource poll cursor map."""
+        rows = await self._run(Q_GET_CURSORS, _target(scope))
         raw = rows[0][0] if rows else None
         if not raw:
             return {}
         loaded: dict[str, str] = json.loads(raw)
         return loaded
 
-    async def set_cursors(
-        self, chat_id: int, thread_id: int, cursors: dict[str, str], repo: str
-    ) -> None:
+    async def set_cursors(self, scope: Scope, cursors: dict[str, str], repo: str) -> None:
         """Persist the per-resource cursor map iff still bound to ``repo``.
 
         The repo guard keeps an in-flight poll from stamping stale
         cursors onto a profile that was reset or rebound meanwhile.
         """
         payload = json.dumps(cursors, separators=(",", ":"))
+        chat_id, thread_id = _target(scope)
         await self._run(Q_SET_CURSORS, (payload, chat_id, thread_id, repo))
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+    async def migrate(self, old: Scope, new: Scope) -> None:
         """Re-key every topic of a group after a group→supergroup upgrade.
 
         The collision-clear and the re-key run in one transaction: a crash
         between them must not delete the destination's rows while leaving
         the source's un-moved.
         """
+        old_chat_id, new_chat_id = int(old.channel), int(new.channel)
         await self._run_tx(
             [(Q_MIGRATE_CLEAR, (new_chat_id,)), (Q_MIGRATE, (new_chat_id, old_chat_id))]
         )
 
-    async def store_token(self, chat_id: int, thread_id: int, token: str) -> None:
-        """Encrypt and persist the (group, topic) token."""
+    async def store_token(self, scope: Scope, token: str) -> None:
+        """Encrypt and persist the scope's token."""
         ciphertext = self._fernet.encrypt(token.encode())
+        chat_id, thread_id = _target(scope)
         await self._run(Q_VAULT_WRITE, (chat_id, thread_id, ciphertext))
 
-    async def fetch_token(self, chat_id: int, thread_id: int) -> str | None:
-        """Decrypt and return the (group, topic) token, if one is stored.
+    async def fetch_token(self, scope: Scope) -> str | None:
+        """Decrypt and return the scope's token, if one is stored.
 
         An undecryptable ciphertext (rotated key) reads as "no token"
         and is logged — the profile simply re-binds — rather than
         crashing every feature that consults the vault.
         """
-        rows = await self._run(Q_VAULT_READ, (chat_id, thread_id))
+        rows = await self._run(Q_VAULT_READ, _target(scope))
         if not rows or rows[0][0] is None:
             return None
         try:
@@ -354,28 +374,24 @@ class ToolsDbStore:
             log_event("token_vault", "error")
             return None
 
-    async def delete_token(self, chat_id: int, thread_id: int) -> None:
-        """Discard the (group, topic) token."""
-        await self._run(Q_VAULT_CLEAR, (chat_id, thread_id))
+    async def delete_token(self, scope: Scope) -> None:
+        """Discard the scope's token."""
+        await self._run(Q_VAULT_CLEAR, _target(scope))
 
-    async def get_actions(self, chat_id: int, thread_id: int) -> tuple[ActionSpec, ...]:
-        """Return the (group, topic) actions, empty when none are configured."""
-        rows = await self._run(Q_ACTIONS_READ, (chat_id, thread_id))
+    async def get_actions(self, scope: Scope) -> tuple[ActionSpec, ...]:
+        """Return the scope's actions, empty when none are configured."""
+        rows = await self._run(Q_ACTIONS_READ, _target(scope))
         return loads_actions(rows[0][0] if rows else None)
 
-    async def set_actions(
-        self, chat_id: int, thread_id: int, actions: tuple[ActionSpec, ...]
-    ) -> None:
-        """Replace the (group, topic) actions (state included) wholesale."""
+    async def set_actions(self, scope: Scope, actions: tuple[ActionSpec, ...]) -> None:
+        """Replace the scope's actions (state included) wholesale."""
+        chat_id, thread_id = _target(scope)
         await self._run(Q_ACTIONS_WRITE, (chat_id, thread_id, dumps_actions(actions)))
 
-    async def list_scheduled(self) -> list[tuple[ActionScope, tuple[ActionSpec, ...]]]:
+    async def list_scheduled(self) -> list[tuple[Scope, tuple[ActionSpec, ...]]]:
         """Return every scope that has at least one action configured."""
         rows = await self._run(Q_ACTIONS_LIST, ())
-        return [
-            (ActionScope(chat_id=int(row[0]), thread_id=int(row[1])), loads_actions(row[2]))
-            for row in rows
-        ]
+        return [(_scope_of(int(row[0]), int(row[1])), loads_actions(row[2])) for row in rows]
 
     async def _run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         try:
@@ -409,8 +425,7 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         has_token,
     ) = row
     return GroupProfile(
-        chat_id=int(chat_id),
-        thread_id=int(thread_id),
+        scope=_scope_of(int(chat_id), int(thread_id)),
         log_page=log_page,
         repo=repo,
         consent_mode=ConsentMode(consent) if consent else None,

@@ -17,7 +17,7 @@ from blybot.adapters.telegram.capture import (
     CaptureHandlers,
     HmacAuthorMasker,
 )
-from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile
+from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile, Scope
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.capture import CaptureService
@@ -28,6 +28,10 @@ from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
 
 CHANNEL = Chat(id=-200, type=ChatType.CHANNEL)
 MASKER = HmacAuthorMasker(key="test-hmac-key")
+
+
+def gscope(chat_id: int, thread_id: int = 0) -> Scope:
+    return Scope("telegram", str(chat_id), str(thread_id) if thread_id else "")
 
 
 def make_handlers(
@@ -62,7 +66,7 @@ def make_handlers(
 
 
 async def enable(store: InMemoryProfiles, chat_id: int) -> None:
-    await store.upsert(GroupProfile(chat_id=chat_id, capture_enabled=True))
+    await store.upsert(GroupProfile(scope=gscope(chat_id), capture_enabled=True))
 
 
 def channel_post_update(text: str | None = None) -> Update:
@@ -175,7 +179,7 @@ async def test_becoming_channel_admin_enables_capture_and_announces() -> None:
 
     await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
 
-    profile = await store.get(CHANNEL.id, 0)
+    profile = await store.get(gscope(CHANNEL.id))
     assert profile is not None
     assert profile.capture_enabled
     assert tg.sent_texts(bot) == [CHANNEL_ANNOUNCEMENT.format(bot_name="Blybot")]
@@ -190,7 +194,7 @@ async def test_group_membership_changes_are_not_capture_events() -> None:
     )
     await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.MEMBER), context)
 
-    assert await store.get(CHANNEL.id, 0) is None
+    assert await store.get(gscope(CHANNEL.id)) is None
     bot.send_message.assert_not_awaited()
 
 
@@ -203,7 +207,7 @@ async def test_failed_announcement_means_capture_never_starts() -> None:
 
     # Loud opt-in (R-v3.1): a channel that cannot be told is never
     # archived. A demote + re-promote retries the whole sequence.
-    profile = await store.get(CHANNEL.id, 0)
+    profile = await store.get(gscope(CHANNEL.id))
     assert profile is None or not profile.capture_enabled
 
 
@@ -218,7 +222,7 @@ async def test_failed_announcement_also_clears_stale_enabled_state() -> None:
 
     await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
 
-    profile = await store.get(CHANNEL.id, 0)
+    profile = await store.get(gscope(CHANNEL.id))
     assert profile is not None
     assert profile.capture_enabled is False
 
@@ -246,7 +250,7 @@ async def test_failed_enable_retracts_only_after_a_verified_disable() -> None:
         CHANNEL_ANNOUNCEMENT.format(bot_name="Blybot"),
         CHANNEL_RETRACTION.format(bot_name="Blybot"),
     ]
-    profile = await store.get(CHANNEL.id, 0)
+    profile = await store.get(gscope(CHANNEL.id))
     assert profile is not None
     assert profile.capture_enabled is False
 
@@ -261,7 +265,7 @@ async def test_demotion_revokes_the_structural_opt_in() -> None:
         context,
     )
 
-    profile = await store.get(CHANNEL.id, 0)
+    profile = await store.get(gscope(CHANNEL.id))
     assert profile is not None
     assert profile.capture_enabled is False  # admin status was the consent
     bot.send_message.assert_not_awaited()  # the bot cannot post there anymore
@@ -281,7 +285,7 @@ async def test_repromotion_reannounces_a_fresh_opt_in() -> None:
 
     # Restored admin rights are a fresh loud opt-in, never a silent resumption.
     assert tg.sent_texts(bot) == [CHANNEL_ANNOUNCEMENT.format(bot_name="Blybot")] * 2
-    profile = await store.get(CHANNEL.id, 0)
+    profile = await store.get(gscope(CHANNEL.id))
     assert profile is not None
     assert profile.capture_enabled is True
 
@@ -322,7 +326,7 @@ async def test_a_lost_retraction_is_swallowed_and_logged() -> None:
     )  # must not raise
 
     assert bot.send_message.await_count == 2
-    profile = await store.get(CHANNEL.id, 0)
+    profile = await store.get(gscope(CHANNEL.id))
     assert profile is not None
     assert profile.capture_enabled is False  # still verifiably off
 
@@ -333,7 +337,7 @@ async def test_disallowed_channel_is_never_enabled() -> None:
 
     await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
 
-    assert await store.get(CHANNEL.id, 0) is None
+    assert await store.get(gscope(CHANNEL.id)) is None
     bot.send_message.assert_not_awaited()
 
 
@@ -349,7 +353,7 @@ async def test_demotion_of_a_disallowed_channel_still_revokes_consent() -> None:
 
     # The allowlist gates serving, never revocation: the stale enable
     # must not survive to resume archiving if the channel is re-allowed.
-    profile = await store.get(CHANNEL.id, 0)
+    profile = await store.get(gscope(CHANNEL.id))
     assert profile is not None
     assert profile.capture_enabled is False
     bot.send_message.assert_not_awaited()
@@ -382,7 +386,7 @@ async def test_authorless_group_messages_are_archived_without_a_label() -> None:
 
 def test_captured_messages_reject_unknown_kinds() -> None:
     with pytest.raises(ValueError, match="kind"):
-        CapturedMessage(chat_id=-1, thread_id=0, message_id=1, posted_at=tg.NOW, kind="sticker")
+        CapturedMessage(scope=gscope(-1), message_id=1, posted_at=tg.NOW, kind="sticker")
 
 
 async def test_permission_edits_do_not_reannounce() -> None:

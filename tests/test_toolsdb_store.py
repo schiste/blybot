@@ -44,7 +44,7 @@ from blybot.adapters.toolsdb.store import (
     PymysqlRunner,
     ToolsDbStore,
 )
-from blybot.domain.models import ActionScope, ConsentMode, GroupProfile, LlmSettings
+from blybot.domain.models import ConsentMode, GroupProfile, LlmSettings, Scope
 from blybot.domain.ports import StorageError
 from blybot.services.actions import parse_action
 from blybot.services.rules import parse_rule
@@ -240,7 +240,7 @@ def make_store() -> tuple[ToolsDbStore, FakeToolsDb]:
 
 
 PROFILE = GroupProfile(
-    chat_id=-100500,
+    scope=Scope("telegram", "-100500"),
     log_page="Telegram logs/Test",
     repo="schiste/blybot",
     consent_mode=ConsentMode.AUTHOR_ONLY,
@@ -273,33 +273,33 @@ async def test_bootstrap_converts_the_capture_column_to_tri_state_once() -> None
     await store.bootstrap()
 
     assert fake.capture_nullable
-    profile = await store.get(-1, 0)
+    profile = await store.get(Scope("telegram", "-1"))
     assert profile is not None
     assert profile.capture_enabled is None  # 0 became "unset", not "off"
-    enabled = await store.get(-2, 0)
+    enabled = await store.get(Scope("telegram", "-2"))
     assert enabled is not None
     assert enabled.capture_enabled is True
 
     # Post-conversion, an explicit off survives later restarts.
     await store.upsert(replace(profile, capture_enabled=False))
     await store.bootstrap()
-    decided = await store.get(-1, 0)
+    decided = await store.get(Scope("telegram", "-1"))
     assert decided is not None
     assert decided.capture_enabled is False
 
 
 async def test_migration_into_an_occupied_destination_replaces_it() -> None:
     store, _ = make_store()
-    await store.upsert(GroupProfile(chat_id=-1, thread_id=0, log_page="Old/dest"))
-    await store.upsert(GroupProfile(chat_id=-9, thread_id=0, log_page="Source"))
-    await store.upsert(GroupProfile(chat_id=-9, thread_id=5, log_page="Source topic"))
-    await store.migrate(-9, -1)
+    await store.upsert(GroupProfile(scope=Scope("telegram", "-1"), log_page="Old/dest"))
+    await store.upsert(GroupProfile(scope=Scope("telegram", "-9"), log_page="Source"))
+    await store.upsert(GroupProfile(scope=Scope("telegram", "-9", "5"), log_page="Source topic"))
+    await store.migrate(Scope("telegram", "-9"), Scope("telegram", "-1"))
 
-    assert await store.get(-9, 0) is None  # source moved
-    moved = await store.get(-1, 0)
+    assert await store.get(Scope("telegram", "-9")) is None  # source moved
+    moved = await store.get(Scope("telegram", "-1"))
     assert moved is not None
     assert moved.log_page == "Source"  # authoritative source overwrote the dest
-    topic = await store.get(-1, 5)
+    topic = await store.get(Scope("telegram", "-1", "5"))
     assert topic is not None
     assert topic.log_page == "Source topic"
 
@@ -307,7 +307,7 @@ async def test_migration_into_an_occupied_destination_replaces_it() -> None:
 async def test_profile_roundtrip() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    loaded = await store.get(-100500, 0)
+    loaded = await store.get(Scope("telegram", "-100500"))
     assert loaded == PROFILE
 
 
@@ -318,30 +318,30 @@ async def test_rules_roundtrip_through_json_column() -> None:
         parse_rule("issue.opened title:/^WIP:/ author:octocat"),
     )
     await store.upsert(replace(PROFILE, rules=rules))
-    loaded = await store.get(-100500, 0)
+    loaded = await store.get(Scope("telegram", "-100500"))
     assert loaded is not None
     assert loaded.rules == rules  # ids, triggers, filters, modes all survive
 
 
 async def test_missing_profile_reads_as_none() -> None:
     store, _ = make_store()
-    assert await store.get(-1, 0) is None
+    assert await store.get(Scope("telegram", "-1")) is None
 
 
 async def test_delete_forgets_the_group() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    await store.delete(-100500, 0)
-    assert await store.get(-100500, 0) is None
+    await store.delete(Scope("telegram", "-100500"))
+    assert await store.get(Scope("telegram", "-100500")) is None
 
 
 async def test_list_event_enabled_filters() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    quiet = GroupProfile(chat_id=-2, events_enabled=False)
+    quiet = GroupProfile(scope=Scope("telegram", "-2"), events_enabled=False)
     await store.upsert(quiet)
     enabled = await store.list_event_enabled()
-    assert [profile.chat_id for profile in enabled] == [-100500]
+    assert [int(profile.scope.channel) for profile in enabled] == [-100500]
 
 
 def test_scan_queries_request_a_stable_order() -> None:
@@ -352,36 +352,36 @@ def test_scan_queries_request_a_stable_order() -> None:
 
 async def test_subscribe_code_round_trips_and_resolves() -> None:
     store, _ = make_store()
-    await store.upsert(GroupProfile(chat_id=-7, subscribe_code="abc123"))
+    await store.upsert(GroupProfile(scope=Scope("telegram", "-7"), subscribe_code="abc123"))
 
-    got = await store.get(-7, 0)
+    got = await store.get(Scope("telegram", "-7"))
     assert got is not None
     assert got.subscribe_code == "abc123"
 
     by_code = await store.get_by_subscribe_code("abc123")
     assert by_code is not None
-    assert by_code.chat_id == -7
+    assert int(by_code.scope.channel) == -7
     assert await store.get_by_subscribe_code("nope") is None
 
 
 async def test_cursors_roundtrip_and_default() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    assert await store.get_cursors(-100500, 0) == {}
+    assert await store.get_cursors(Scope("telegram", "-100500")) == {}
     cursors = {"issues": "2026-07-05T00:00:00Z", "pulls": "2026-07-06T00:00:00Z"}
-    await store.set_cursors(-100500, 0, cursors, PROFILE.repo or "")
-    assert await store.get_cursors(-100500, 0) == cursors
+    await store.set_cursors(Scope("telegram", "-100500"), cursors, PROFILE.repo or "")
+    assert await store.get_cursors(Scope("telegram", "-100500")) == cursors
 
 
 async def test_tokens_are_encrypted_at_rest_and_roundtrip() -> None:
     store, fake = make_store()
-    await store.store_token(-100500, 0, "ghp_secret")
+    await store.store_token(Scope("telegram", "-100500"), "ghp_secret")
 
     stored = fake.tables[-100500, 0]["token"]
     assert b"ghp_secret" not in stored  # ciphertext only in the database
-    assert await store.fetch_token(-100500, 0) == "ghp_secret"
+    assert await store.fetch_token(Scope("telegram", "-100500")) == "ghp_secret"
 
-    profile = await store.get(-100500, 0)
+    profile = await store.get(Scope("telegram", "-100500"))
     assert profile is not None
     assert profile.has_token
 
@@ -389,27 +389,31 @@ async def test_tokens_are_encrypted_at_rest_and_roundtrip() -> None:
 async def test_upsert_preserves_token_and_cursors() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)  # the row must carry the repo the cursors are for
-    await store.store_token(-100500, 0, "ghp_secret")
-    await store.set_cursors(-100500, 0, {"issues": "2026-07-05T00:00:00Z"}, "schiste/blybot")
+    await store.store_token(Scope("telegram", "-100500"), "ghp_secret")
+    await store.set_cursors(
+        Scope("telegram", "-100500"), {"issues": "2026-07-05T00:00:00Z"}, "schiste/blybot"
+    )
     await store.upsert(PROFILE)
-    assert await store.fetch_token(-100500, 0) == "ghp_secret"
-    assert await store.get_cursors(-100500, 0) == {"issues": "2026-07-05T00:00:00Z"}
+    assert await store.fetch_token(Scope("telegram", "-100500")) == "ghp_secret"
+    assert await store.get_cursors(Scope("telegram", "-100500")) == {
+        "issues": "2026-07-05T00:00:00Z"
+    }
 
 
 async def test_token_absent_reads_as_none() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    assert await store.fetch_token(-100500, 0) is None
-    assert await store.fetch_token(-999, 0) is None
+    assert await store.fetch_token(Scope("telegram", "-100500")) is None
+    assert await store.fetch_token(Scope("telegram", "-999")) is None
 
 
 async def test_delete_token_only_clears_the_token() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    await store.store_token(-100500, 0, "ghp_secret")
-    await store.delete_token(-100500, 0)
-    assert await store.fetch_token(-100500, 0) is None
-    assert await store.get(-100500, 0) == PROFILE
+    await store.store_token(Scope("telegram", "-100500"), "ghp_secret")
+    await store.delete_token(Scope("telegram", "-100500"))
+    assert await store.fetch_token(Scope("telegram", "-100500")) is None
+    assert await store.get(Scope("telegram", "-100500")) == PROFILE
 
 
 async def test_rotated_key_reads_as_no_token_and_logs(
@@ -417,10 +421,10 @@ async def test_rotated_key_reads_as_no_token_and_logs(
 ) -> None:
     fake = FakeToolsDb()
     old = ToolsDbStore(runner=fake, fernet_key=Fernet.generate_key().decode())
-    await old.store_token(-1, 0, "ghp_secret")
+    await old.store_token(Scope("telegram", "-1"), "ghp_secret")
     rotated = ToolsDbStore(runner=fake, fernet_key=Fernet.generate_key().decode())
     with caplog.at_level(logging.INFO, logger="blybot"):
-        assert await rotated.fetch_token(-1, 0) is None
+        assert await rotated.fetch_token(Scope("telegram", "-1")) is None
     assert any("token_vault" in message for message in caplog.messages)
 
 
@@ -429,20 +433,20 @@ async def test_actions_roundtrip_through_json_column() -> None:
     store = ToolsDbStore(runner=db, fernet_key=Fernet.generate_key().decode())
     spec = parse_action("daily@06:00 summarize model=large", now_iso="2026-07-25T12:00:00+00:00")
 
-    await store.set_actions(-1, 0, (spec,))
+    await store.set_actions(Scope("telegram", "-1"), (spec,))
 
-    assert await store.get_actions(-1, 0) == (spec,)
-    assert await store.list_scheduled() == [(ActionScope(chat_id=-1, thread_id=0), (spec,))]
+    assert await store.get_actions(Scope("telegram", "-1")) == (spec,)
+    assert await store.list_scheduled() == [(Scope("telegram", "-1"), (spec,))]
 
 
 async def test_actions_default_to_empty_and_empty_lists_are_not_scheduled() -> None:
     db = FakeToolsDb()
     store = ToolsDbStore(runner=db, fernet_key=Fernet.generate_key().decode())
 
-    assert await store.get_actions(-1, 0) == ()  # unconfigured scope
+    assert await store.get_actions(Scope("telegram", "-1")) == ()  # unconfigured scope
 
-    await store.set_actions(-1, 0, ())  # explicit empty: stored, never polled
-    assert await store.get_actions(-1, 0) == ()
+    await store.set_actions(Scope("telegram", "-1"), ())  # explicit empty: stored, never polled
+    assert await store.get_actions(Scope("telegram", "-1")) == ()
     assert await store.list_scheduled() == []
 
 
@@ -450,9 +454,11 @@ async def test_database_failure_raises_storage_error() -> None:
     store, fake = make_store()
     fake.fail = True
     with pytest.raises(StorageError):
-        await store.get(-1, 0)
+        await store.get(Scope("telegram", "-1"))
     with pytest.raises(StorageError):
-        await store.migrate(-1, -2)  # the transactional path degrades the same way
+        await store.migrate(
+            Scope("telegram", "-1"), Scope("telegram", "-2")
+        )  # the transactional path degrades the same way
 
 
 def test_pymysql_runner_connects_with_cnf_credentials(
@@ -574,16 +580,18 @@ async def test_cursor_writes_are_repo_guarded() -> None:
     """An in-flight cursor map for the OLD binding never lands on a new one."""
     store, _ = make_store()
     await store.upsert(PROFILE)
-    await store.set_cursors(-100500, 0, {"issues": "stale"}, "some/other")  # repo mismatch
-    assert await store.get_cursors(-100500, 0) == {}
+    await store.set_cursors(
+        Scope("telegram", "-100500"), {"issues": "stale"}, "some/other"
+    )  # repo mismatch
+    assert await store.get_cursors(Scope("telegram", "-100500")) == {}
 
 
 async def test_migrate_rekeys_the_profile() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
-    await store.migrate(-100500, -200600)
-    assert await store.get(-100500, 0) is None
-    migrated = await store.get(-200600, 0)
+    await store.migrate(Scope("telegram", "-100500"), Scope("telegram", "-200600"))
+    assert await store.get(Scope("telegram", "-100500")) is None
+    migrated = await store.get(Scope("telegram", "-200600"))
     assert migrated is not None
     assert migrated.repo == PROFILE.repo
 
@@ -593,13 +601,13 @@ async def test_llm_settings_roundtrip_through_json_column() -> None:
     profile = replace(PROFILE, llm=LlmSettings(model="large", lang="fr"))
 
     await store.upsert(profile)
-    loaded = await store.get(PROFILE.chat_id, 0)
+    loaded = await store.get(PROFILE.scope)
 
     assert loaded is not None
     assert loaded.llm == LlmSettings(model="large", lang="fr")
 
     await store.upsert(replace(profile, llm=None))
-    reloaded = await store.get(PROFILE.chat_id, 0)
+    reloaded = await store.get(PROFILE.scope)
     assert reloaded is not None
     assert reloaded.llm is None
 
@@ -607,8 +615,8 @@ async def test_llm_settings_roundtrip_through_json_column() -> None:
 async def test_list_capture_enabled_filters() -> None:
     store, _fake = make_store()
     await store.upsert(replace(PROFILE, capture_enabled=True))
-    await store.upsert(GroupProfile(chat_id=-7))
+    await store.upsert(GroupProfile(scope=Scope("telegram", "-7")))
 
     listed = await store.list_capture_enabled()
 
-    assert [profile.chat_id for profile in listed] == [PROFILE.chat_id]
+    assert [int(profile.scope.channel) for profile in listed] == [int(PROFILE.scope.channel)]

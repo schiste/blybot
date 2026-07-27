@@ -34,7 +34,7 @@ from blybot.adapters.telegram.app import (
 )
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
-from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile, OutboundMessage
+from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile, OutboundMessage, Scope
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
@@ -184,7 +184,7 @@ async def test_post_init_starts_maintenance_and_shutdown_cancels_it() -> None:
 async def test_post_shutdown_flushes_buffers_then_releases_the_client() -> None:
     publisher = FakePublisher()
     lifecycle, _, release = make_lifecycle(publisher)
-    await lifecycle.transcription.record(chat_id=1, text="pending")
+    await lifecycle.transcription.record(scope=Scope("telegram", "1"), text="pending")
     lifecycle.transcription.debounce_seconds = 60  # simulate an unflushed buffer
     app = cast("_App", SimpleNamespace())
 
@@ -201,7 +201,7 @@ def test_maintenance_tick_sweeps_and_heartbeats(caplog: pytest.LogCaptureFixture
     counters = Counters()
     maintenance = Maintenance(sessions=sessions, counters=counters, heartbeat_every_ticks=2)
 
-    sessions.touch(chat_id=1)
+    sessions.touch(Scope("telegram", "1"))
     clock.advance(timedelta(hours=1))
     with caplog.at_level(logging.INFO, logger="blybot"):
         maintenance.tick(1)  # sweeps the expired session, no heartbeat yet
@@ -228,7 +228,7 @@ async def test_run_forever_ticks_until_cancelled() -> None:
 
 async def test_maintenance_tick_converges_pending_capture_revocations() -> None:
     store, clock = InMemoryProfiles(), FakeClock()
-    await store.upsert(GroupProfile(chat_id=-200, capture_enabled=True))
+    await store.upsert(GroupProfile(scope=Scope("telegram", "-200"), capture_enabled=True))
     capture = CaptureService(
         store=store,
         archive=InMemoryArchive(),
@@ -236,7 +236,7 @@ async def test_maintenance_tick_converges_pending_capture_revocations() -> None:
         clock=clock,
         counters=Counters(),
     )
-    capture.deny_scope(-200, 0)  # a revocation whose durable write failed
+    capture.deny_scope(Scope("telegram", "-200"))  # a revocation whose durable write failed
     lifecycle, _, _ = make_lifecycle()
     maintenance = lifecycle.maintenance
     maintenance.capture = capture
@@ -250,7 +250,7 @@ async def test_maintenance_tick_converges_pending_capture_revocations() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    profile = await store.get(-200, 0)
+    profile = await store.get(Scope("telegram", "-200"))
     assert profile is not None
     assert profile.capture_enabled is False  # durable within one tick, no post needed
 
@@ -277,8 +277,8 @@ async def test_repo_notify_loop_delivers_digests_and_survives_send_failures() ->
 
     async def fake_collect() -> list[OutboundMessage]:
         return [
-            OutboundMessage(chat_id=-13, thread_id=0, text="lost"),
-            OutboundMessage(chat_id=-1, thread_id=7, text="x/y:\n- Release"),
+            OutboundMessage(scope=Scope("telegram", "-13"), text="lost"),
+            OutboundMessage(scope=Scope("telegram", "-1", "7"), text="x/y:\n- Release"),
         ]
 
     notifier.collect = fake_collect  # type: ignore[method-assign]
@@ -368,7 +368,7 @@ async def _collect_sleeps() -> tuple[list[float], Any]:
 async def test_deliver_waits_out_flood_control_then_sends() -> None:
     waits, sleep = await _collect_sleeps()
     bot = _Flaky(RetryAfter(2), fail=1)
-    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    message = OutboundMessage(scope=Scope("telegram", "-1"), text="hi")
     await _deliver(cast("Any", bot), message, "repo_poll", sleep)
     assert bot.sent == ["hi"]
     assert waits == [3.0]  # retry_after (2) + a 1s margin, then the retry lands
@@ -377,7 +377,7 @@ async def test_deliver_waits_out_flood_control_then_sends() -> None:
 async def test_deliver_retries_a_timeout_then_sends() -> None:
     waits, sleep = await _collect_sleeps()
     bot = _Flaky(TimedOut(), fail=1)
-    message = OutboundMessage(chat_id=-1, thread_id=7, text="hi")
+    message = OutboundMessage(scope=Scope("telegram", "-1", "7"), text="hi")
     await _deliver(cast("Any", bot), message, "action_tick", sleep)
     assert bot.sent == ["hi"]
     assert waits == [1.0]
@@ -386,7 +386,7 @@ async def test_deliver_retries_a_timeout_then_sends() -> None:
 async def test_deliver_drops_after_persistent_flood_control() -> None:
     waits, sleep = await _collect_sleeps()
     bot = _Flaky(RetryAfter(1), fail=99)  # never recovers within the budget
-    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    message = OutboundMessage(scope=Scope("telegram", "-1"), text="hi")
     await _deliver(cast("Any", bot), message, "repo_poll", sleep)
     assert bot.sent == []  # dropped, not retried forever
     assert len(waits) == _DELIVERY_MAX_RETRIES  # bounded retries, then give up
@@ -395,7 +395,7 @@ async def test_deliver_drops_after_persistent_flood_control() -> None:
 async def test_deliver_drops_after_persistent_timeout() -> None:
     waits, sleep = await _collect_sleeps()
     bot = _Flaky(TimedOut(), fail=99)
-    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    message = OutboundMessage(scope=Scope("telegram", "-1"), text="hi")
     await _deliver(cast("Any", bot), message, "action_tick", sleep)
     assert bot.sent == []
     assert len(waits) == _DELIVERY_MAX_RETRIES
@@ -420,7 +420,7 @@ async def test_deliver_survives_a_non_telegram_error() -> None:
             msg = "schema drift"
             raise RuntimeError(msg)
 
-    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    message = OutboundMessage(scope=Scope("telegram", "-1"), text="hi")
     # Must return (drop the message), not propagate.
     await _deliver(cast("Any", Boom()), message, "action_tick", sleep)
 
@@ -605,8 +605,8 @@ async def test_action_tick_loop_delivers_messages_and_survives_failures() -> Non
 
     async def fake_collect() -> list[OutboundMessage]:
         return [
-            OutboundMessage(chat_id=-13, thread_id=0, text="lost"),
-            OutboundMessage(chat_id=-1, thread_id=7, text="Published: url"),
+            OutboundMessage(scope=Scope("telegram", "-13"), text="lost"),
+            OutboundMessage(scope=Scope("telegram", "-1", "7"), text="Published: url"),
         ]
 
     scheduler.collect = fake_collect
@@ -681,11 +681,10 @@ async def test_heartbeat_reports_archive_size(caplog: pytest.LogCaptureFixture) 
 async def test_maintenance_sweeps_archive_retention_on_the_heartbeat() -> None:
     clock = FakeClock()
     store, archive = InMemoryProfiles(), InMemoryArchive()
-    await store.upsert(GroupProfile(chat_id=-1, capture_enabled=True))
+    await store.upsert(GroupProfile(scope=Scope("telegram", "-1"), capture_enabled=True))
     archive.messages.append(
         CapturedMessage(
-            chat_id=-1,
-            thread_id=0,
+            scope=Scope("telegram", "-1"),
             message_id=1,
             posted_at=clock.now() - timedelta(days=100),
             author="a",

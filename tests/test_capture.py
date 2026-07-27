@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 
-from blybot.domain.models import CapturedMessage, GroupProfile
+from blybot.domain.models import CapturedMessage, GroupProfile, Scope
 from blybot.observability import Counters
 from blybot.services.capture import MAX_TEXT_CHARS, CaptureReminder, CaptureService
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
+
+
+def sc(chat_id: int, thread: int = 0) -> Scope:
+    return Scope("telegram", str(chat_id), str(thread) if thread else "")
 
 
 def make_service(
@@ -33,8 +37,7 @@ def msg(
     message_id: int = 1, text: str = "hello", chat_id: int = -1, thread_id: int = 0
 ) -> CapturedMessage:
     return CapturedMessage(
-        chat_id=chat_id,
-        thread_id=thread_id,
+        scope=sc(chat_id, thread_id),
         message_id=message_id,
         posted_at=FakeClock().now(),
         author="abc123",
@@ -43,12 +46,12 @@ def msg(
 
 
 async def enable(store: InMemoryProfiles, chat_id: int = -1) -> None:
-    await store.upsert(GroupProfile(chat_id=chat_id, capture_enabled=True))
+    await store.upsert(GroupProfile(scope=sc(chat_id), capture_enabled=True))
 
 
 async def test_disabled_scope_stores_nothing() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
-    await store.upsert(GroupProfile(chat_id=-1))  # profile exists, capture off
+    await store.upsert(GroupProfile(scope=sc(-1)))  # profile exists, capture off
     service, counters = make_service(store, archive, clock)
 
     await service.ingest(msg())
@@ -75,15 +78,15 @@ async def test_policy_is_cached_until_forgotten_or_expired() -> None:
     service, _counters = make_service(store, archive, clock)
     await service.ingest(msg(1))
 
-    await store.upsert(GroupProfile(chat_id=-1, capture_enabled=False))
+    await store.upsert(GroupProfile(scope=sc(-1), capture_enabled=False))
     await service.ingest(msg(2))  # cached decision still says on
     assert len(archive.messages) == 2
 
-    service.forget_scope(-1, 0)
+    service.forget_scope(sc(-1))
     await service.ingest(msg(3))  # cache busted: the off switch applies
     assert len(archive.messages) == 2
 
-    await store.upsert(GroupProfile(chat_id=-1, capture_enabled=True))
+    await store.upsert(GroupProfile(scope=sc(-1), capture_enabled=True))
     clock.advance(timedelta(seconds=61))  # TTL expiry also re-reads
     await service.ingest(msg(4))
     assert len(archive.messages) == 3
@@ -97,13 +100,13 @@ async def test_a_revocation_mid_read_never_repoisons_the_cache() -> None:
     original_get = store.get
     fired = {"done": False}
 
-    async def racing_get(chat_id: int, thread_id: int) -> GroupProfile | None:
+    async def racing_get(scope: Scope) -> GroupProfile | None:
         # The read observes the stale True, but a revocation lands before
         # it returns — exactly the deny_scope-vs-in-flight-_enabled race.
-        profile = await original_get(chat_id, thread_id)
+        profile = await original_get(scope)
         if not fired["done"]:
             fired["done"] = True
-            service.deny_scope(chat_id, thread_id)
+            service.deny_scope(scope)
         return profile
 
     store.get = racing_get  # type: ignore[method-assign]
@@ -112,7 +115,7 @@ async def test_a_revocation_mid_read_never_repoisons_the_cache() -> None:
 
     # The epoch guard refused to cache the stale True the read observed, so
     # nothing lingers to serve capture after consent was revoked.
-    assert (-1, 0) not in service._enabled_cache
+    assert sc(-1) not in service._enabled_cache
 
 
 async def test_ingest_ceiling_throttles_a_flood() -> None:
@@ -130,13 +133,13 @@ async def test_ingest_ceiling_throttles_a_flood() -> None:
 async def test_a_topic_opt_out_beats_the_enabled_group_default() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
     await enable(store)  # group default: on
-    await store.upsert(GroupProfile(chat_id=-1, thread_id=7, capture_enabled=False))
+    await store.upsert(GroupProfile(scope=sc(-1, 7), capture_enabled=False))
     service, _counters = make_service(store, archive, clock)
 
     await service.ingest(msg(1, thread_id=7))  # explicitly opted out
     await service.ingest(msg(2, thread_id=8))  # undecided: inherits on
 
-    assert [m.thread_id for m in archive.messages] == [8]
+    assert [m.scope.thread for m in archive.messages] == ["8"]
 
 
 async def test_group_capture_off_reaches_inheriting_topics_promptly() -> None:
@@ -145,16 +148,16 @@ async def test_group_capture_off_reaches_inheriting_topics_promptly() -> None:
     service, _counters = make_service(store, archive, clock)
     await service.ingest(msg(1, thread_id=7))  # topic decision now cached
 
-    await store.upsert(GroupProfile(chat_id=-1, capture_enabled=False))
-    service.forget_scope(-1, 0)  # what /capture off in General does
+    await store.upsert(GroupProfile(scope=sc(-1), capture_enabled=False))
+    service.forget_scope(sc(-1))  # what /capture off in General does
 
     await service.ingest(msg(2, thread_id=7))  # cached True must be gone
-    assert [m.thread_id for m in archive.messages] == [7]
+    assert [m.scope.thread for m in archive.messages] == ["7"]
     assert archive.messages[0].message_id == 1
 
     # A topic-level change busts only that topic's entry.
-    await store.upsert(GroupProfile(chat_id=-1, thread_id=7, capture_enabled=True))
-    service.forget_scope(-1, 7)
+    await store.upsert(GroupProfile(scope=sc(-1, 7), capture_enabled=True))
+    service.forget_scope(sc(-1, 7))
     await service.ingest(msg(3, thread_id=7))
     assert [m.message_id for m in archive.messages] == [1, 3]
 
@@ -165,13 +168,13 @@ async def test_denied_scope_never_archives_and_converges_the_disable() -> None:
     service, _counters = make_service(store, archive, clock)
 
     store.fail = True  # the outage during which consent was revoked
-    service.deny_scope(-1, 0)
+    service.deny_scope(sc(-1))
     await service.ingest(msg(1))  # storage still down: denied, retry fails
     store.fail = False
     await service.ingest(msg(2))  # storage back: still denied, disable lands
 
     assert archive.messages == []  # nothing archived at any point
-    profile = await store.get(-1, 0)
+    profile = await store.get(sc(-1))
     assert profile is not None
     assert profile.capture_enabled is False  # the retry made it durable
     await service.ingest(msg(3))  # tombstone gone; durable state now rules
@@ -183,13 +186,13 @@ async def test_retry_denied_converges_quiet_scopes_without_a_message() -> None:
     await enable(store)  # durable True that a failed revocation left behind
     service, _counters = make_service(store, archive, clock)
     store.fail = True
-    service.deny_scope(-1, 0)
+    service.deny_scope(sc(-1))
 
     await service.retry_denied()  # storage still down: tombstone stays
     store.fail = False
     await service.retry_denied()  # recovery tick: disable becomes durable
 
-    profile = await store.get(-1, 0)
+    profile = await store.get(sc(-1))
     assert profile is not None
     assert profile.capture_enabled is False  # no message needed to converge
     await service.ingest(msg(1))
@@ -203,28 +206,28 @@ class GatedGetProfiles(InMemoryProfiles):
         super().__init__()
         self.gate = asyncio.Event()
 
-    async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
-        result = await super().get(chat_id, thread_id)
+    async def get(self, scope: Scope) -> GroupProfile | None:
+        result = await super().get(scope)
         await self.gate.wait()
         return result
 
 
 async def test_pending_retry_never_clobbers_a_fresh_enable() -> None:
     store, archive, clock = GatedGetProfiles(), InMemoryArchive(), FakeClock()
-    await InMemoryProfiles.upsert(store, GroupProfile(chat_id=-1, capture_enabled=True))
+    await InMemoryProfiles.upsert(store, GroupProfile(scope=sc(-1), capture_enabled=True))
     service, _counters = make_service(store, archive, clock)
-    service.deny_scope(-1, 0)
+    service.deny_scope(sc(-1))
 
     retry = asyncio.ensure_future(service.retry_denied())
     await asyncio.sleep(0)  # the retry holds the transition lock, parked in its read
-    enable = asyncio.ensure_future(service.enable_scope(-1, 0))
+    enable = asyncio.ensure_future(service.enable_scope(sc(-1)))
     for _ in range(3):
         await asyncio.sleep(0)  # the fresh consent queues behind the lock
     store.gate.set()
     await retry
     await enable
 
-    profile = await store.get(-1, 0)
+    profile = await store.get(sc(-1))
     assert profile is not None
     assert profile.capture_enabled is True  # the fresh consent always wins
     await service.ingest(msg(1))
@@ -233,11 +236,11 @@ async def test_pending_retry_never_clobbers_a_fresh_enable() -> None:
 
 async def test_a_queued_retry_aborts_once_the_enable_wins_the_lock() -> None:
     store, archive, clock = GatedGetProfiles(), InMemoryArchive(), FakeClock()
-    await InMemoryProfiles.upsert(store, GroupProfile(chat_id=-1, capture_enabled=True))
+    await InMemoryProfiles.upsert(store, GroupProfile(scope=sc(-1), capture_enabled=True))
     service, _counters = make_service(store, archive, clock)
-    service.deny_scope(-1, 0)
+    service.deny_scope(sc(-1))
 
-    enable = asyncio.ensure_future(service.enable_scope(-1, 0))
+    enable = asyncio.ensure_future(service.enable_scope(sc(-1)))
     await asyncio.sleep(0)  # the enable holds the transition lock, parked in its read
     retry = asyncio.ensure_future(service.retry_denied())
     for _ in range(3):
@@ -246,7 +249,7 @@ async def test_a_queued_retry_aborts_once_the_enable_wins_the_lock() -> None:
     await enable
     await retry
 
-    profile = await store.get(-1, 0)
+    profile = await store.get(sc(-1))
     assert profile is not None
     assert profile.capture_enabled is True  # the cancelled revocation aborted
 
@@ -255,9 +258,9 @@ async def test_clear_denial_restores_normal_policy_reads() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
     await enable(store)
     service, _counters = make_service(store, archive, clock)
-    service.deny_scope(-1, 0)
+    service.deny_scope(sc(-1))
 
-    service.clear_denial(-1, 0)  # e.g. a fresh announced enable landed
+    service.clear_denial(sc(-1))  # e.g. a fresh announced enable landed
 
     await service.ingest(msg(1))
     assert len(archive.messages) == 1
@@ -266,7 +269,7 @@ async def test_clear_denial_restores_normal_policy_reads() -> None:
 async def test_retry_disable_with_no_stale_row_just_lifts_the_denial() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
     service, _counters = make_service(store, archive, clock)
-    service.deny_scope(-99, 0)  # no profile row exists for this scope
+    service.deny_scope(sc(-99))  # no profile row exists for this scope
 
     await service.ingest(msg(1, chat_id=-99))  # nothing to disable: converged
     await service.ingest(msg(2, chat_id=-99))  # denial lifted; policy says off
@@ -283,7 +286,7 @@ async def test_one_busy_topic_never_throttles_its_siblings() -> None:
         await service.ingest(msg(message_id, thread_id=7))  # capped at 2
     await service.ingest(msg(9, thread_id=8))  # sibling scope: own budget
 
-    assert [m.thread_id for m in archive.messages] == [7, 7, 8]
+    assert [m.scope.thread for m in archive.messages] == ["7", "7", "8"]
     assert counters.snapshot()["captures_throttled"] == 2
 
 
@@ -325,26 +328,23 @@ async def test_forum_topics_inherit_the_group_capture_default() -> None:
     await enable(store)  # /capture on in General (thread 0)
     service, _counters = make_service(store, archive, clock)
     topic_message = CapturedMessage(
-        chat_id=-1, thread_id=42, message_id=1, posted_at=clock.now(), author="abc", text="hi"
+        scope=sc(-1, 42), message_id=1, posted_at=clock.now(), author="abc", text="hi"
     )
 
     await service.ingest(topic_message)
     assert len(archive.messages) == 1
 
     # An explicitly enabled topic works without a group default too.
-    await store.upsert(GroupProfile(chat_id=-2, thread_id=7, capture_enabled=True))
+    await store.upsert(GroupProfile(scope=sc(-2, 7), capture_enabled=True))
     await service.ingest(
-        CapturedMessage(
-            chat_id=-2, thread_id=7, message_id=2, posted_at=clock.now(), author="x", text="y"
-        )
+        CapturedMessage(scope=sc(-2, 7), message_id=2, posted_at=clock.now(), author="x", text="y")
     )
     assert len(archive.messages) == 2
 
 
 def _at(clock: FakeClock, days_ago: int, message_id: int) -> CapturedMessage:
     return CapturedMessage(
-        chat_id=-1,
-        thread_id=0,
+        scope=sc(-1),
         message_id=message_id,
         posted_at=clock.now() - timedelta(days=days_ago),
         author="a",
@@ -414,7 +414,7 @@ async def test_reminders_fire_once_per_cadence_never_at_first_sight() -> None:
 
     clock.advance(timedelta(days=2))
     (message,) = await reminder.collect()
-    assert message.chat_id == -1
+    assert int(message.scope.channel) == -1
     assert "/capture off" in message.text
     assert await reminder.collect() == []  # rescheduled, not repeated
 

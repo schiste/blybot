@@ -83,13 +83,13 @@ def loads_llm(text: str | None) -> LlmSettings | None:
     return LlmSettings(
         platform=platform if platform in _PLATFORMS else "liftwing",
         model=model if model in _MODEL_ALIASES else "default",
-        lang=lang if _valid_lang(lang) else "en",
+        lang=lang if valid_lang(lang) else "en",
         temperature=min(max(temperature, 0.0), 1.0),
         max_tokens=max(1, max_tokens),
     )
 
 
-def _valid_lang(lang: str) -> bool:
+def valid_lang(lang: str) -> bool:
     """Whether ``lang`` is a short alphabetic language code (not free text)."""
     return lang.replace("-", "").isalpha() and len(lang) <= _MAX_LANG_LEN
 
@@ -107,7 +107,7 @@ def _apply(settings: LlmSettings, key: str, value: str, ceiling: int) -> LlmSett
         return replace(settings, model=value)
     if key == "lang":
         cleaned = value.lower()
-        if not _valid_lang(cleaned):
+        if not valid_lang(cleaned):
             msg = "lang must be a short language code, e.g. lang:en or lang:fr"
             raise LlmParseError(msg)
         return replace(settings, lang=cleaned)

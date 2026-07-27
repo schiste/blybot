@@ -222,7 +222,7 @@ REMINDER_TEXT: Final = (
 class CaptureReminder:
     """Periodic re-announcement for capture-enabled scopes (v3 §1).
 
-    A :class:`~blybot.adapters.telegram.app.MessageCollector` on the
+    A :class:`~blybot.services.delivery.MessageCollector` on the
     shared tick. Cadence state is memory-only on purpose: a restart
     resets every scope's timer, so the worst failure mode is a *late*
     reminder — never a spammed one.

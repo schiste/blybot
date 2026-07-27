@@ -11,6 +11,7 @@ from blybot.domain.models import (
     CapturedMessage,
     GroupProfile,
     OutboundMessage,
+    PlatformCapabilities,
     PromptRequest,
     PromptResult,
     Pseudonym,
@@ -20,8 +21,33 @@ from blybot.domain.models import (
     Scope,
     StepSpec,
 )
-from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
+from blybot.domain.ports import (
+    IssueTrackerError,
+    PermanentTransportError,
+    StorageError,
+    WikiWriteError,
+)
 from blybot.domain.subscriptions import Subscription
+
+
+@dataclass
+class FakeTransport:
+    """Transport fake: records sends; permanently-fails chosen scope keys.
+
+    ``capabilities`` defaults to a bare cap so tests that only exercise the
+    delivery loop need not spell out a full descriptor.
+    """
+
+    capabilities: PlatformCapabilities = field(
+        default_factory=lambda: PlatformCapabilities(max_message_chars=4096)
+    )
+    sent: list[OutboundMessage] = field(default_factory=list)
+    permanent_fail_keys: set[str] = field(default_factory=set)
+
+    async def send(self, message: OutboundMessage) -> None:
+        if message.scope.key in self.permanent_fail_keys:
+            raise PermanentTransportError
+        self.sent.append(message)
 
 
 @dataclass

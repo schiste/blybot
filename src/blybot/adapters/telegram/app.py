@@ -16,13 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 from dataclasses import dataclass, field
-from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final
 
 from telegram import Update
-from telegram.error import RetryAfter, TelegramError, TimedOut
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -32,15 +29,13 @@ from telegram.ext import (
     filters,
 )
 
-from blybot.adapters.telegram._common import send_threaded, telegram_target
-from blybot.domain.models import OutboundMessage
+from blybot.adapters.telegram.transport import TelegramTransport
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
+from blybot.services.delivery import message_loop
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-    from telegram import Bot
 
     from blybot.adapters.telegram.admin import AdminHandlers
     from blybot.adapters.telegram.analyze import AnalysisHandlers
@@ -50,6 +45,7 @@ if TYPE_CHECKING:
     from blybot.domain.ports import MessageArchive
     from blybot.observability import Counters
     from blybot.services.capture import CaptureService
+    from blybot.services.delivery import MessageCollector
     from blybot.services.notify import RepoNotifier
     from blybot.services.schedule import ActionScheduler
     from blybot.services.sessions import SessionRegistry
@@ -135,23 +131,26 @@ class Lifecycle:
             except StorageError:
                 log_event("storage_bootstrap", "error")
         loop = asyncio.get_running_loop()
+        # The transport wraps the live bot; the neutral delivery loop only
+        # ever sees this port, never python-telegram-bot.
+        transport = TelegramTransport(app.bot)
         self._maintenance_task = loop.create_task(self.maintenance.run_forever())
         if self.notifier is not None:
             self._notify_task = loop.create_task(
-                message_loop(app.bot, self.notifier, self.poll_interval_seconds, "repo_poll")
+                message_loop(transport, self.notifier, self.poll_interval_seconds, "repo_poll")
             )
         if self.scheduler is not None:
             self._actions_task = loop.create_task(
-                message_loop(app.bot, self.scheduler, self.poll_interval_seconds, "action_tick")
+                message_loop(transport, self.scheduler, self.poll_interval_seconds, "action_tick")
             )
         if self.reminder is not None:
             self._reminder_task = loop.create_task(
-                message_loop(app.bot, self.reminder, self.poll_interval_seconds, "capture_remind")
+                message_loop(transport, self.reminder, self.poll_interval_seconds, "capture_remind")
             )
         if self.subscription_scheduler is not None:
             self._sub_task = loop.create_task(
                 message_loop(
-                    app.bot, self.subscription_scheduler, self.poll_interval_seconds, "sub_tick"
+                    transport, self.subscription_scheduler, self.poll_interval_seconds, "sub_tick"
                 )
             )
         log_event("startup", "ok")
@@ -184,113 +183,6 @@ async def _archive_heartbeat(archive: MessageArchive) -> None:
         log_event("archive_size", "ok", rows=await archive.total())
     except StorageError:
         log_event("archive_size", "error")
-
-
-class MessageCollector(Protocol):
-    """Anything the background tick can poll for outbound chat messages.
-
-    Both the repo notifier and the action scheduler implement this —
-    one delivery loop serves every collector (v3 phase 5 unification).
-    """
-
-    async def collect(self) -> list[OutboundMessage]:
-        """Return this cycle's messages; called once per tick."""
-        ...
-
-
-_DELIVERY_MAX_RETRIES: Final = 3
-
-
-async def _deliver(
-    bot: Bot,
-    message: OutboundMessage,
-    label: str,
-    sleep: Callable[[float], Awaitable[None]],
-) -> None:
-    """Send one message, honoring Telegram flood-control.
-
-    ``RetryAfter`` (the bot is rate-limited) is waited out and retried;
-    ``TimedOut`` is a transient network blip and retried after a short
-    pause. Both are bounded by ``_DELIVERY_MAX_RETRIES`` — a scope that
-    stays rate-limited past the budget is dropped like any other
-    undeliverable message, never retried forever. Every other
-    ``TelegramError`` (kicked, muted, chat-not-found) is permanent for
-    this message and dropped at once. These three are *subclasses* of
-    ``TelegramError``, so they must be caught before it.
-    """
-    reason = ""
-    delay = 0.0
-    chat_id, thread_id = telegram_target(message.scope)
-    for attempt in range(_DELIVERY_MAX_RETRIES + 1):
-        try:
-            await send_threaded(bot, chat_id, thread_id or 0, message.text)
-        except RetryAfter as exc:
-            # retry_after is a timedelta under PTB_TIMEDELTA (an int on the
-            # legacy path); honor the stated wait plus a 1s margin.
-            wait = exc.retry_after
-            seconds = wait.total_seconds() if isinstance(wait, timedelta) else wait
-            reason, delay = "flood", seconds + 1
-        except TimedOut:
-            reason, delay = "timeout", 1.0
-        except TelegramError:
-            # Kicked from the group, muted, etc. — that scope's message is
-            # lost, every other scope's still goes out.
-            log_event(f"{label}_delivery", "ignored")
-            return
-        except Exception as exc:  # keep the delivery task alive
-            # A non-Telegram error (a bug, an asyncio glitch) must not
-            # escape and kill the whole background task — drop this one
-            # message and carry on, mirroring the collect() guard. Log the
-            # exception *type* only (privacy: never its message text).
-            log_event(f"{label}_delivery", "error", error=type(exc).__name__)
-            return
-        else:
-            return  # sent
-        if attempt < _DELIVERY_MAX_RETRIES:
-            await sleep(delay)
-    # Still rate-limited/timing-out past the retry budget: drop like any
-    # other undeliverable message rather than retry forever.
-    log_event(f"{label}_delivery", "ignored", reason=reason)
-
-
-def _next_deadline(previous: float, interval: float, now: float) -> float:
-    """The next tick deadline: anchored to the schedule, missed ticks not replayed.
-
-    When the work finished within the interval the cadence stays exactly
-    on ``previous + interval`` (no drift); when it overran, the deadline
-    resyncs to ``now + interval`` so a slow tick does not trigger a burst
-    of catch-up ticks.
-    """
-    candidate = previous + interval
-    return candidate if candidate > now else now + interval
-
-
-async def message_loop(  # noqa: PLR0913 -- sleep/monotonic are injected test seams
-    bot: Bot,
-    collector: MessageCollector,
-    interval_seconds: float,
-    label: str,
-    *,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> None:
-    """Poll ``collector`` and deliver its messages until cancelled.
-
-    The cadence is anchored to a fixed deadline rather than sleeping a
-    whole interval *after* the work, so a slow tick (e.g. a minutes-long
-    analysis) does not push every later tick progressively late.
-    """
-    next_at = monotonic() + interval_seconds
-    while True:
-        await sleep(max(0.0, next_at - monotonic()))
-        try:
-            messages = await collector.collect()
-        except Exception:
-            log_event(label, "error")
-            messages = []
-        for message in messages:
-            await _deliver(bot, message, label, sleep)
-        next_at = _next_deadline(next_at, interval_seconds, monotonic())
 
 
 def build_application(  # noqa: PLR0913 -- one handler bundle per concern

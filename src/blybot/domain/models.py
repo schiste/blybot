@@ -488,7 +488,7 @@ class ActionSpec:
     trigger: TriggerSpec
     source: StepSpec
     transforms: tuple[StepSpec, ...] = ()
-    sink: StepSpec = field(default_factory=lambda: StepSpec(name="telegram_reply"))
+    sink: StepSpec = field(default_factory=lambda: StepSpec(name="reply"))
     last_run: datetime | None = None
 
 

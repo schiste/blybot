@@ -235,6 +235,7 @@ async def test_maintenance_tick_converges_pending_capture_revocations() -> None:
         limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
         clock=clock,
         counters=Counters(),
+        max_chars=4096,
     )
     capture.deny_scope(Scope("telegram", "-200"))  # a revocation whose durable write failed
     lifecycle, _, _ = make_lifecycle()
@@ -435,6 +436,7 @@ def make_capture_handlers() -> Any:
             limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
             clock=clock,
             counters=Counters(),
+            max_chars=4096,
         ),
         masker=HmacAuthorMasker(key="k"),
         directory=ChannelDirectory(
@@ -696,6 +698,7 @@ async def test_maintenance_sweeps_archive_retention_on_the_heartbeat() -> None:
         limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
         clock=clock,
         counters=Counters(),
+        max_chars=4096,
         retention_window=timedelta(days=7),
     )
     sessions = SessionRegistry(

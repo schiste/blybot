@@ -50,7 +50,6 @@ _WINDOW_RE: Final = re.compile(r"^(\d+)([hd])$")
 MAX_WINDOW: Final = timedelta(days=30)
 DEFAULT_WINDOW: Final = "24h"
 _TOP_AUTHORS: Final = 5
-_REPLY_CAP_CHARS: Final = 3500  # stay under Telegram's 4096 with margin
 _ABORT: Final = "The analysis failed and nothing was published — try again later."
 
 
@@ -400,8 +399,15 @@ class WikiSectionSink:
 
 
 @dataclass(eq=False)
-class TelegramReplySink:
-    """Returns the report as chat text for the transport to send."""
+class ChatReplySink:
+    """Returns the report as chat text for the transport to send.
+
+    ``max_chars`` is the platform's per-message character cap, injected
+    from its :class:`~blybot.domain.models.PlatformCapabilities` so the
+    sink never hard-codes one platform's limit.
+    """
+
+    max_chars: int
 
     async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         """Render the report as one bounded chat message."""
@@ -411,8 +417,8 @@ class TelegramReplySink:
         else:
             body = "\n".join(f"• {item}" for item in report.items)
         text = f"{_title(report)} ({_scope_line(report)}):\n{body}"
-        if len(text) > _REPLY_CAP_CHARS:
-            text = f"{text[:_REPLY_CAP_CHARS]}…"
+        if len(text) > self.max_chars:
+            text = f"{text[: self.max_chars]}…"
         message = OutboundMessage(scope=context.scope, text=text)
         return (message,)
 

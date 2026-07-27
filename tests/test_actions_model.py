@@ -183,9 +183,9 @@ def test_describe_action_reads_as_one_line() -> None:
 def test_describe_action_renders_command_triggers() -> None:
     spec = loads_actions(
         '[{"id":"ab12","trigger":{"kind":"command","command":"summarize"},'
-        '"source":{"name":"archive_window"},"transforms":[],"sink":{"name":"telegram_reply"}}]'
+        '"source":{"name":"archive_window"},"transforms":[],"sink":{"name":"reply"}}]'
     )[0]
-    assert describe_action(spec) == "[ab12] /summarize: archive_window → telegram_reply"
+    assert describe_action(spec) == "[ab12] /summarize: archive_window → reply"
 
 
 def test_actions_round_trip_through_json() -> None:

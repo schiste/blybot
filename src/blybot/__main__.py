@@ -38,9 +38,9 @@ from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging
 from blybot.services.analyze import (
     ArchiveWindowSource,
+    ChatReplySink,
     PromptTransform,
     StatsTransform,
-    TelegramReplySink,
     WikiSectionSink,
     explicit_page_resolver,
 )
@@ -170,7 +170,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
     if store is not None:
         sources["repo_events"] = RepoEventsSource(store=store, vault=store, gateway=gateway)
         transforms["rule_match"] = RuleMatchTransform(counters=counters)
-        sinks["telegram_message"] = ChatMessagesSink()
+        sinks["chat_message"] = ChatMessagesSink()
     if store is not None and archive is not None:
         llm_defaults = LlmSettings(lang=config.llm_default_lang)
         llm_client = LiftWingClient(
@@ -202,7 +202,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             edit_summary=config.edit_summary,
             bot_name=config.bot_name,
         )
-        sinks["telegram_reply"] = TelegramReplySink()
+        sinks["reply"] = ChatReplySink(max_chars=4096)
     engine = ActionEngine(
         sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock
     )
@@ -295,6 +295,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             ),
             clock=clock,
             counters=counters,
+            max_chars=4096,
             retention_window=timedelta(days=config.capture_retention_days),
         )
         capture_handlers = CaptureHandlers(

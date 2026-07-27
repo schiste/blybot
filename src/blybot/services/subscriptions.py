@@ -149,7 +149,7 @@ def _digest_spec(sub: Subscription) -> ActionSpec:
         trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="subscription"),
         source=StepSpec(name="archive_window", params=(("window", "since_last_run"),)),
         transforms=_recipe_transforms(sub.recipe, sub.lang),
-        sink=StepSpec(name="telegram_reply"),
+        sink=StepSpec(name="reply"),
         last_run=sub.last_run,
     )
 

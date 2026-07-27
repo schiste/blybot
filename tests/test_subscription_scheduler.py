@@ -30,7 +30,7 @@ def make(
     engine = ActionEngine(
         sources={"archive_window": FakeSource(payload="hello")},
         transforms={"prompt": SuffixTransform(), "stats": SuffixTransform()},
-        sinks={"telegram_reply": FakeSink(messages=(DIGEST,))},
+        sinks={"reply": FakeSink(messages=(DIGEST,))},
         counters=counters,
         clock=clock,
     )

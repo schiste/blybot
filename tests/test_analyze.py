@@ -25,9 +25,9 @@ from blybot.observability import Counters
 from blybot.services.actions import command_action, parse_action
 from blybot.services.analyze import (
     ArchiveWindowSource,
+    ChatReplySink,
     PromptTransform,
     StatsTransform,
-    TelegramReplySink,
     WikiSectionSink,
     explicit_page_resolver,
     parse_window,
@@ -458,8 +458,8 @@ async def test_wiki_sink_renders_stats_reports_too() -> None:
         await sink.deliver(context(), "not a report")
 
 
-async def test_telegram_sink_renders_and_bounds_the_reply() -> None:
-    sink = TelegramReplySink()
+async def test_chat_reply_sink_renders_and_bounds_the_reply() -> None:
+    sink = ChatReplySink(max_chars=4096)
 
     (message,) = await sink.deliver(context(), analysis_report())
     assert message.scope == SCOPE
@@ -467,7 +467,9 @@ async def test_telegram_sink_renders_and_bounds_the_reply() -> None:
 
     huge = analysis_report(items=tuple(f"item {i} " + "x" * 590 for i in range(10)))
     (bounded,) = await sink.deliver(context(), huge)
-    assert len(bounded.text) <= 3501  # capped with an ellipsis
+    # Capped at the injected platform cap (4096) with an ellipsis.
+    assert bounded.text.endswith("…")
+    assert len(bounded.text) == 4097
 
     stats = StatsReport(
         message_count=1,

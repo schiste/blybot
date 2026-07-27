@@ -38,7 +38,7 @@ def make_notifier(
     engine = ActionEngine(
         sources={"repo_events": RepoEventsSource(store=store, vault=store, gateway=gateway)},
         transforms={"rule_match": RuleMatchTransform(counters=Counters())},
-        sinks={"telegram_message": ChatMessagesSink()},
+        sinks={"chat_message": ChatMessagesSink()},
         counters=Counters(),
         clock=FakeClock(),
     )

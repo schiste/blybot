@@ -29,7 +29,7 @@ from telegram.ext import (
     filters,
 )
 
-from blybot.adapters.telegram.transport import TelegramTransport
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES, TelegramTransport
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 from blybot.services.delivery import message_loop
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from blybot.adapters.telegram.capture import CaptureHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.adapters.telegram.subscribe import SubscriptionHandlers
+    from blybot.domain.models import PlatformCapabilities
     from blybot.domain.ports import MessageArchive
     from blybot.observability import Counters
     from blybot.services.capture import CaptureService
@@ -194,6 +195,7 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
     subscription_handlers: SubscriptionHandlers | None = None,
+    capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
 ) -> _App:
     """Build the PTB application with every handler registered."""
     application = (
@@ -256,9 +258,12 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
     application.add_handler(
         ChatMemberHandler(group_handlers.on_newcomer, ChatMemberHandler.CHAT_MEMBER)
     )
-    application.add_handler(
-        MessageHandler(filters.StatusUpdate.MIGRATE, group_handlers.on_migration)
-    )
+    if capabilities.id_can_change:
+        # Only platforms whose chat ids can migrate (Telegram's group ->
+        # supergroup upgrade) need the re-key handler.
+        application.add_handler(
+            MessageHandler(filters.StatusUpdate.MIGRATE, group_handlers.on_migration)
+        )
     application.add_handler(
         MessageHandler(
             filters.ChatType.PRIVATE & filters.StatusUpdate.CHAT_SHARED,
@@ -318,6 +323,7 @@ def run_polling(  # noqa: PLR0913 -- one handler bundle per concern
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
     subscription_handlers: SubscriptionHandlers | None = None,
+    capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
 ) -> None:
     """Poll until stopped; blocks for the process lifetime."""
     application = build_application(
@@ -329,6 +335,7 @@ def run_polling(  # noqa: PLR0913 -- one handler bundle per concern
         capture_handlers,
         analysis_handlers,
         subscription_handlers,
+        capabilities,
     )
     allowed = list(_ALLOWED_UPDATES)
     if analysis_handlers is not None:

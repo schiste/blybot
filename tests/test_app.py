@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -29,6 +30,7 @@ from blybot.adapters.telegram.app import (
 )
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
 from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile, OutboundMessage, Scope
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
@@ -107,6 +109,23 @@ def test_build_registers_every_handler() -> None:
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
     assert 1 not in application.handlers  # no capture: group 1 stays empty
+
+
+def test_migration_handler_is_gated_on_id_can_change() -> None:
+    """A platform whose chat ids never migrate skips the re-key handler."""
+    group_handlers, _, _ = make_group_handlers()
+    private_handlers, _ = make_private_handlers()
+    lifecycle, _, _ = make_lifecycle()
+    application = build_application(
+        TOKEN,
+        group_handlers,
+        private_handlers,
+        make_admin_handlers(),
+        lifecycle,
+        capabilities=replace(TELEGRAM_CAPABILITIES, id_can_change=False),
+    )
+    kinds = [type(handler) for handler in application.handlers[0]]
+    assert kinds.count(MessageHandler) == 2  # migration handler not registered
 
 
 def test_build_paces_outgoing_calls_under_telegram_limits() -> None:
@@ -356,6 +375,7 @@ def _subscription_handlers() -> SubscriptionHandlers:
         subscriptions=InMemorySubscriptions(),
         binding=SubscriptionBinding(clock=FakeClock()),
         default_lang="en",
+        capabilities=TELEGRAM_CAPABILITIES,
     )
 
 

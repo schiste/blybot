@@ -44,9 +44,10 @@ if TYPE_CHECKING:
     from telegram import Bot, Chat, ChatMemberUpdated, Message, Update
     from telegram.ext import ContextTypes
 
+    from blybot.adapters.telegram.subscribe import SubscriptionHandlers
     from blybot.adapters.telegram.token_entry import TokenEntryHandler
     from blybot.domain.models import Session
-    from blybot.domain.ports import MessageArchive
+    from blybot.domain.ports import MessageArchive, SubscriptionStore
     from blybot.services.directory import ChannelDirectory, ChannelSettings
     from blybot.services.dm_routing import DmRouteRegistry
     from blybot.services.engine import ActionEngine
@@ -128,10 +129,13 @@ HELP_PRIVATE: Final = (
     "on Meta-wiki. It appears under a random per-session pseudonym.\n\n"
     "/whoami — show the pseudonym you currently appear as\n"
     "/flush — discard it and mint a fresh, unlinkable one\n"
+    "/mysubs — list your digest subscriptions; /unsubscribe <id> to stop one\n"
     "/privacy — what I collect and publish\n"
     "/bug — file an anonymous bug report with my maintainer\n"
     "/help — this message\n\n"
-    "In groups, reply to a text message with /log, or use /logmedia to include images."
+    "To subscribe to a group's digest here, open the link an admin shares after "
+    "/subscribable on. In groups, reply to a text message with /log, or use "
+    "/logmedia to include images."
 )
 HELP_GROUP: Final = (
     "Reply to a text message with /log to publish it anonymously to the Meta-wiki "
@@ -151,7 +155,7 @@ PRIVACY_TEXT: Final = (
     "/log entries carry no attribution at all; private messages appear under "
     "a random per-session pseudonym that is never derived from your account; "
     "capture-based summaries and statistics name nobody.\n\n"
-    "What I store: no user IDs or usernames — ever. Sessions live only in "
+    "What I store: by default no user IDs or usernames. Sessions live only in "
     "memory and vanish on timeout, /flush, or restart. For groups whose "
     "admins configure me, I keep that group's chat id, its chosen "
     "page/repository, and (encrypted) any API token an admin supplies — "
@@ -159,14 +163,20 @@ PRIVACY_TEXT: Final = (
     "additionally store message text with authors reduced to anonymous "
     "per-chat labels; the archive keeps the first version of a message — "
     "later edits and deletions in Telegram do not change it. /capture off "
-    "stops collection and /capture purge erases the archive. My "
-    "operational logs contain no content and no identifiers.\n\n"
+    "stops collection and /capture purge erases the archive. One exception "
+    "to the no-identifiers rule: if YOU choose to subscribe to a digest here "
+    "with /subscribe, I keep one record tying this private chat to the group "
+    "and delivery schedule you picked — the only place I durably store a "
+    "Telegram user identifier, kept solely to deliver your digest and erased "
+    "the moment you /unsubscribe. My operational logs contain no content and "
+    "no identifiers.\n\n"
     "What I cannot protect: content that identifies you in its own words, "
     "and the wiki's public edit timestamps.\n\n"
     "How I run: as a continuous job on Wikimedia Toolforge (Kubernetes), "
     "movement-hosted infrastructure — no third-party servers or analytics. "
     "Credentials live in a permission-restricted file on the tool account, and "
-    "the only stored state is the group-config row described above. I am free "
+    "the only stored state is the group-config row and any digest "
+    "subscriptions described above. I am free "
     "software (AGPL-3.0): every line, including this message, is auditable at "
     "https://github.com/schiste/blybot"
 )
@@ -267,6 +277,8 @@ class GroupHandlers:
     # Capture-enabled deployments only: the archive follows the group
     # across supergroup migrations, alongside its profiles.
     archive: MessageArchive | None = None
+    # Digest subscriptions also re-key on a supergroup upgrade (§21).
+    subscriptions: SubscriptionStore | None = None
     # The /log command message is deleted after this delay, hiding who
     # requested the publication. Requires the "Delete messages" admin
     # right; without it the cleanup is skipped silently.
@@ -412,6 +424,8 @@ class GroupHandlers:
                 # under the dead chat id would vanish from analyses and be
                 # unreachable by /capture purge.
                 await self.archive.migrate(message.chat.id, message.migrate_to_chat_id)
+            if self.subscriptions is not None:
+                await self.subscriptions.migrate(message.chat.id, message.migrate_to_chat_id)
         except StorageError:
             log_event("chat_migration", "error")
             return
@@ -569,6 +583,7 @@ class PrivateHandlers:
     feedback: FeedbackService | None
     bug_limiter: SlidingWindowLimiter
     token_entry: TokenEntryHandler
+    subscriptions: SubscriptionHandlers | None = None
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Deliver the welcome (R5), or redeem a configuration deep link.
@@ -584,6 +599,9 @@ class PrivateHandlers:
         payload = (context.args or [""])[0]
         if payload.startswith("cfg_"):
             await self.token_entry.redeem_link(update, context, chat.id, payload[4:])
+            return
+        if payload.startswith("sub_") and self.subscriptions is not None:
+            await self.subscriptions.redeem_link(context, chat.id, payload[4:])
             return
         await context.bot.send_message(chat_id=chat.id, text=self.welcome_text)
         log_event("welcome_delivered", "ok")

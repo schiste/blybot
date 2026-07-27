@@ -26,6 +26,7 @@ from blybot.domain.models import (
     Resource,
     StepSpec,
 )
+from blybot.domain.subscriptions import Subscription
 
 
 class WikiWriteError(Exception):
@@ -169,11 +170,47 @@ class ActionStore(Protocol):
         ...
 
 
+class SubscriptionStore(Protocol):
+    """Persists opt-in DM digest subscriptions (R6 carve-out, SPECIFICATION §21).
+
+    The one durable store keyed by a subscriber's private chat id. Isolated
+    from the profile/archive stores so the carve-out stays contained.
+    """
+
+    async def add(self, subscription: Subscription) -> None:
+        """Persist a new subscription."""
+        ...
+
+    async def remove(self, dm_chat_id: int, sub_id: str) -> bool:
+        """Delete the caller's subscription; return whether one existed."""
+        ...
+
+    async def list_for_user(self, dm_chat_id: int) -> list[Subscription]:
+        """Return every subscription this DM chat owns, oldest first."""
+        ...
+
+    async def list_all(self) -> list[Subscription]:
+        """Return every subscription (for the digest scheduler)."""
+        ...
+
+    async def stamp(self, sub_id: str, last_run: datetime) -> None:
+        """Advance a subscription's ``last_run`` watermark durably."""
+        ...
+
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        """Re-key a group's subscriptions after a group→supergroup upgrade."""
+        ...
+
+
 class ProfileStore(Protocol):
     """Persists per-group self-service profiles (spec 11: ToolsDB)."""
 
     async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
         """Return the (group, topic) profile, or ``None`` if unconfigured."""
+        ...
+
+    async def get_by_subscribe_code(self, code: str) -> GroupProfile | None:
+        """Return the scope whose ``subscribe_code`` matches, or ``None``."""
         ...
 
     async def upsert(self, profile: GroupProfile) -> None:

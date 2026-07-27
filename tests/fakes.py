@@ -21,6 +21,7 @@ from blybot.domain.models import (
     StepSpec,
 )
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
+from blybot.domain.subscriptions import Subscription
 
 
 @dataclass
@@ -170,6 +171,13 @@ class InMemoryProfiles:
         if profile is None:
             return None
         return replace(profile, has_token=key in self.tokens)
+
+    async def get_by_subscribe_code(self, code: str) -> GroupProfile | None:
+        self._check()
+        for key, profile in self.profiles.items():
+            if profile.subscribe_code == code:
+                return replace(profile, has_token=key in self.tokens)
+        return None
 
     async def upsert(self, profile: GroupProfile) -> None:
         self._check()
@@ -353,6 +361,50 @@ class InMemoryActions:
             for (chat_id, thread_id), specs in self.actions.items()
             if specs
         ]
+
+
+@dataclass
+class InMemorySubscriptions:
+    """SubscriptionStore fake keyed by sub_id."""
+
+    subs: dict[str, Subscription] = field(default_factory=dict)
+    fail: bool = False
+
+    def _check(self) -> None:
+        if self.fail:
+            raise StorageError
+
+    async def add(self, subscription: Subscription) -> None:
+        self._check()
+        self.subs[subscription.sub_id] = subscription
+
+    async def remove(self, dm_chat_id: int, sub_id: str) -> bool:
+        self._check()
+        found = self.subs.get(sub_id)
+        if found is None or found.dm_chat_id != dm_chat_id:
+            return False
+        del self.subs[sub_id]
+        return True
+
+    async def list_for_user(self, dm_chat_id: int) -> list[Subscription]:
+        self._check()
+        mine = [s for s in self.subs.values() if s.dm_chat_id == dm_chat_id]
+        return sorted(mine, key=lambda s: s.sub_id)
+
+    async def list_all(self) -> list[Subscription]:
+        self._check()
+        return sorted(self.subs.values(), key=lambda s: s.sub_id)
+
+    async def stamp(self, sub_id: str, last_run: datetime) -> None:
+        self._check()
+        if sub_id in self.subs:
+            self.subs[sub_id] = replace(self.subs[sub_id], last_run=last_run)
+
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        self._check()
+        for sub_id, s in list(self.subs.items()):
+            if s.chat_id == old_chat_id:
+                self.subs[sub_id] = replace(s, chat_id=new_chat_id)
 
 
 @dataclass

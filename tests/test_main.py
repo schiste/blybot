@@ -14,6 +14,7 @@ from blybot.adapters.telegram.app import Lifecycle
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
+from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
 from blybot.domain.ports import ActionError
 from tests.test_config import REQUIRED
 
@@ -153,14 +154,18 @@ async def test_bootstrap_covers_both_stores(monkeypatch: pytest.MonkeyPatch) -> 
     async def archive_boot(_self: object) -> None:
         booted.append("messages")
 
+    async def subs_boot(_self: object) -> None:
+        booted.append("subscriptions")
+
     monkeypatch.setattr(ToolsDbStore, "bootstrap", store_boot)
     monkeypatch.setattr(ToolsDbArchive, "bootstrap", archive_boot)
+    monkeypatch.setattr(ToolsDbSubscriptions, "bootstrap", subs_boot)
 
     assert entry.main() == 0
     bootstrap = seen["lifecycle"].bootstrap
     assert bootstrap is not None
     await bootstrap()
-    assert booted == ["profiles", "messages"]
+    assert booted == ["profiles", "messages", "subscriptions"]
     await seen["lifecycle"].release()
 
 

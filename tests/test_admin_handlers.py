@@ -660,6 +660,51 @@ async def test_capture_requires_a_group_admin() -> None:
     assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]
 
 
+async def test_subscribable_on_mints_a_share_link() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    context, bot = admin_context(args=["on"])
+    await handlers.on_subscribable(command("/subscribable on"), context)
+    code = store.profiles[tg.GROUP.id, 0].subscribe_code
+    assert code
+    assert f"start=sub_{code}" in tg.sent_texts(bot)[0]
+
+
+async def test_subscribable_off_clears_the_code() -> None:
+    store = InMemoryProfiles()
+    handlers = make_handlers(store)
+    await handlers.on_subscribable(command("/subscribable on"), admin_context(args=["on"])[0])
+    assert store.profiles[tg.GROUP.id, 0].subscribe_code  # set
+
+    context, bot = admin_context(args=["off"])
+    await handlers.on_subscribable(command("/subscribable off"), context)
+    assert store.profiles[tg.GROUP.id, 0].subscribe_code is None
+    assert "OFF" in tg.sent_texts(bot)[0]
+
+
+async def test_subscribable_requires_admin() -> None:
+    handlers = make_handlers()
+    context, bot = admin_context(status=ChatMemberStatus.MEMBER, args=["on"])
+    await handlers.on_subscribable(command("/subscribable on"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_NOT_ADMIN]
+
+
+async def test_subscribable_usage_on_bad_argument() -> None:
+    handlers = make_handlers()
+    context, bot = admin_context(args=["maybe"])
+    await handlers.on_subscribable(command("/subscribable maybe"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_SUBSCRIBABLE_USAGE]
+
+
+async def test_subscribable_reports_storage_outage() -> None:
+    store = InMemoryProfiles()
+    store.fail_upserts = True
+    handlers = make_handlers(store)
+    context, bot = admin_context(args=["on"])
+    await handlers.on_subscribable(command("/subscribable on"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+
+
 def make_llm_handlers(store: InMemoryProfiles | None = None) -> a.AdminHandlers:
     handlers = make_handlers(store)
     handlers.llm_defaults = LlmSettings()

@@ -102,7 +102,7 @@ The bot operates with Telegram privacy mode ON (the BotFather default). It must 
 
 **R6. Anonymization guarantees.**
 - No Telegram user ID, username, or display name is ever written to Meta.
-- No Telegram identifier is written to disk anywhere by the application.
+- No Telegram identifier is written to disk anywhere by the application, **with one documented carve-out**: opt-in digest subscriptions (§21.1) durably store the subscriber's private chat id, and nothing else about them, solely to deliver the digest they requested. It is confined to the `subscriptions` table and the `domain/subscriptions.py` value object; it never reaches Meta, the pseudonymized content layer, or the identifier-free `ActionContext`. A subscriber's `/unsubscribe` deletes the row.
 - Pseudonyms are random (not derived from user ID, to prevent reversal) and exist only in process memory.
 
 **R7. Content sanitization before wiki write.**
@@ -179,7 +179,8 @@ v1 had **no persistent datastore**; v2's self-service adds exactly one, per this
 
 1. **In-memory session map** (volatile, see 10).
 2. **Configuration** in the tool home directory (see 12).
-3. **v2: one `profiles` table on ToolsDB**, keyed by `(chat_id, thread_id)` so forum-group topics configure independently — chosen page/repo, consent policy, whether notifications are on, a JSON array of composable event **rules**, a JSON map of per-resource poll **cursors**, and an admin-supplied API token encrypted with Fernet (`PROFILE_ENCRYPTION_KEY`). Resolution is three-tier: topic override → group default (thread 0) → operator env default. On a self-service deployment `/log` publishes only when a page is set explicitly (topic or group); an unconfigured group is told to `/setpage` rather than silently using the operator default page. **The only identifiers persisted are group structure (chat id, topic thread id) — never a user id, name, or message**; admin-ship is verified live per command and never stored.
+3. **v2: one `profiles` table on ToolsDB**, keyed by `(chat_id, thread_id)` so forum-group topics configure independently — chosen page/repo, consent policy, whether notifications are on, a JSON array of composable event **rules**, a JSON map of per-resource poll **cursors**, an admin-supplied API token encrypted with Fernet (`PROFILE_ENCRYPTION_KEY`), and (v3.1) a nullable `subscribe_code` capability marking the scope subscribable. Resolution is three-tier: topic override → group default (thread 0) → operator env default. On a self-service deployment `/log` publishes only when a page is set explicitly (topic or group); an unconfigured group is told to `/setpage` rather than silently using the operator default page. **The only identifiers persisted here are group structure (chat id, topic thread id) — never a user id, name, or message**; admin-ship is verified live per command and never stored.
+4. **v3.1: one `subscriptions` table on ToolsDB** (the R6 carve-out, §21.1), keyed by a random `sub_id`, holding the subscriber's private `dm_chat_id`, the target `(chat_id, thread_id)`, the `schedule`/`recipe`/`lang` the user picked, and a `last_run` watermark. This is the sole place the application durably stores a Telegram user identifier; a subscriber's `/unsubscribe` deletes their row and the table exists only on capture-enabled deployments.
 
 ### 11.1 Composable event rules
 
@@ -417,6 +418,49 @@ chunked analysis sees only model partials, and structural guarantees (no
 tool calls, destinations fixed before the model runs, R-v3.4's output
 contract) cap the worst case at a false sentence inside a labeled
 machine-generated section.
+
+### 21.1 Opt-in digest subscriptions (v3.1)
+
+Any individual can subscribe, in a private DM, to a recurring digest of a
+capture-enabled scope's discussion, delivered privately to them. It reuses
+the analysis pipeline for generation and the deep-link DM onboarding flow
+for authorization; it adds no new content collection.
+
+**Authorization is two-sided.** A scope admin opts the scope in with
+`/subscribable on` (groups only, like every config command), which mints a
+random `subscribe_code` on the profile and replies with a share link
+`https://t.me/<bot>?start=sub_<code>`; `/subscribable off` clears the code
+and no new subscriptions can be created (existing ones stop delivering on
+the next tick — see below). A user opens the link, which resolves and
+re-verifies the scope is **both** subscribable and capture-enabled, then
+`/subscribe [schedule] [recipe] [lang:xx]` (defaults `daily@08:00`,
+`summarize`, the scope's language) creates the subscription. `/mysubs`
+lists a user's subscriptions and `/unsubscribe <id>` removes one.
+
+**The R6 carve-out (see R6, §11).** The subscription record is the one place
+the application durably stores a Telegram user identifier — the subscriber's
+private chat id — kept only to deliver the digest and erased on
+`/unsubscribe`. It lives in the `subscriptions` table and the
+`domain/subscriptions.py` value object, deliberately outside the
+identifier-free `domain/models.py`; it never enters `ActionContext`, Meta,
+or the pseudonymized content layer. The public `/privacy` statement
+discloses it in plain language.
+
+**Delivery.** A `SubscriptionScheduler` collector mirrors the action
+scheduler on the shared tick: it loads subscriptions, selects those due via
+`Schedule.is_due`, **stamps `last_run` durably before sending** (so a
+crash-after-send cannot double-deliver), **re-gates on the live
+`subscribe_code` + `capture_enabled`** (an admin's `/subscribable off` or
+`/capture off` silently skips delivery), runs the engine on the **group**
+scope with a `window=since_last_run` summarize spec, and re-targets each
+outbound message to the subscriber's DM via
+`dataclasses.replace(chat_id=dm_chat_id, thread_id=0)` — the only step that
+re-attaches the identifier. The existing rate-limited delivery loop sends
+it. A per-tick cap (`max_per_tick`, default 200) bounds fan-out.
+
+**Deferred:** a per-user subscription cap (abuse guard) and making a
+broadcast channel's `subscribe_code` command-configurable (channels have no
+config commands today — the same limitation as `/action`).
 
 ---
 

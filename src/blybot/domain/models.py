@@ -194,6 +194,9 @@ class GroupProfile:
     # while an explicit topic-level off still beats an enabled group.
     capture_enabled: bool | None = None
     llm: LlmSettings | None = None
+    # Non-null ⇒ the scope is subscribable; the value is the random
+    # deep-link capability code an admin minted with /subscribable on.
+    subscribe_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

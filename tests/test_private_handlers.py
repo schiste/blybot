@@ -126,6 +126,21 @@ async def test_start_delivers_the_welcome_and_nothing_else() -> None:
     assert handlers.sessions.peek(tg.PRIVATE.id) is None  # no identity minted
 
 
+async def test_start_with_sub_payload_redeems_the_subscribe_link() -> None:
+    handlers, _ = make_handlers()
+    recorded: list[tuple[int, str]] = []
+
+    class _StubSubs:
+        async def redeem_link(self, context: object, dm_chat_id: int, code: str) -> None:
+            del context
+            recorded.append((dm_chat_id, code))
+
+    handlers.subscriptions = cast("Any", _StubSubs())
+    context, _bot = tg.make_context(args=["sub_abc123"])
+    await handlers.on_start(dm("/start sub_abc123"), context)
+    assert recorded == [(tg.PRIVATE.id, "abc123")]
+
+
 async def test_flush_forces_a_fresh_identity_and_announces_it() -> None:
     handlers, _ = make_handlers()
     context, bot = tg.make_context()
@@ -187,6 +202,12 @@ async def test_privacy_statement_covers_the_guarantees() -> None:
     assert "Toolforge" in sent
     assert "https://github.com/schiste/blybot" in sent
     assert "AGPL" in sent
+    # The subscription carve-out must be disclosed honestly: the copy no
+    # longer promises "no user IDs ever", and it names /subscribe as the
+    # one place a Telegram identifier is durably kept (R6 §21.1).
+    assert "no user IDs or usernames — ever" not in sent
+    assert "/subscribe" in sent
+    assert "/unsubscribe" in sent
 
 
 async def test_private_commands_outside_private_chats_are_ignored() -> None:

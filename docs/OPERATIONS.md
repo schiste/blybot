@@ -194,6 +194,28 @@ section before enabling.**
    and per-scope size is
    `SELECT chat_id, COUNT(*) FROM messages GROUP BY chat_id;`
 
+## Opt-in digest subscriptions (v3.1)
+
+Rides along automatically on any capture-enabled deployment — no extra
+env variable. Individuals subscribe in a DM to receive a group's digest
+privately.
+
+1. A group admin runs `/subscribable on` in the group (or topic). The bot
+   mints a share link `https://t.me/<bot>?start=sub_<code>`; anyone with
+   the link can subscribe. `/subscribable off` revokes it — the link dies
+   and existing subscriptions stop delivering on the next tick.
+2. A user opens the link and runs `/subscribe [schedule] [recipe]
+   [lang:xx]` (defaults `daily@08:00`, `summarize`, the scope's language).
+   `/mysubs` lists theirs; `/unsubscribe <id>` removes one.
+3. Delivery re-checks the scope is still subscribable **and** capture is
+   still on, stamps progress before sending (no double-DMs on a crash),
+   and fans out under the same rate limiter as everything else, capped at
+   `max_per_tick` (200) subscriptions per tick.
+4. Counters: `subscription_digests` (delivered) and
+   `subscription_ticks_failed` (a collection/delivery cycle that raised).
+   The `subscriptions` table is the one place a subscriber's private chat
+   id is stored — see "Privacy invariants" below.
+
 ## LiftWing LLM endpoints (v3 pre-flight findings)
 
 The v3 analyses ([plan](PLAN-V3-CHANNEL-INTELLIGENCE.md)) call the Qwen
@@ -287,8 +309,12 @@ a `~/<name>.env`.
 
 ## Privacy invariants for operators
 
-The bot never stores identifiers, but the *operator environment* must
-hold the same line: keep env files at `0600` (run.sh refuses to start
+The bot stores no Telegram user identifier anywhere, with one documented
+exception: an opt-in digest subscription durably records the subscriber's
+private chat id (and nothing else about them) so the digest can reach them
+— erased on their `/unsubscribe`, and present only on capture-enabled
+deployments. Everything else holds the original line, and the *operator
+environment* must too: keep env files at `0600` (run.sh refuses to start
 otherwise), never copy logs elsewhere without checking them (they are
 identifier-free, but belt and braces), and remember that everything
 published on the wiki is permanent — takedowns are a wiki-side

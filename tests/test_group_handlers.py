@@ -17,8 +17,10 @@ from blybot.domain.models import (
     CapturedMessage,
     ConsentMode,
     GroupProfile,
+    Schedule,
     TimestampGranularity,
 )
+from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
 from blybot.services.directory import ChannelDirectory
 from blybot.services.engine import ActionEngine
@@ -37,6 +39,7 @@ from tests.fakes import (
     FakeRepoGateway,
     InMemoryArchive,
     InMemoryProfiles,
+    InMemorySubscriptions,
     PassthroughSanitizer,
     SequentialPseudonyms,
 )
@@ -763,6 +766,27 @@ async def test_migration_carries_the_stored_profile() -> None:
     await handlers.on_migration(tg.command_update(service_message), context)
     assert policy.is_allowed(-100999)
     assert (await handlers.directory.resolve(-100999)).log_page == "WikiProject Ours/Telegram logs"
+
+
+async def test_migration_also_rekeys_subscriptions() -> None:
+    handlers, _, _ = make_handlers(allowed={tg.GROUP.id})
+    subs = InMemorySubscriptions()
+    await subs.add(
+        Subscription(
+            sub_id="s1",
+            dm_chat_id=1,
+            chat_id=tg.GROUP.id,
+            thread_id=0,
+            schedule=Schedule(kind="daily", hour=8),
+            recipe="summarize",
+            lang="en",
+        )
+    )
+    handlers.subscriptions = subs
+    context, _ = tg.make_context()
+    service_message = tg.message(text=None, migrate_to_chat_id=-100999)
+    await handlers.on_migration(tg.command_update(service_message), context)
+    assert subs.subs["s1"].chat_id == -100999
 
 
 async def test_migration_storage_failure_is_logged_not_raised() -> None:

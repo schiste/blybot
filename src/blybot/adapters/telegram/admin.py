@@ -33,6 +33,7 @@ from blybot.services.directory import (
 )
 from blybot.services.llmconf import LlmParseError, describe_llm, parse_llm_args
 from blybot.services.rules import MAX_RULES, RuleParseError, describe_rule, parse_rule
+from blybot.services.subscriptions import mint_subscribe_code
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -76,6 +77,16 @@ REPLY_EVENTS_NEED_REPO: Final = (
 )
 REPLY_EVENTS_USAGE: Final = "Usage: /events on | off — rules decide what's delivered (see /rules)"
 REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
+REPLY_SUBSCRIBABLE_USAGE: Final = (
+    "Usage: /subscribable on | off — let members subscribe to this chat's digest in DM"
+)
+REPLY_SUBSCRIBABLE_ON: Final = (
+    "Digest subscriptions are ON for {scope}. Share this link so members can get "
+    "summaries privately: {link}\n(Digests stay empty until /capture is on here.)"
+)
+REPLY_SUBSCRIBABLE_OFF: Final = (
+    "Digest subscriptions are OFF for {scope}. The old share link no longer works."
+)
 REPLY_EVENTS_SEEDED: Final = (
     "Repo notifications on. Seeded two starter rules — pr.merged and release, "
     "both digest. Use /rules to see them, /rule to add more, /rule clear to start over."
@@ -315,6 +326,30 @@ class AdminHandlers:
             thread_id,
             REPLY_REPO_BOUND.format(repo=repo, link=link, scope=_scope(thread_id)),
         )
+
+    async def on_subscribable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Toggle whether members may subscribe to this scope's digest (§21)."""
+        resolved = await self._admin_chat(update, context)
+        if resolved is None:
+            return
+        chat, thread_id = resolved
+        argument = ((context.args or [""])[0]).lower()
+        if argument not in {"on", "off"}:
+            await self._reply(context, chat.id, thread_id, REPLY_SUBSCRIBABLE_USAGE)
+            return
+        try:
+            if argument == "on":
+                code = mint_subscribe_code()
+                await self.directory.set_subscribe_code(chat.id, thread_id, code)
+                link = f"https://t.me/{context.bot.username}?start=sub_{code}"
+                reply = REPLY_SUBSCRIBABLE_ON.format(scope=_scope(thread_id), link=link)
+            else:
+                await self.directory.set_subscribe_code(chat.id, thread_id, None)
+                reply = REPLY_SUBSCRIBABLE_OFF.format(scope=_scope(thread_id))
+            log_event("profile_update", "ok")
+        except StorageError:
+            reply = REPLY_STORAGE_DOWN
+        await self._reply(context, chat.id, thread_id, reply)
 
     async def on_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Discard this group's stored API token."""

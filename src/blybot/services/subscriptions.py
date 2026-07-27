@@ -158,7 +158,7 @@ def _digest_spec(sub: Subscription) -> ActionSpec:
 class SubscriptionScheduler:
     """Runs due digest subscriptions each tick, delivering privately.
 
-    A :class:`~blybot.adapters.telegram.app.MessageCollector`. Mirrors
+    A :class:`~blybot.services.delivery.MessageCollector`. Mirrors
     :class:`~blybot.services.schedule.ActionScheduler`: baseline unstamped
     rows, select due, **stamp the watermark durably before delivering**
     (a crash-after-send reads as "already ran", never a duplicate DM), and

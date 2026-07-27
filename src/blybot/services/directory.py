@@ -164,6 +164,10 @@ class ChannelDirectory:
         """Store (or with ``None`` clear) this scope's LLM settings (v3 §2.4)."""
         await self._update(chat_id, thread_id, llm=settings)
 
+    async def set_subscribe_code(self, chat_id: int, thread_id: int, code: str | None) -> None:
+        """Set (or with ``None`` clear) this scope's digest-subscribe code (§21)."""
+        await self._update(chat_id, thread_id, subscribe_code=code)
+
     async def enable_events(
         self, chat_id: int, thread_id: int, seed_rules: tuple[Rule, ...]
     ) -> bool:

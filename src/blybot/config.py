@@ -18,13 +18,20 @@ from cryptography.fernet import Fernet
 from blybot.domain.models import ConsentMode, TimestampGranularity
 
 _REQUIRED_KEYS: Final = (
-    "TELEGRAM_BOT_TOKEN",
     "WIKI_USERNAME",
     "WIKI_BOTPASSWORD",
     "LOG_TARGET_PAGE",
     "DM_TARGET_BASE",
     "USER_AGENT",
 )
+
+# The bot-token key each platform reads; the selected platform's token is
+# required, the other platform's is not (a Discord deployment needs no
+# Telegram token, and vice versa).
+_PLATFORM_TOKEN_KEYS: Final = {
+    "telegram": "TELEGRAM_BOT_TOKEN",
+    "discord": "DISCORD_BOT_TOKEN",
+}
 
 DEFAULT_BOT_NAME: Final = "Blybot"
 DEFAULT_WIKI_API_URL: Final = "https://meta.wikimedia.org/w/api.php"
@@ -55,7 +62,9 @@ class Config:
     """Validated runtime configuration."""
 
     bot_name: str
+    platform: str
     telegram_bot_token: str
+    discord_bot_token: str
     wiki_api_url: str
     wiki_username: str
     wiki_botpassword: str
@@ -120,7 +129,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     """
     source = os.environ if env is None else env
 
-    missing = [key for key in _REQUIRED_KEYS if not source.get(key)]
+    platform = _parse_platform(source.get("PLATFORM", "telegram"))
+    required = (*_REQUIRED_KEYS, _PLATFORM_TOKEN_KEYS[platform])
+    missing = [key for key in required if not source.get(key)]
     if missing:
         msg = f"missing required configuration keys: {', '.join(sorted(missing))}"
         raise ConfigurationError(msg)
@@ -135,7 +146,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
 
     return Config(
         bot_name=bot_name,
-        telegram_bot_token=source["TELEGRAM_BOT_TOKEN"],
+        platform=platform,
+        telegram_bot_token=source.get("TELEGRAM_BOT_TOKEN", ""),
+        discord_bot_token=source.get("DISCORD_BOT_TOKEN", ""),
         wiki_api_url=source.get("WIKI_API_URL", DEFAULT_WIKI_API_URL),
         wiki_username=source["WIKI_USERNAME"],
         wiki_botpassword=source["WIKI_BOTPASSWORD"],
@@ -185,6 +198,15 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         llm_max_tokens_per_run=_parse_non_negative_int(source, "LLM_MAX_TOKENS_PER_RUN", 200_000),
         user_agent=source["USER_AGENT"],
     )
+
+
+def _parse_platform(raw: str) -> str:
+    """The chat platform to run: ``telegram`` (default) or ``discord``."""
+    if raw not in _PLATFORM_TOKEN_KEYS:
+        allowed = ", ".join(sorted(_PLATFORM_TOKEN_KEYS))
+        msg = f"PLATFORM must be one of: {allowed}"
+        raise ConfigurationError(msg)
+    return raw
 
 
 def _validate_fernet_key(raw: str) -> str:

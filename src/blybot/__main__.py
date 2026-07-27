@@ -6,16 +6,28 @@ This is the only module that knows about every layer. Run with
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
 
+    from blybot.config import Config
     from blybot.domain.ports import Sink, Source, Transform
+    from blybot.services.delivery import MessageCollector
 
+from blybot.adapters.discord.author_mask import DiscordAuthorMasker
+from blybot.adapters.discord.capabilities import DISCORD_CAPABILITIES
+from blybot.adapters.discord.gateway import (
+    DiscordGateway,
+    DiscordGatewayClient,
+    build_gateway_client,
+)
+from blybot.adapters.discord.transport import DiscordTransport
 from blybot.adapters.github.gateway import GitHubRepoGateway
 from blybot.adapters.github.issues import GitHubIssueTracker
 from blybot.adapters.llm.liftwing import LiftWingClient
@@ -34,9 +46,10 @@ from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
 from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
 from blybot.config import ConfigurationError, load_config
 from blybot.domain.models import LlmSettings
+from blybot.domain.ports import StorageError
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
-from blybot.observability import Counters, configure_logging
+from blybot.observability import Counters, configure_logging, log_event
 from blybot.services.analyze import (
     ArchiveWindowSource,
     ChatReplySink,
@@ -47,6 +60,7 @@ from blybot.services.analyze import (
 )
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureReminder, CaptureService
+from blybot.services.delivery import message_loop
 from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.engine import ActionEngine
@@ -70,8 +84,8 @@ from blybot.services.subscriptions import SubscriptionBinding, SubscriptionSched
 from blybot.services.transcribe import DmTranscriptionService
 
 
-def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the object graph once
-    """Entry point."""
+def main() -> int:
+    """Entry point: load config, then run the platform selected by ``PLATFORM``."""
     try:
         config = load_config()
     except ConfigurationError as exc:
@@ -79,6 +93,13 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         return 2
 
     configure_logging()
+    if config.platform == "discord":
+        return run_discord(config)
+    return run_telegram(config)
+
+
+def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
+    """Build the Telegram object graph and start long polling."""
     counters = Counters()
     clock = SystemClock()
     sanitizer = WikitextSanitizer()
@@ -391,6 +412,193 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         subscription_handlers=subscription_handlers,
         capabilities=TELEGRAM_CAPABILITIES,
     )
+    return 0
+
+
+def _spawn(coro: Coroutine[object, object, None]) -> asyncio.Task[None]:
+    """Schedule a background coroutine on the running loop (a test seam)."""
+    return asyncio.ensure_future(coro)
+
+
+async def _discord_startup(
+    client: DiscordGatewayClient,
+    *,
+    bootstrap: Callable[[], Awaitable[None]] | None,
+    collectors: tuple[tuple[MessageCollector, str], ...],
+    poll_interval: float,
+) -> None:
+    """Client ``setup_hook`` body: bootstrap storage, start the delivery loops.
+
+    The transport wraps the now-live client and drives the shared neutral
+    :func:`message_loop` for every collector (subscription digests, capture
+    reminders) — the same loop the Telegram lifecycle uses.
+    """
+    if bootstrap is not None:
+        try:
+            await bootstrap()
+        except StorageError:
+            log_event("storage_bootstrap", "error")
+    transport = DiscordTransport(client)
+    for collector, label in collectors:
+        _spawn(message_loop(transport, collector, poll_interval, label))
+
+
+def discord_run(
+    client: DiscordGatewayClient, token: str, release: Callable[[], Coroutine[Any, Any, None]]
+) -> None:
+    """Start the gateway (blocks for the process lifetime), releasing clients after.
+
+    ``client.run`` owns the event loop and returns only when the bot stops,
+    so the HTTP clients are closed afterwards on a fresh loop.
+    """
+    try:
+        client.run(token)
+    finally:
+        asyncio.run(release())
+
+
+def run_discord(config: Config) -> int:
+    """Build the Discord object graph and start the gateway client.
+
+    Reuses every neutral service (directory, capture, engine, subscription
+    scheduler, archive, store) — only the transport and the inbound event
+    shell are Discord-specific. Repo notifications and scheduled analyses
+    are deferred: the Discord admin surface does not yet configure them.
+    """
+    counters = Counters()
+    clock = SystemClock()
+    group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
+
+    store: ToolsDbStore | None = None
+    archive: ToolsDbArchive | None = None
+    subscriptions_store: ToolsDbSubscriptions | None = None
+    if config.profile_encryption_key:
+        runner = PymysqlRunner(
+            host=config.toolsdb_host,
+            database=config.toolsdb_name,
+            cnf_path=Path(config.toolsdb_cnf),
+        )
+        store = ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
+        if config.archive_pseudonym_key:
+            archive = ToolsDbArchive(runner=runner)
+            subscriptions_store = ToolsDbSubscriptions(runner=runner)
+
+    directory = ChannelDirectory(
+        store=store,
+        default_log_page=config.log_target_page,
+        default_consent=config.consent_mode,
+        default_repo="",
+        page_suffix=config.wiki_page_suffix,
+    )
+
+    llm_client: LiftWingClient | None = None
+    capture_service: CaptureService | None = None
+    masker: DiscordAuthorMasker | None = None
+    collectors: list[tuple[MessageCollector, str]] = []
+    if store is not None and archive is not None and subscriptions_store is not None:
+        llm_client = LiftWingClient(
+            api_base=config.liftwing_api_base,
+            user_agent=config.user_agent,
+            models={
+                "default": config.liftwing_model_default,
+                "large": config.liftwing_model_large,
+            },
+            timeout_seconds=config.liftwing_timeout_seconds,
+            counters=counters,
+        )
+        engine = ActionEngine(
+            sources={"archive_window": ArchiveWindowSource(archive=archive)},
+            transforms={
+                "prompt": PromptTransform(
+                    runners={"liftwing": llm_client},
+                    store=store,
+                    defaults=LlmSettings(lang=config.llm_default_lang),
+                    max_tokens_ceiling=config.llm_max_tokens_ceiling,
+                    max_chunks=config.llm_max_chunks_per_run,
+                    counters=counters,
+                    max_tokens_per_run=config.llm_max_tokens_per_run,
+                ),
+                "stats": StatsTransform(),
+            },
+            sinks={"reply": ChatReplySink(max_chars=DISCORD_CAPABILITIES.max_message_chars)},
+            counters=counters,
+            clock=clock,
+        )
+        capture_service = CaptureService(
+            store=store,
+            archive=archive,
+            limiter=SlidingWindowLimiter(
+                clock=clock, limit=config.capture_max_per_minute, window=timedelta(minutes=1)
+            ),
+            clock=clock,
+            counters=counters,
+            max_chars=DISCORD_CAPABILITIES.max_message_chars,
+            retention_window=timedelta(days=config.capture_retention_days),
+        )
+        masker = DiscordAuthorMasker(key=config.archive_pseudonym_key)
+        collectors.append(
+            (
+                SubscriptionScheduler(
+                    subscriptions=subscriptions_store,
+                    profiles=store,
+                    engine=engine,
+                    clock=clock,
+                    counters=counters,
+                    capabilities=DISCORD_CAPABILITIES,
+                ),
+                "sub_tick",
+            )
+        )
+
+    if capture_service is not None and store is not None and config.capture_reannounce_days:
+        collectors.append(
+            (
+                CaptureReminder(
+                    store=store,
+                    groups=group_policy,
+                    clock=clock,
+                    cadence=timedelta(days=config.capture_reannounce_days),
+                ),
+                "capture_remind",
+            )
+        )
+
+    gateway = DiscordGateway(
+        directory=directory,
+        groups=group_policy,
+        capture=capture_service,
+        masker=masker,
+        subscriptions=subscriptions_store,
+        default_lang=config.llm_default_lang,
+    )
+
+    async def release_clients() -> None:
+        if llm_client is not None:
+            await llm_client.aclose()
+
+    bootstrap: Callable[[], Awaitable[None]] | None = None
+    if store is not None:
+        profile_store, message_archive, subs_store = store, archive, subscriptions_store
+
+        async def bootstrap_storage() -> None:
+            await profile_store.bootstrap()
+            if message_archive is not None:
+                await message_archive.bootstrap()
+            if subs_store is not None:
+                await subs_store.bootstrap()
+
+        bootstrap = bootstrap_storage
+
+    client = build_gateway_client(
+        gateway,
+        on_setup=partial(
+            _discord_startup,
+            bootstrap=bootstrap,
+            collectors=tuple(collectors),
+            poll_interval=config.events_poll_minutes * 60,
+        ),
+    )
+    discord_run(client, config.discord_bot_token, release_clients)
     return 0
 
 

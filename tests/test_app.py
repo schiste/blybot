@@ -33,6 +33,7 @@ from blybot.adapters.telegram.app import (
     run_polling,
 )
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
+from blybot.adapters.telegram.subscribe import SubscriptionHandlers
 from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile, OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
@@ -44,12 +45,14 @@ from blybot.services.notify import RepoNotifier
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.schedule import ActionScheduler
 from blybot.services.sessions import SessionRegistry
+from blybot.services.subscriptions import SubscriptionBinding
 from tests.fakes import (
     FakeClock,
     FakePublisher,
     InMemoryActions,
     InMemoryArchive,
     InMemoryProfiles,
+    InMemorySubscriptions,
     SequentialPseudonyms,
 )
 from tests.test_group_handlers import make_handlers as make_group_handlers
@@ -105,7 +108,7 @@ def test_build_registers_every_handler() -> None:
     # log, logmedia, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
     # setup, setpage, setconsent, setrepo, events, rule, rules, capture, llm,
     # action, revoke, settings, reset
-    assert kinds.count(CommandHandler) == 25
+    assert kinds.count(CommandHandler) == 26  # incl. /subscribable
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
     assert 1 not in application.handlers  # no capture: group 1 stays empty
@@ -500,6 +503,49 @@ def make_analysis_handlers() -> Any:
     )
 
 
+def _subscription_handlers() -> SubscriptionHandlers:
+    return SubscriptionHandlers(
+        profiles=InMemoryProfiles(),
+        subscriptions=InMemorySubscriptions(),
+        binding=SubscriptionBinding(clock=FakeClock()),
+        default_lang="en",
+    )
+
+
+def test_subscription_commands_register_when_wired() -> None:
+    group_handlers, _, _ = make_group_handlers()
+    private_handlers, _ = make_private_handlers()
+    lifecycle, _, _ = make_lifecycle()
+    application = build_application(
+        TOKEN,
+        group_handlers,
+        private_handlers,
+        make_admin_handlers(),
+        lifecycle,
+        subscription_handlers=_subscription_handlers(),
+    )
+    kinds = [type(handler) for handler in application.handlers[0]]
+    assert kinds.count(CommandHandler) == 29  # 26 base + subscribe/unsubscribe/mysubs
+
+
+async def test_post_init_starts_the_subscription_task() -> None:
+    lifecycle, _, _ = make_lifecycle()
+    lifecycle.maintenance.interval_seconds = 3600
+    lifecycle.poll_interval_seconds = 3600
+
+    class _StubCollector:
+        async def collect(self) -> list[OutboundMessage]:
+            return []
+
+    lifecycle.subscription_scheduler = _StubCollector()
+    app = cast("_App", SimpleNamespace(bot=SimpleNamespace()))
+    await lifecycle.post_init(app)
+    assert lifecycle._sub_task is not None
+    await lifecycle.post_shutdown(app)
+    await asyncio.sleep(0)
+    assert lifecycle._sub_task.cancelled()
+
+
 def test_analysis_commands_register_when_wired(monkeypatch: pytest.MonkeyPatch) -> None:
     group_handlers, _, _ = make_group_handlers()
     private_handlers, _ = make_private_handlers()
@@ -513,7 +559,7 @@ def test_analysis_commands_register_when_wired(monkeypatch: pytest.MonkeyPatch) 
         analysis_handlers=make_analysis_handlers(),
     )
     kinds = [type(handler) for handler in application.handlers[0]]
-    assert kinds.count(CommandHandler) == 29  # + summarize, talkingpoints, stats, run
+    assert kinds.count(CommandHandler) == 30  # + summarize, talkingpoints, stats, run
 
     seen: dict[str, Any] = {}
 

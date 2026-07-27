@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     from blybot.adapters.telegram.analyze import AnalysisHandlers
     from blybot.adapters.telegram.capture import CaptureHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
+    from blybot.adapters.telegram.subscribe import SubscriptionHandlers
     from blybot.domain.ports import MessageArchive
     from blybot.observability import Counters
     from blybot.services.capture import CaptureService
@@ -115,10 +116,13 @@ class Lifecycle:
     scheduler: ActionScheduler | None = None
     # Periodic capture re-announcements (CAPTURE_REANNOUNCE_DAYS > 0).
     reminder: MessageCollector | None = None
+    # DM digest subscriptions (capture-enabled deployments; §21).
+    subscription_scheduler: MessageCollector | None = None
     poll_interval_seconds: float = 300
     _notify_task: asyncio.Task[None] | None = field(default=None, init=False)
     _actions_task: asyncio.Task[None] | None = field(default=None, init=False)
     _reminder_task: asyncio.Task[None] | None = field(default=None, init=False)
+    _sub_task: asyncio.Task[None] | None = field(default=None, init=False)
     # Scheduled directly on the loop (PTB's create_task pre-start warns and
     # would not track it anyway); held here so shutdown can cancel it.
     _maintenance_task: asyncio.Task[None] | None = field(default=None, init=False)
@@ -144,6 +148,12 @@ class Lifecycle:
             self._reminder_task = loop.create_task(
                 message_loop(app.bot, self.reminder, self.poll_interval_seconds, "capture_remind")
             )
+        if self.subscription_scheduler is not None:
+            self._sub_task = loop.create_task(
+                message_loop(
+                    app.bot, self.subscription_scheduler, self.poll_interval_seconds, "sub_tick"
+                )
+            )
         log_event("startup", "ok")
 
     async def post_shutdown(self, app: _App) -> None:
@@ -154,6 +164,7 @@ class Lifecycle:
             self._notify_task,
             self._actions_task,
             self._reminder_task,
+            self._sub_task,
         )
         for task in tasks:
             if task is not None:
@@ -289,6 +300,7 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
     lifecycle: Lifecycle,
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
+    subscription_handlers: SubscriptionHandlers | None = None,
 ) -> _App:
     """Build the PTB application with every handler registered."""
     application = (
@@ -333,6 +345,7 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
         ("capture", admin_handlers.on_capture),
         ("llm", admin_handlers.on_llm),
         ("action", admin_handlers.on_action),
+        ("subscribable", admin_handlers.on_subscribable),
         ("revoke", admin_handlers.on_revoke),
         ("settings", admin_handlers.on_settings),
         ("reset", admin_handlers.on_reset),
@@ -372,6 +385,15 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
             ("run", analysis_handlers.on_run),
         ):
             application.add_handler(CommandHandler(name, callback, filters=filters.ChatType.GROUPS))
+    if subscription_handlers is not None:
+        for name, callback in (
+            ("subscribe", subscription_handlers.on_subscribe),
+            ("unsubscribe", subscription_handlers.on_unsubscribe),
+            ("mysubs", subscription_handlers.on_mysubs),
+        ):
+            application.add_handler(
+                CommandHandler(name, callback, filters=filters.ChatType.PRIVATE)
+            )
     if capture_handlers is not None:
         # Handler group 1: capture observes updates independently, so it
         # can never steal an update from (or be starved by) the
@@ -402,6 +424,7 @@ def run_polling(  # noqa: PLR0913 -- one handler bundle per concern
     lifecycle: Lifecycle,
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
+    subscription_handlers: SubscriptionHandlers | None = None,
 ) -> None:
     """Poll until stopped; blocks for the process lifetime."""
     application = build_application(
@@ -412,6 +435,7 @@ def run_polling(  # noqa: PLR0913 -- one handler bundle per concern
         lifecycle,
         capture_handlers,
         analysis_handlers,
+        subscription_handlers,
     )
     allowed = list(_ALLOWED_UPDATES)
     if analysis_handlers is not None:

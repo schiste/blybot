@@ -26,9 +26,11 @@ from blybot.adapters.telegram.analyze import AnalysisHandlers
 from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
+from blybot.adapters.telegram.subscribe import SubscriptionHandlers
 from blybot.adapters.telegram.token_entry import TokenEntryHandler
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
+from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
 from blybot.config import ConfigurationError, load_config
 from blybot.domain.models import LlmSettings
 from blybot.domain.pseudonym import RandomPseudonymFactory
@@ -63,6 +65,7 @@ from blybot.services.publish import (
 from blybot.services.repo import GroupRepoService
 from blybot.services.schedule import ActionScheduler
 from blybot.services.sessions import SessionRegistry
+from blybot.services.subscriptions import SubscriptionBinding, SubscriptionScheduler
 from blybot.services.transcribe import DmTranscriptionService
 
 
@@ -105,6 +108,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
     # The key was validated at load; construction can't raise on it.
     store: ToolsDbStore | None = None
     archive: ToolsDbArchive | None = None
+    subscriptions_store: ToolsDbSubscriptions | None = None
     capture_service: CaptureService | None = None
     capture_handlers: CaptureHandlers | None = None
     llm_client: LiftWingClient | None = None
@@ -119,7 +123,9 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         store = ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
         if config.archive_pseudonym_key:
             archive = ToolsDbArchive(runner=runner)
+            subscriptions_store = ToolsDbSubscriptions(runner=runner)
     binding = TokenBinding(clock=clock)
+    subscription_binding = SubscriptionBinding(clock=clock)
     gateway = GitHubRepoGateway(user_agent=config.user_agent)
     tracker = (
         GitHubIssueTracker(
@@ -200,6 +206,27 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
     engine = ActionEngine(
         sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock
     )
+    subscription_handlers = (
+        SubscriptionHandlers(
+            profiles=store,
+            subscriptions=subscriptions_store,
+            binding=subscription_binding,
+            default_lang=config.llm_default_lang,
+        )
+        if subscriptions_store is not None and store is not None
+        else None
+    )
+    subscription_scheduler = (
+        SubscriptionScheduler(
+            subscriptions=subscriptions_store,
+            profiles=store,
+            engine=engine,
+            clock=clock,
+            counters=counters,
+        )
+        if subscriptions_store is not None and store is not None
+        else None
+    )
     group_handlers = GroupHandlers(
         engine=engine,
         groups=group_policy,
@@ -218,6 +245,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             GroupRepoService(gateway=gateway, vault=store, directory=directory) if store else None
         ),
         archive=archive,
+        subscriptions=subscriptions_store,
         cleanup_delay_seconds=config.log_cleanup_seconds,
         reply_cleanup_delay_seconds=config.reply_cleanup_seconds,
     )
@@ -253,6 +281,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             vault=store,
             counters=counters,
         ),
+        subscriptions=subscription_handlers,
     )
 
     if store is not None and archive is not None:
@@ -312,10 +341,14 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
     if store is not None:
         profile_store, message_archive = store, archive
 
+        subscriptions_bootstrap = subscriptions_store
+
         async def bootstrap_storage() -> None:
             await profile_store.bootstrap()
             if message_archive is not None:
                 await message_archive.bootstrap()
+            if subscriptions_bootstrap is not None:
+                await subscriptions_bootstrap.bootstrap()
 
         bootstrap = bootstrap_storage
 
@@ -339,6 +372,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         notifier=notifier,
         scheduler=scheduler,
         reminder=reminder,
+        subscription_scheduler=subscription_scheduler,
         poll_interval_seconds=config.events_poll_minutes * 60,
     )
     run_polling(
@@ -349,6 +383,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         lifecycle=lifecycle,
         capture_handlers=capture_handlers,
         analysis_handlers=analysis_handlers,
+        subscription_handlers=subscription_handlers,
     )
     return 0
 

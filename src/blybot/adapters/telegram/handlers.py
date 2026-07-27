@@ -44,9 +44,10 @@ if TYPE_CHECKING:
     from telegram import Bot, Chat, ChatMemberUpdated, Message, Update
     from telegram.ext import ContextTypes
 
+    from blybot.adapters.telegram.subscribe import SubscriptionHandlers
     from blybot.adapters.telegram.token_entry import TokenEntryHandler
     from blybot.domain.models import Session
-    from blybot.domain.ports import MessageArchive
+    from blybot.domain.ports import MessageArchive, SubscriptionStore
     from blybot.services.directory import ChannelDirectory, ChannelSettings
     from blybot.services.dm_routing import DmRouteRegistry
     from blybot.services.engine import ActionEngine
@@ -267,6 +268,8 @@ class GroupHandlers:
     # Capture-enabled deployments only: the archive follows the group
     # across supergroup migrations, alongside its profiles.
     archive: MessageArchive | None = None
+    # Digest subscriptions also re-key on a supergroup upgrade (§21).
+    subscriptions: SubscriptionStore | None = None
     # The /log command message is deleted after this delay, hiding who
     # requested the publication. Requires the "Delete messages" admin
     # right; without it the cleanup is skipped silently.
@@ -412,6 +415,8 @@ class GroupHandlers:
                 # under the dead chat id would vanish from analyses and be
                 # unreachable by /capture purge.
                 await self.archive.migrate(message.chat.id, message.migrate_to_chat_id)
+            if self.subscriptions is not None:
+                await self.subscriptions.migrate(message.chat.id, message.migrate_to_chat_id)
         except StorageError:
             log_event("chat_migration", "error")
             return
@@ -569,6 +574,7 @@ class PrivateHandlers:
     feedback: FeedbackService | None
     bug_limiter: SlidingWindowLimiter
     token_entry: TokenEntryHandler
+    subscriptions: SubscriptionHandlers | None = None
 
     async def on_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Deliver the welcome (R5), or redeem a configuration deep link.
@@ -584,6 +590,9 @@ class PrivateHandlers:
         payload = (context.args or [""])[0]
         if payload.startswith("cfg_"):
             await self.token_entry.redeem_link(update, context, chat.id, payload[4:])
+            return
+        if payload.startswith("sub_") and self.subscriptions is not None:
+            await self.subscriptions.redeem_link(context, chat.id, payload[4:])
             return
         await context.bot.send_message(chat_id=chat.id, text=self.welcome_text)
         log_event("welcome_delivered", "ok")

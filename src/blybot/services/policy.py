@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from datetime import datetime, timedelta
 
+    from blybot.domain.models import Scope
     from blybot.domain.ports import Clock
 
 
@@ -22,18 +23,21 @@ class GroupPolicy:
 
     An empty allowlist means every group the operator adds the bot to is
     served (spec 12 default); a non-empty list restricts service to
-    exactly those chat ids. Supergroup migration (spec 8) rewrites the
-    in-memory reference so an upgraded group keeps working.
+    exactly those chat ids. The allowlist stays keyed on the raw integer
+    chat id; a :class:`Scope`'s ``channel`` is that id as a string.
+    Supergroup migration (spec 8) rewrites the in-memory reference so an
+    upgraded group keeps working.
     """
 
     allowed: set[int]
 
-    def is_allowed(self, chat_id: int) -> bool:
-        """Return whether the bot should serve this group chat."""
-        return not self.allowed or chat_id in self.allowed
+    def is_allowed(self, scope: Scope) -> bool:
+        """Return whether the bot should serve this scope's channel."""
+        return not self.allowed or int(scope.channel) in self.allowed
 
-    def migrate(self, old_chat_id: int, new_chat_id: int) -> bool:
-        """Rewrite ``old_chat_id`` to ``new_chat_id``; return whether it applied."""
+    def migrate(self, old: Scope, new: Scope) -> bool:
+        """Rewrite ``old``'s channel to ``new``'s; return whether it applied."""
+        old_chat_id, new_chat_id = int(old.channel), int(new.channel)
         if old_chat_id in self.allowed:
             self.allowed.discard(old_chat_id)
             self.allowed.add(new_chat_id)

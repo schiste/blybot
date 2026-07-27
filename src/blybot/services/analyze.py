@@ -35,7 +35,7 @@ from blybot.services.directory import PageNotAllowedError, SelfServiceUnavailabl
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from blybot.domain.models import ActionContext, CapturedMessage, PromptResult, StepSpec
+    from blybot.domain.models import ActionContext, CapturedMessage, PromptResult, Scope, StepSpec
     from blybot.domain.ports import (
         MessageArchive,
         ProfileStore,
@@ -97,9 +97,7 @@ class ArchiveWindowSource:
         window_arg = context.spec.source.param("window", DEFAULT_WINDOW)
         until = context.now
         since = self._since(context, window_arg, until)
-        messages = await self.archive.window(
-            context.scope.chat_id, context.scope.thread_id, since, until
-        )
+        messages = await self.archive.window(context.scope, since, until)
         if not messages:
             return None
         return Transcript(messages=tuple(messages), since=since, until=until)
@@ -189,12 +187,13 @@ class PromptTransform:
         settings = self.defaults
         if self.store is not None:
             try:
-                profile = await self.store.get(context.scope.chat_id, context.scope.thread_id)
+                profile = await self.store.get(context.scope)
                 # Topic override → group default → operator default: a forum
-                # topic without its own /llm settings inherits thread 0's,
-                # the same two-tier resolution pages and capture follow.
-                if (profile is None or profile.llm is None) and context.scope.thread_id:
-                    profile = await self.store.get(context.scope.chat_id, 0)
+                # topic without its own /llm settings inherits the group
+                # default's, the same two-tier resolution pages and capture
+                # follow.
+                if (profile is None or profile.llm is None) and context.scope.thread:
+                    profile = await self.store.get(replace(context.scope, thread=""))
             except StorageError:
                 # Run on deployment defaults rather than abort — but count
                 # and log it: silently downgrading a scope's language/model
@@ -321,7 +320,7 @@ class StatsTransform:
 
 def explicit_page_resolver(
     directory: ChannelDirectory,
-) -> Callable[[int, int, str | None], Awaitable[str]]:
+) -> Callable[[Scope, str | None], Awaitable[str]]:
     """The wiki sink's page policy: publish only to a policy-checked page.
 
     Same rule as ``/log`` on self-service deployments — a scope that
@@ -332,7 +331,7 @@ def explicit_page_resolver(
     never point the shared wiki account at a bare content page.
     """
 
-    async def resolve_page(chat_id: int, thread_id: int, override: str | None = None) -> str:
+    async def resolve_page(scope: Scope, override: str | None = None) -> str:
         if override:
             try:
                 return directory.compose_page(override)
@@ -342,7 +341,7 @@ def explicit_page_resolver(
             except PageNotAllowedError as error:
                 msg = f"page={override!r} is not an allowed title."
                 raise ActionError(msg) from error
-        settings = await directory.resolve(chat_id, thread_id)
+        settings = await directory.resolve(scope)
         if not settings.page_explicit:
             msg = (
                 "No target page is set for this chat. An admin must "
@@ -360,7 +359,7 @@ class WikiSectionSink:
 
     publisher: WikiPublisher
     sanitizer: Sanitizer
-    resolve_page: Callable[[int, int, str | None], Awaitable[str]]
+    resolve_page: Callable[[Scope, str | None], Awaitable[str]]
     page_url_for: Callable[[str], str]
     edit_summary: str
     bot_name: str
@@ -369,16 +368,14 @@ class WikiSectionSink:
         """Render with trusted markup (fields sanitized) and publish."""
         report = _as_report(payload)
         page = await self.resolve_page(
-            context.scope.chat_id,
-            context.scope.thread_id,
+            context.scope,
             context.spec.sink.param("page") or None,
         )
         heading = f"{context.now:%Y-%m-%d} — {_title(report)}"
         body = self._render(report)
         await self.publisher.start_discussion(page, heading, body, self.edit_summary)
         confirmation = OutboundMessage(
-            chat_id=context.scope.chat_id,
-            thread_id=context.scope.thread_id,
+            scope=context.scope,
             text=f"Published: {_title(report)} → {self.page_url_for(page)}",
         )
         return (confirmation,)
@@ -416,9 +413,7 @@ class TelegramReplySink:
         text = f"{_title(report)} ({_scope_line(report)}):\n{body}"
         if len(text) > _REPLY_CAP_CHARS:
             text = f"{text[:_REPLY_CAP_CHARS]}…"
-        message = OutboundMessage(
-            chat_id=context.scope.chat_id, thread_id=context.scope.thread_id, text=text
-        )
+        message = OutboundMessage(scope=context.scope, text=text)
         return (message,)
 
 

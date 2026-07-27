@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import ActionContext, ActionScope, OutboundMessage, TriggerKind
+from blybot.domain.models import ActionContext, OutboundMessage, Scope, TriggerKind
 from blybot.observability import Counters
 from blybot.services.actions import parse_action
 from blybot.services.engine import ActionEngine
@@ -13,7 +13,7 @@ from blybot.services.policy import GroupPolicy
 from blybot.services.schedule import ActionScheduler
 from tests.fakes import FakeClock, FakeSink, FakeSource, InMemoryActions, SuffixTransform
 
-REPLY = OutboundMessage(chat_id=-1, thread_id=0, text="published")
+REPLY = OutboundMessage(scope=Scope("telegram", "-1"), text="published")
 
 
 def make_scheduler(
@@ -47,8 +47,9 @@ async def seed(
     store: InMemoryActions, clock: FakeClock, text: str = "every:6h summarize", chat_id: int = -1
 ) -> None:
     spec = parse_action(text, now_iso=clock.now().isoformat())
-    existing = store.actions.get((chat_id, 0), ())
-    store.actions[chat_id, 0] = (*existing, spec)
+    scope = Scope("telegram", str(chat_id))
+    existing = store.actions.get(scope, ())
+    store.actions[scope] = (*existing, spec)
 
 
 async def test_due_action_runs_and_stamps_last_run() -> None:
@@ -58,7 +59,7 @@ async def test_due_action_runs_and_stamps_last_run() -> None:
     scheduler, counters = make_scheduler(store, clock)
 
     assert await scheduler.collect() == [REPLY]
-    (stored,) = store.actions[-1, 0]
+    (stored,) = store.actions[Scope("telegram", "-1")]
     assert stored.last_run == clock.now()
     assert counters.snapshot()["actions_run"] == 1
     # The very next tick owes nothing: last_run was just stamped.
@@ -70,22 +71,22 @@ async def test_not_yet_due_action_is_left_untouched() -> None:
     await seed(store, clock)
     clock.advance(timedelta(hours=1))
     scheduler, _counters = make_scheduler(store, clock)
-    before = store.actions[-1, 0]
+    before = store.actions[Scope("telegram", "-1")]
 
     assert await scheduler.collect() == []
-    assert store.actions[-1, 0] == before  # no rewrite when nothing changed
+    assert store.actions[Scope("telegram", "-1")] == before  # no rewrite when nothing changed
 
 
 async def test_unstamped_action_is_baselined_not_replayed() -> None:
     store, clock = InMemoryActions(), FakeClock()
     await seed(store, clock)
-    (spec,) = store.actions[-1, 0]
-    store.actions[-1, 0] = (replace(spec, last_run=None),)  # e.g. hand-edited row
+    (spec,) = store.actions[Scope("telegram", "-1")]
+    store.actions[Scope("telegram", "-1")] = (replace(spec, last_run=None),)  # e.g. hand-edited row
     clock.advance(timedelta(days=2))  # plenty of missed slots
     scheduler, counters = make_scheduler(store, clock)
 
     assert await scheduler.collect() == []  # baselined, never replayed
-    (stored,) = store.actions[-1, 0]
+    (stored,) = store.actions[Scope("telegram", "-1")]
     assert stored.last_run == clock.now()
     assert "actions_run" not in counters.snapshot()
     # From the baseline on, the schedule fires normally.
@@ -99,7 +100,7 @@ async def test_command_triggered_actions_are_never_scheduled() -> None:
     command_trigger = replace(
         stored, trigger=replace(stored.trigger, kind=TriggerKind.COMMAND, command="run")
     )
-    store.actions[-1, 0] = (command_trigger,)
+    store.actions[Scope("telegram", "-1")] = (command_trigger,)
     clock.advance(timedelta(days=1))
     scheduler, _counters = make_scheduler(store, clock)
 
@@ -117,7 +118,7 @@ async def test_failing_action_is_isolated_and_waits_for_its_next_slot() -> None:
 
     assert messages == [REPLY]  # the healthy action still delivered
     assert counters.snapshot()["actions_failed"] == 1
-    first, second = store.actions[-1, 0]
+    first, second = store.actions[Scope("telegram", "-1")]
     assert first.last_run == clock.now()  # stamped despite the failure:
     assert second.last_run == clock.now()  # retry at the next slot, not every tick
 
@@ -129,7 +130,7 @@ async def test_disallowed_groups_are_skipped() -> None:
     scheduler, _counters = make_scheduler(store, clock, allowed={-1})
 
     assert await scheduler.collect() == []
-    (stored,) = store.actions[-99, 0]
+    (stored,) = store.actions[Scope("telegram", "-99")]
     assert stored.last_run is not None
     assert stored.last_run < clock.now()  # untouched, not even stamped
 
@@ -147,12 +148,12 @@ async def test_broken_scope_never_blocks_other_scopes() -> None:
     await seed(store, clock, chat_id=-1)
     await seed(store, clock, chat_id=-2)
     clock.advance(timedelta(hours=6))
-    store.fail_writes_for = {(-1, 0)}  # scope -1's last_run write explodes
+    store.fail_writes_for = {Scope("telegram", "-1")}  # scope -1's last_run write explodes
     scheduler, counters = make_scheduler(store, clock)
 
     # Scope -1's tick is lost to its storage error; scope -2 still runs.
     assert await scheduler.collect() == [REPLY]
-    (stored,) = store.actions[-2, 0]
+    (stored,) = store.actions[Scope("telegram", "-2")]
     assert stored.last_run == clock.now()
     assert counters.snapshot()["action_ticks_failed"] == 1  # the lost scope is counted
 
@@ -177,7 +178,7 @@ async def test_capped_ticks_rotate_so_no_scope_is_permanently_starved() -> None:
     assert await scheduler.collect() == [REPLY]  # one scope this tick...
     assert await scheduler.collect() == [REPLY]  # ...the other on the next
     for chat_id in (-1, -2):
-        (stored,) = store.actions[chat_id, 0]
+        (stored,) = store.actions[Scope("telegram", str(chat_id))]
         assert stored.last_run == clock.now()  # both eventually served
 
 
@@ -189,7 +190,7 @@ def test_jitter_is_stable_bounded_and_off_for_every() -> None:
     dsched, esched = daily.trigger.schedule, every.trigger.schedule
     assert dsched is not None
     assert esched is not None
-    scope = ActionScope(chat_id=-1)
+    scope = Scope("telegram", "-1")
 
     first = scheduler._jitter(scope, daily, dsched)
     assert first == scheduler._jitter(scope, daily, dsched)  # stable across restarts
@@ -203,11 +204,11 @@ def test_jitter_is_stable_bounded_and_off_for_every() -> None:
 async def test_a_daily_slot_waits_for_its_jitter_before_firing() -> None:
     store, clock = InMemoryActions(), FakeClock()
     spec = replace(parse_action("daily@06:00 summarize", now_iso=clock.now().isoformat()))
-    store.actions[-1, 0] = (spec,)
+    store.actions[Scope("telegram", "-1")] = (spec,)
     scheduler, _counters = make_scheduler(store, clock)
     schedule = spec.trigger.schedule
     assert schedule is not None
-    jitter = scheduler._jitter(ActionScope(chat_id=-1), spec, schedule)
+    jitter = scheduler._jitter(Scope("telegram", "-1"), spec, schedule)
     slot = datetime(2026, 7, 11, 6, 0, tzinfo=UTC)
 
     clock.current = slot + jitter - timedelta(minutes=1)
@@ -241,7 +242,7 @@ class StampProbeSink:
 
     async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         del context, payload
-        (stored,) = self.store.actions[-1, 0]
+        (stored,) = self.store.actions[Scope("telegram", "-1")]
         self.stamped.append(stored.last_run)
         return (REPLY,)
 
@@ -278,7 +279,7 @@ async def test_failed_stamp_write_skips_the_runs_rather_than_risk_duplicates() -
     store, clock = InMemoryActions(), FakeClock()
     await seed(store, clock)
     clock.advance(timedelta(hours=6))
-    store.fail_writes_for = {(-1, 0)}
+    store.fail_writes_for = {Scope("telegram", "-1")}
     sink = FakeSink(messages=(REPLY,))
     scheduler, _counters = make_scheduler(store, clock, sink=sink)
 

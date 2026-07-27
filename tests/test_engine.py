@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from blybot.domain.models import ActionScope, ActionSpec, OutboundMessage, StepSpec
+from blybot.domain.models import ActionSpec, OutboundMessage, Scope, StepSpec
 from blybot.domain.ports import ActionError
 from blybot.observability import Counters
 from blybot.services.actions import parse_action
@@ -14,7 +14,7 @@ from blybot.services.engine import ActionEngine
 from tests.fakes import FakeClock, FakeSink, FakeSource, SuffixTransform
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
-SCOPE = ActionScope(chat_id=-1)
+SCOPE = Scope("telegram", "-1")
 
 
 def make_engine(
@@ -38,7 +38,7 @@ def spec_for(text: str = "daily@06:00 summarize") -> ActionSpec:
 
 
 async def test_engine_threads_payload_through_the_chain_to_the_sink() -> None:
-    sink = FakeSink(messages=(OutboundMessage(chat_id=-1, thread_id=0, text="done"),))
+    sink = FakeSink(messages=(OutboundMessage(scope=Scope("telegram", "-1"), text="done"),))
     transform = SuffixTransform()
     engine, counters = make_engine(transform=transform, sink=sink)
 
@@ -132,7 +132,7 @@ async def test_chain_order_is_the_spec_order() -> None:
 
 async def test_caller_provided_payloads_replace_the_source() -> None:
     """The phase-5 seam: interactive flows inject their payload directly."""
-    sink = FakeSink(messages=(OutboundMessage(chat_id=-1, thread_id=0, text="done"),))
+    sink = FakeSink(messages=(OutboundMessage(scope=Scope("telegram", "-1"), text="done"),))
     source = FakeSource(payload="from the source")
     engine, counters = make_engine(source=source, sink=sink)
 

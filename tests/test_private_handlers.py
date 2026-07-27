@@ -13,7 +13,7 @@ from telegram.error import TelegramError
 from blybot.adapters.telegram import handlers as h
 from blybot.adapters.telegram import token_entry
 from blybot.adapters.telegram.token_entry import TokenEntryHandler
-from blybot.domain.models import ConsentMode
+from blybot.domain.models import ConsentMode, Scope
 from blybot.domain.ports import IssueTrackerError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
@@ -37,6 +37,14 @@ TTL = timedelta(minutes=45)
 
 
 ISSUES_URL = "https://github.com/schiste/blybot/issues"
+
+
+def gscope(chat_id: int, thread_id: int = 0) -> Scope:
+    return Scope("telegram", str(chat_id), str(thread_id) if thread_id else "")
+
+
+def dmscope(chat_id: int) -> Scope:
+    return Scope("telegram", str(chat_id))
 
 
 class FakeTracker:
@@ -101,7 +109,9 @@ def make_handlers(
         ),
     )
     if with_route:
-        handlers.routes.save_route(tg.PRIVATE.id, tg.GROUP.id, 0, "Meta talk:Community/Discussions")
+        handlers.routes.save_route(
+            dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id), "Meta talk:Community/Discussions"
+        )
     return handlers, publisher
 
 
@@ -123,22 +133,22 @@ async def test_start_delivers_the_welcome_and_nothing_else() -> None:
     await handlers.on_start(dm("/start welcome"), context)
 
     assert tg.sent_texts(bot) == ["Welcome to Blybot."]
-    assert handlers.sessions.peek(tg.PRIVATE.id) is None  # no identity minted
+    assert handlers.sessions.peek(dmscope(tg.PRIVATE.id)) is None  # no identity minted
 
 
 async def test_start_with_sub_payload_redeems_the_subscribe_link() -> None:
     handlers, _ = make_handlers()
-    recorded: list[tuple[int, str]] = []
+    recorded: list[tuple[Scope, str]] = []
 
     class _StubSubs:
-        async def redeem_link(self, context: object, dm_chat_id: int, code: str) -> None:
+        async def redeem_link(self, context: object, dm: Scope, code: str) -> None:
             del context
-            recorded.append((dm_chat_id, code))
+            recorded.append((dm, code))
 
     handlers.subscriptions = cast("Any", _StubSubs())
     context, _bot = tg.make_context(args=["sub_abc123"])
     await handlers.on_start(dm("/start sub_abc123"), context)
-    assert recorded == [(tg.PRIVATE.id, "abc123")]
+    assert recorded == [(dmscope(tg.PRIVATE.id), "abc123")]
 
 
 async def test_flush_forces_a_fresh_identity_and_announces_it() -> None:
@@ -147,7 +157,7 @@ async def test_flush_forces_a_fresh_identity_and_announces_it() -> None:
     await handlers.on_dm(dm("hello"), context)  # session Anon-1 opens lazily
     await handlers.on_flush(dm("/flush"), context)
 
-    session = handlers.sessions.peek(tg.PRIVATE.id)
+    session = handlers.sessions.peek(dmscope(tg.PRIVATE.id))
     assert session is not None
     assert session.pseudonym.value == "Anon-2"
     assert "Anon-2" in tg.sent_texts(bot)[-1]
@@ -161,7 +171,7 @@ async def test_whoami_discloses_without_rotating() -> None:
     await handlers.on_whoami(dm("/whoami"), context)
 
     assert "Anon-1" in tg.sent_texts(bot)[-1]
-    session = handlers.sessions.peek(tg.PRIVATE.id)
+    session = handlers.sessions.peek(dmscope(tg.PRIVATE.id))
     assert session is not None
     assert session.pseudonym.value == "Anon-1"  # unchanged
 
@@ -253,7 +263,7 @@ async def test_session_rollover_mid_conversation_is_announced() -> None:
     await handlers.on_dm(dm("before"), context)
     clock.advance(TTL)
     await handlers.on_dm(dm("after"), context)
-    await handlers.token_entry.directory.set_log_page(tg.GROUP.id, 0, "Project Foo")
+    await handlers.token_entry.directory.set_log_page(gscope(tg.GROUP.id), "Project Foo")
     await handlers.on_chat_shared(
         tg.chat_shared_update(tg.GROUP.id, last_destination_request_id(bot)), context
     )
@@ -328,7 +338,7 @@ async def test_first_dm_without_route_asks_for_a_group_destination() -> None:
 async def test_chat_picker_routes_the_queued_dm_to_the_selected_group_page() -> None:
     store = InMemoryProfiles()
     handlers, publisher = make_handlers(store=store, with_route=False)
-    await handlers.token_entry.directory.set_log_page(tg.GROUP.id, 0, "Project Foo")
+    await handlers.token_entry.directory.set_log_page(gscope(tg.GROUP.id), "Project Foo")
     context, bot = tg.make_context()
     await handlers.on_dm(dm("private statement"), context)
     request_id = last_destination_request_id(bot)
@@ -347,7 +357,7 @@ async def test_chat_picker_routes_the_queued_dm_to_the_selected_group_page() -> 
 async def test_subsequent_dm_reuses_the_selected_route() -> None:
     store = InMemoryProfiles()
     handlers, publisher = make_handlers(store=store, with_route=False)
-    await handlers.token_entry.directory.set_log_page(tg.GROUP.id, 0, "Project Foo")
+    await handlers.token_entry.directory.set_log_page(gscope(tg.GROUP.id), "Project Foo")
     context, bot = tg.make_context()
     await handlers.on_dm(dm("first"), context)
     request_id = last_destination_request_id(bot)
@@ -448,7 +458,9 @@ async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() ->
             counters=Counters(),
         ),
     )
-    handlers.routes.save_route(tg.PRIVATE.id, tg.GROUP.id, 0, "Meta talk:Community/Discussions")
+    handlers.routes.save_route(
+        dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id), "Meta talk:Community/Discussions"
+    )
     context, bot = tg.make_context()
     await handlers.on_dm(dm("doomed"), context)
     assert tg.sent_texts(bot) == [h.REPLY_WIKI_ERROR]
@@ -523,8 +535,8 @@ async def test_newcomer_prompt_can_be_switched_off() -> None:
 async def test_config_deep_link_arms_token_entry_for_admins() -> None:
     store = InMemoryProfiles()
     handlers, _ = make_handlers(store=store)
-    await handlers.token_entry.directory.set_repo(tg.GROUP.id, 0, "wikimedia/mediawiki")
-    nonce = handlers.token_entry.binding.mint_link(tg.GROUP.id, 0)
+    await handlers.token_entry.directory.set_repo(gscope(tg.GROUP.id), "wikimedia/mediawiki")
+    nonce = handlers.token_entry.binding.mint_link(gscope(tg.GROUP.id))
     context, bot = tg.make_context(args=[f"cfg_{nonce}"])
     bot.get_chat_member.return_value = SimpleNamespace(status=ChatMemberStatus.ADMINISTRATOR)
 
@@ -533,7 +545,9 @@ async def test_config_deep_link_arms_token_entry_for_admins() -> None:
     (sent,) = tg.sent_texts(bot)
     assert "wikimedia/mediawiki" in sent
     assert "delete your message from this chat immediately" in sent
-    assert handlers.token_entry.binding.pending_target(tg.PRIVATE.id) == (tg.GROUP.id, 0)
+    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) == gscope(
+        tg.GROUP.id
+    )
 
 
 async def test_expired_or_bogus_links_are_refused() -> None:
@@ -545,20 +559,20 @@ async def test_expired_or_bogus_links_are_refused() -> None:
 
 async def test_non_admins_cannot_redeem_a_link() -> None:
     handlers, _ = make_handlers()
-    await handlers.token_entry.directory.set_repo(tg.GROUP.id, 0, "x/y")
-    nonce = handlers.token_entry.binding.mint_link(tg.GROUP.id, 0)
+    await handlers.token_entry.directory.set_repo(gscope(tg.GROUP.id), "x/y")
+    nonce = handlers.token_entry.binding.mint_link(gscope(tg.GROUP.id))
     context, bot = tg.make_context(args=[f"cfg_{nonce}"])
     bot.get_chat_member.return_value = SimpleNamespace(status=ChatMemberStatus.MEMBER)
     await handlers.on_start(dm("/start"), context)
     assert tg.sent_texts(bot) == [token_entry.REPLY_LINK_NOT_ADMIN]
-    assert handlers.token_entry.binding.pending_target(tg.PRIVATE.id) is None
+    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) is None
     # Griefing guard: the non-admin tap did NOT burn the admin's link.
-    assert handlers.token_entry.binding.peek_link(nonce) == (tg.GROUP.id, 0)
+    assert handlers.token_entry.binding.peek_link(nonce) == gscope(tg.GROUP.id)
 
 
 async def test_link_without_a_bound_repo_instructs_setrepo() -> None:
     handlers, _ = make_handlers()
-    nonce = handlers.token_entry.binding.mint_link(tg.GROUP.id, 0)
+    nonce = handlers.token_entry.binding.mint_link(gscope(tg.GROUP.id))
     context, bot = tg.make_context(args=[f"cfg_{nonce}"])
     bot.get_chat_member.return_value = SimpleNamespace(status=ChatMemberStatus.ADMINISTRATOR)
     await handlers.on_start(dm("/start"), context)
@@ -571,15 +585,15 @@ async def test_pasted_token_is_stored_encrypted_and_never_transcribed() -> None:
     store = InMemoryProfiles()
     gateway = FakeRepoGateway(valid_tokens={"ghp_good"})
     handlers, publisher = make_handlers(store=store, gateway=gateway)
-    await handlers.token_entry.directory.set_repo(tg.GROUP.id, 0, "x/y")
-    handlers.token_entry.binding.open_entry(tg.PRIVATE.id, tg.GROUP.id, 0)
+    await handlers.token_entry.directory.set_repo(gscope(tg.GROUP.id), "x/y")
+    handlers.token_entry.binding.open_entry(dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id))
     context, bot = tg.make_context()
 
     await handlers.on_dm(dm("ghp_good"), context)
 
     assert publisher.wrote_nothing  # the token never reached the wiki
-    assert store.tokens[tg.GROUP.id, 0] == "ghp_good"
-    assert handlers.token_entry.binding.pending_target(tg.PRIVATE.id) is None
+    assert store.tokens[gscope(tg.GROUP.id)] == "ghp_good"
+    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) is None
     assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_SAVED]
     # The bot removed the pasted secret from the chat itself.
     delete = bot.delete_message.await_args
@@ -591,29 +605,30 @@ async def test_rejected_token_can_be_retried() -> None:
     store = InMemoryProfiles()
     gateway = FakeRepoGateway(valid_tokens={"ghp_good"})
     handlers, publisher = make_handlers(store=store, gateway=gateway)
-    await handlers.token_entry.directory.set_repo(tg.GROUP.id, 0, "x/y")
-    handlers.token_entry.binding.open_entry(tg.PRIVATE.id, tg.GROUP.id, 0)
+    await handlers.token_entry.directory.set_repo(gscope(tg.GROUP.id), "x/y")
+    handlers.token_entry.binding.open_entry(dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id))
     context, bot = tg.make_context()
 
     await handlers.on_dm(dm("ghp_wrong"), context)
     assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_INVALID]
-    assert handlers.token_entry.binding.pending_target(tg.PRIVATE.id) == (
-        tg.GROUP.id,
-        0,
+    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) == gscope(
+        tg.GROUP.id
     )  # still armed
 
     await handlers.on_dm(dm("ghp_good"), context)
-    assert store.tokens[tg.GROUP.id, 0] == "ghp_good"
+    assert store.tokens[gscope(tg.GROUP.id)] == "ghp_good"
     assert publisher.wrote_nothing
 
 
 async def test_token_entry_with_repo_reset_midway_aborts() -> None:
     handlers, publisher = make_handlers()
-    handlers.token_entry.binding.open_entry(tg.PRIVATE.id, tg.GROUP.id, 0)  # repo never bound
+    handlers.token_entry.binding.open_entry(
+        dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id)
+    )  # repo never bound
     context, bot = tg.make_context()
     await handlers.on_dm(dm("ghp_x"), context)
     assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_NO_REPO]
-    assert handlers.token_entry.binding.pending_target(tg.PRIVATE.id) is None
+    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) is None
     assert publisher.wrote_nothing
 
 
@@ -621,30 +636,32 @@ async def test_token_store_failure_keeps_the_entry_armed() -> None:
     store = InMemoryProfiles()
     gateway = FakeRepoGateway(valid_tokens={"ghp_good"})
     handlers, _ = make_handlers(store=store, gateway=gateway)
-    await handlers.token_entry.directory.set_repo(tg.GROUP.id, 0, "x/y")
-    handlers.token_entry.binding.open_entry(tg.PRIVATE.id, tg.GROUP.id, 0)
+    await handlers.token_entry.directory.set_repo(gscope(tg.GROUP.id), "x/y")
+    handlers.token_entry.binding.open_entry(dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id))
     store.fail_token_writes = True
     context, bot = tg.make_context()
     await handlers.on_dm(dm("ghp_good"), context)
     assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_STORE_FAILED]
-    assert handlers.token_entry.binding.pending_target(tg.PRIVATE.id) == (tg.GROUP.id, 0)
+    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) == gscope(
+        tg.GROUP.id
+    )
 
 
 async def test_token_entry_without_gateway_aborts_defensively() -> None:
     handlers, publisher = make_handlers()
     handlers.token_entry.gateway = None  # self-service wiring mismatch: fail closed
-    handlers.token_entry.binding.open_entry(tg.PRIVATE.id, tg.GROUP.id, 0)
+    handlers.token_entry.binding.open_entry(dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id))
     context, bot = tg.make_context()
     await handlers.on_dm(dm("ghp_x"), context)
     assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_NO_REPO]
-    assert handlers.token_entry.binding.pending_target(tg.PRIVATE.id) is None
+    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) is None
     assert publisher.wrote_nothing
 
 
 async def test_link_consumed_in_a_race_reads_as_expired() -> None:
     handlers, _ = make_handlers()
-    await handlers.token_entry.directory.set_repo(tg.GROUP.id, 0, "x/y")
-    nonce = handlers.token_entry.binding.mint_link(tg.GROUP.id, 0)
+    await handlers.token_entry.directory.set_repo(gscope(tg.GROUP.id), "x/y")
+    nonce = handlers.token_entry.binding.mint_link(gscope(tg.GROUP.id))
     handlers.token_entry.binding.redeem_link = lambda _n: None  # type: ignore[method-assign, assignment]
     context, bot = tg.make_context(args=[f"cfg_{nonce}"])
     bot.get_chat_member.return_value = SimpleNamespace(status=ChatMemberStatus.ADMINISTRATOR)
@@ -656,9 +673,9 @@ async def test_pat_message_deletion_failure_does_not_block_the_flow() -> None:
     store = InMemoryProfiles()
     gateway = FakeRepoGateway(valid_tokens={"ghp_good"})
     handlers, _ = make_handlers(store=store, gateway=gateway)
-    await handlers.token_entry.directory.set_repo(tg.GROUP.id, 0, "x/y")
-    handlers.token_entry.binding.open_entry(tg.PRIVATE.id, tg.GROUP.id, 0)
+    await handlers.token_entry.directory.set_repo(gscope(tg.GROUP.id), "x/y")
+    handlers.token_entry.binding.open_entry(dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id))
     context, bot = tg.make_context()
     bot.delete_message.side_effect = TelegramError("gone")
     await handlers.on_dm(dm("ghp_good"), context)
-    assert store.tokens[tg.GROUP.id, 0] == "ghp_good"  # storage still succeeded
+    assert store.tokens[gscope(tg.GROUP.id)] == "ghp_good"  # storage still succeeded

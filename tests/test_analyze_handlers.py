@@ -11,7 +11,7 @@ from telegram.constants import ChatMemberStatus
 from telegram.ext import ContextTypes
 
 from blybot.adapters.telegram import analyze as a
-from blybot.domain.models import OutboundMessage
+from blybot.domain.models import OutboundMessage, Scope
 from blybot.domain.ports import ActionError
 from blybot.observability import Counters
 from blybot.services.engine import ActionEngine
@@ -22,7 +22,7 @@ from tests.fakes import FakeClock, FakeSink, FakeSource, SuffixTransform
 if TYPE_CHECKING:
     from unittest.mock import AsyncMock
 
-CONFIRMATION = OutboundMessage(chat_id=tg.GROUP.id, thread_id=0, text="Published: url")
+CONFIRMATION = OutboundMessage(scope=Scope("telegram", str(tg.GROUP.id)), text="Published: url")
 
 
 def make_handlers(

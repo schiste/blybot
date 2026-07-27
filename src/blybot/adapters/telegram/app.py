@@ -32,7 +32,7 @@ from telegram.ext import (
     filters,
 )
 
-from blybot.adapters.telegram._common import send_threaded
+from blybot.adapters.telegram._common import send_threaded, telegram_target
 from blybot.domain.models import OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
@@ -220,9 +220,10 @@ async def _deliver(
     """
     reason = ""
     delay = 0.0
+    chat_id, thread_id = telegram_target(message.scope)
     for attempt in range(_DELIVERY_MAX_RETRIES + 1):
         try:
-            await send_threaded(bot, message.chat_id, message.thread_id, message.text)
+            await send_threaded(bot, chat_id, thread_id or 0, message.text)
         except RetryAfter as exc:
             # retry_after is a timedelta under PTB_TIMEDELTA (an int on the
             # legacy path); honor the stated wait plus a 1s margin.

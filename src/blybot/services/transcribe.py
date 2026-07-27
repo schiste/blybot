@@ -29,7 +29,7 @@ from blybot.domain.rendering import discussion_line, section_heading, timestamp
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from blybot.domain.models import Session, TimestampGranularity
+    from blybot.domain.models import Scope, Session, TimestampGranularity
     from blybot.domain.ports import Sanitizer, WikiPublisher
     from blybot.services.sessions import SessionRegistry
 
@@ -55,7 +55,7 @@ class DmTranscriptionService:
     edit_summary: str
     debounce_seconds: float
     timestamp_granularity: TimestampGranularity
-    _buffers: dict[int, _Buffer] = field(default_factory=dict)
+    _buffers: dict[Scope, _Buffer] = field(default_factory=dict)
     # Anchors whose section has been created on the wiki. Kept so the
     # first flush of a session *opens* its section instead of "continuing"
     # one — which could otherwise target a stale section from an old
@@ -63,7 +63,7 @@ class DmTranscriptionService:
     # pseudonym strings (no identifiers) and are pruned on rollover.
     _published_anchors: set[tuple[str, str]] = field(default_factory=set)
 
-    async def record(self, chat_id: int, text: str, target_page: str | None = None) -> Session:
+    async def record(self, scope: Scope, text: str, target_page: str | None = None) -> Session:
         """Queue one DM for publication; return the session it belongs to.
 
         With a positive debounce the write happens shortly after the
@@ -73,20 +73,20 @@ class DmTranscriptionService:
         to the caller.
         """
         page = target_page or self.target_page
-        session = self.sessions.advance(chat_id)
+        session = self.sessions.advance(scope)
         line = discussion_line(
             session.message_count,
             self.sanitizer.sanitize(text),
             signature=session.pseudonym.value,
         )
 
-        buffer = self._buffers.get(chat_id)
+        buffer = self._buffers.get(scope)
         if buffer is not None and (buffer.anchor != session.anchor or buffer.target_page != page):
             # The session rolled over mid-buffer; close out the old
             # identity's section before writing under the new one. A
             # failure here follows the debounced-failure policy (logged,
             # burst dropped) — it must not swallow the new message too.
-            await self._flush_logged(chat_id)
+            await self._flush_logged(scope)
             self._published_anchors.discard((buffer.target_page, buffer.anchor))
             buffer = None
         if buffer is None:
@@ -96,13 +96,13 @@ class DmTranscriptionService:
                 target_page=page,
                 continuation=(page, session.anchor) in self._published_anchors,
             )
-            self._buffers[chat_id] = buffer
+            self._buffers[scope] = buffer
         buffer.lines.append(line)
 
         if self.debounce_seconds <= 0:
-            await self._flush(chat_id)
+            await self._flush(scope)
         elif buffer.flusher is None or buffer.flusher.done():
-            buffer.flusher = asyncio.get_running_loop().create_task(self._flush_later(chat_id))
+            buffer.flusher = asyncio.get_running_loop().create_task(self._flush_later(scope))
         return session
 
     async def flush_all(self) -> None:
@@ -110,8 +110,8 @@ class DmTranscriptionService:
 
         ``_flush`` itself cancels each buffer's scheduled flusher.
         """
-        for chat_id in list(self._buffers):
-            await self._flush_logged(chat_id)
+        for scope in list(self._buffers):
+            await self._flush_logged(scope)
 
     def heading_for(self, session: Session) -> str:
         """The session's section heading: creation timestamp + pseudonym.
@@ -132,19 +132,19 @@ class DmTranscriptionService:
         page = target_page or self.target_page
         return f"{page}#{self.heading_for(session).replace(' ', '_')}"
 
-    async def _flush_later(self, chat_id: int) -> None:
+    async def _flush_later(self, scope: Scope) -> None:
         await asyncio.sleep(self.debounce_seconds)
-        await self._flush_logged(chat_id)
+        await self._flush_logged(scope)
 
-    async def _flush_logged(self, chat_id: int) -> None:
+    async def _flush_logged(self, scope: Scope) -> None:
         """Flush a buffer, applying the debounced-failure policy (log, drop)."""
         try:
-            await self._flush(chat_id)
+            await self._flush(scope)
         except WikiWriteError:
             log_event("dm_flush", "error")
 
-    async def _flush(self, chat_id: int) -> None:
-        buffer = self._buffers.pop(chat_id, None)
+    async def _flush(self, scope: Scope) -> None:
+        buffer = self._buffers.pop(scope, None)
         if buffer is None or not buffer.lines:
             return
         flusher = buffer.flusher

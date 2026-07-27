@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 
+from blybot.domain.models import Scope
 from blybot.services.subscriptions import (
     SubscriptionBinding,
     SubscriptionParseError,
@@ -45,28 +46,30 @@ def test_mint_helpers_are_nonempty_and_fresh() -> None:
 def test_binding_arms_and_reads_pending_targets() -> None:
     clock = FakeClock()
     binding = SubscriptionBinding(clock=clock)
-    binding.open_entry(dm_chat_id=500, chat_id=-100, thread_id=7)
-    binding.open_entry(dm_chat_id=501, chat_id=-200, thread_id=0)  # prune keeps the fresh 500
-    assert binding.pending_target(500) == (-100, 7)
-    assert binding.pending_target(501) == (-200, 0)
-    binding.close_entry(500)
-    assert binding.pending_target(500) is None  # closed → gone
-    assert binding.pending_target(999) is None  # never armed → None
+    binding.open_entry(Scope("telegram", "500"), Scope("telegram", "-100", "7"))
+    binding.open_entry(Scope("telegram", "501"), Scope("telegram", "-200"))  # prune keeps fresh 500
+    assert binding.pending_target(Scope("telegram", "500")) == Scope("telegram", "-100", "7")
+    assert binding.pending_target(Scope("telegram", "501")) == Scope("telegram", "-200")
+    binding.close_entry(Scope("telegram", "500"))
+    assert binding.pending_target(Scope("telegram", "500")) is None  # closed → gone
+    assert binding.pending_target(Scope("telegram", "999")) is None  # never armed → None
 
 
 def test_binding_entry_expires_on_peek() -> None:
     clock = FakeClock()
     binding = SubscriptionBinding(clock=clock, entry_ttl=timedelta(minutes=10))
-    binding.open_entry(dm_chat_id=500, chat_id=-100, thread_id=0)
+    binding.open_entry(Scope("telegram", "500"), Scope("telegram", "-100"))
     clock.advance(timedelta(minutes=11))
-    assert binding.pending_target(500) is None  # TTL-expired peek evicts it
+    assert binding.pending_target(Scope("telegram", "500")) is None  # TTL-expired peek evicts it
 
 
 def test_binding_prunes_expired_entries_on_open() -> None:
     clock = FakeClock()
     binding = SubscriptionBinding(clock=clock, entry_ttl=timedelta(minutes=10))
-    binding.open_entry(dm_chat_id=500, chat_id=-100, thread_id=0)
+    binding.open_entry(Scope("telegram", "500"), Scope("telegram", "-100"))
     clock.advance(timedelta(minutes=11))
-    binding.open_entry(dm_chat_id=501, chat_id=-200, thread_id=0)  # _prune drops the stale 500
-    assert 500 not in binding._entries
-    assert binding.pending_target(501) == (-200, 0)
+    binding.open_entry(
+        Scope("telegram", "501"), Scope("telegram", "-200")
+    )  # _prune drops stale 500
+    assert Scope("telegram", "500") not in binding._entries
+    assert binding.pending_target(Scope("telegram", "501")) == Scope("telegram", "-200")

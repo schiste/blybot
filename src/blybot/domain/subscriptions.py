@@ -2,11 +2,12 @@
 
 Every other domain value is deliberately identifier-free (spec R6); see
 :mod:`blybot.domain.models`. A digest *subscription*, by its nature, must
-remember *whom* to deliver to — the subscriber's private (DM) chat id,
-which for a private chat is effectively their Telegram user id. That
-identifier is isolated here, in its own module and (durably) its own
-storage table, and never touches the pseudonymized capture/content layer.
-This is the documented, opt-in carve-out to R6 (SPECIFICATION §21).
+remember *whom* to deliver to — the subscriber's DM :class:`Scope`, whose
+``channel`` is the DM handle (on Telegram the private chat id, effectively
+their user id). That identifier is isolated here, in its own module and
+(durably) its own storage table, and never touches the pseudonymized
+capture/content layer. This is the documented, opt-in carve-out to R6
+(SPECIFICATION §21).
 """
 
 from __future__ import annotations
@@ -17,23 +18,23 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from blybot.domain.models import Schedule
+    from blybot.domain.models import Schedule, Scope
 
 
 @dataclass(frozen=True, slots=True)
 class Subscription:
     """One user's standing request for a scope's recurring digest via DM.
 
-    ``dm_chat_id`` is the subscriber's private chat — the sole durable
-    Telegram identifier in the system. ``chat_id``/``thread_id`` are the
-    subscribed scope's *group structure*, exactly as elsewhere.
-    ``last_run`` is the per-subscription scheduler watermark (UTC).
+    ``dm`` is the subscriber's DM :class:`Scope` — the sole durable
+    Telegram identifier in the system, carried in its ``channel``.
+    ``scope`` is the subscribed source group's structure, exactly as
+    elsewhere. ``last_run`` is the per-subscription scheduler watermark
+    (UTC).
     """
 
     sub_id: str
-    dm_chat_id: int
-    chat_id: int
-    thread_id: int
+    dm: Scope
+    scope: Scope
     schedule: Schedule
     recipe: str  # digest recipe: summarize | talking_points | stats
     lang: str

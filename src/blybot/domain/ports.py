@@ -13,7 +13,6 @@ from typing import Protocol
 
 from blybot.domain.models import (
     ActionContext,
-    ActionScope,
     ActionSpec,
     CapturedMessage,
     GroupProfile,
@@ -24,6 +23,7 @@ from blybot.domain.models import (
     RepoEvent,
     RepoSummary,
     Resource,
+    Scope,
     StepSpec,
 )
 from blybot.domain.subscriptions import Subscription
@@ -130,13 +130,11 @@ class MessageArchive(Protocol):
         """Persist one captured message (idempotent per message id)."""
         ...
 
-    async def window(
-        self, chat_id: int, thread_id: int, since: datetime, until: datetime
-    ) -> list[CapturedMessage]:
+    async def window(self, scope: Scope, since: datetime, until: datetime) -> list[CapturedMessage]:
         """Return the scope's messages with ``since <= posted_at < until``, oldest first."""
         ...
 
-    async def purge(self, chat_id: int, thread_id: int, before: datetime | None = None) -> int:
+    async def purge(self, scope: Scope, before: datetime | None = None) -> int:
         """Hard-delete the scope's archive (older than ``before`` if given).
 
         Returns the rows removed.
@@ -147,25 +145,23 @@ class MessageArchive(Protocol):
         """Return the archive's total row count (operator metric)."""
         ...
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
-        """Re-key every topic's messages after a group→supergroup upgrade."""
+    async def migrate(self, old: Scope, new: Scope) -> None:
+        """Re-key every thread sharing ``old``'s (platform, channel) onto ``new``."""
         ...
 
 
 class ActionStore(Protocol):
     """Persists each scope's configured actions (spec 11: one JSON document)."""
 
-    async def get_actions(self, chat_id: int, thread_id: int) -> tuple[ActionSpec, ...]:
-        """Return the (group, topic) actions, empty when none are configured."""
+    async def get_actions(self, scope: Scope) -> tuple[ActionSpec, ...]:
+        """Return the scope's actions, empty when none are configured."""
         ...
 
-    async def set_actions(
-        self, chat_id: int, thread_id: int, actions: tuple[ActionSpec, ...]
-    ) -> None:
-        """Replace the (group, topic) actions (state included) wholesale."""
+    async def set_actions(self, scope: Scope, actions: tuple[ActionSpec, ...]) -> None:
+        """Replace the scope's actions (state included) wholesale."""
         ...
 
-    async def list_scheduled(self) -> list[tuple[ActionScope, tuple[ActionSpec, ...]]]:
+    async def list_scheduled(self) -> list[tuple[Scope, tuple[ActionSpec, ...]]]:
         """Return every scope that has at least one action configured."""
         ...
 
@@ -181,12 +177,12 @@ class SubscriptionStore(Protocol):
         """Persist a new subscription."""
         ...
 
-    async def remove(self, dm_chat_id: int, sub_id: str) -> bool:
+    async def remove(self, dm: Scope, sub_id: str) -> bool:
         """Delete the caller's subscription; return whether one existed."""
         ...
 
-    async def list_for_user(self, dm_chat_id: int) -> list[Subscription]:
-        """Return every subscription this DM chat owns, oldest first."""
+    async def list_for_user(self, dm: Scope) -> list[Subscription]:
+        """Return every subscription this DM scope owns, oldest first."""
         ...
 
     async def list_all(self) -> list[Subscription]:
@@ -197,7 +193,7 @@ class SubscriptionStore(Protocol):
         """Advance a subscription's ``last_run`` watermark durably."""
         ...
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+    async def migrate(self, old: Scope, new: Scope) -> None:
         """Re-key a group's subscriptions after a group→supergroup upgrade."""
         ...
 
@@ -205,8 +201,8 @@ class SubscriptionStore(Protocol):
 class ProfileStore(Protocol):
     """Persists per-group self-service profiles (spec 11: ToolsDB)."""
 
-    async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
-        """Return the (group, topic) profile, or ``None`` if unconfigured."""
+    async def get(self, scope: Scope) -> GroupProfile | None:
+        """Return the scope's profile, or ``None`` if unconfigured."""
         ...
 
     async def get_by_subscribe_code(self, code: str) -> GroupProfile | None:
@@ -217,8 +213,8 @@ class ProfileStore(Protocol):
         """Create or update the profile (token and cursor are untouched)."""
         ...
 
-    async def delete(self, chat_id: int, thread_id: int) -> None:
-        """Forget everything about the (group, topic), token and cursor included."""
+    async def delete(self, scope: Scope) -> None:
+        """Forget everything about the scope, token and cursor included."""
         ...
 
     async def list_event_enabled(self) -> list[GroupProfile]:
@@ -229,13 +225,11 @@ class ProfileStore(Protocol):
         """Return every profile with message capture switched on."""
         ...
 
-    async def get_cursors(self, chat_id: int, thread_id: int) -> dict[str, str]:
-        """Return the (group, topic) per-resource poll cursor map."""
+    async def get_cursors(self, scope: Scope) -> dict[str, str]:
+        """Return the scope's per-resource poll cursor map."""
         ...
 
-    async def set_cursors(
-        self, chat_id: int, thread_id: int, cursors: dict[str, str], repo: str
-    ) -> None:
+    async def set_cursors(self, scope: Scope, cursors: dict[str, str], repo: str) -> None:
         """Persist the per-resource cursor map iff still bound to ``repo``.
 
         The repo guard keeps an in-flight poll from stamping stale
@@ -243,8 +237,8 @@ class ProfileStore(Protocol):
         """
         ...
 
-    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
-        """Re-key every topic of a group after a group→supergroup upgrade."""
+    async def migrate(self, old: Scope, new: Scope) -> None:
+        """Re-key every thread sharing ``old``'s (platform, channel) onto ``new``."""
         ...
 
 
@@ -255,16 +249,16 @@ class TokenVault(Protocol):
     adapter's responsibility and ciphertext never leaves it.
     """
 
-    async def store_token(self, chat_id: int, thread_id: int, token: str) -> None:
-        """Encrypt and persist the (group, topic) token."""
+    async def store_token(self, scope: Scope, token: str) -> None:
+        """Encrypt and persist the scope's token."""
         ...
 
-    async def fetch_token(self, chat_id: int, thread_id: int) -> str | None:
-        """Decrypt and return the (group, topic) token, if one is stored."""
+    async def fetch_token(self, scope: Scope) -> str | None:
+        """Decrypt and return the scope's token, if one is stored."""
         ...
 
-    async def delete_token(self, chat_id: int, thread_id: int) -> None:
-        """Discard the (group, topic) token."""
+    async def delete_token(self, scope: Scope) -> None:
+        """Discard the scope's token."""
         ...
 
 

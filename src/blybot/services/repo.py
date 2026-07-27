@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Final
 from blybot.services.feedback import compose_issue
 
 if TYPE_CHECKING:
-    from blybot.domain.models import RepoSummary
+    from blybot.domain.models import RepoSummary, Scope
     from blybot.domain.ports import RepoActions, TokenVault
     from blybot.services.directory import ChannelDirectory
 
@@ -39,24 +39,24 @@ class GroupRepoService:
     vault: TokenVault
     directory: ChannelDirectory
 
-    async def file_issue(self, chat_id: int, thread_id: int, text: str) -> str:
-        """File ``text`` as an anonymous issue in the topic's repo; return its URL."""
-        repo, token = await self._binding(chat_id, thread_id)
+    async def file_issue(self, scope: Scope, text: str) -> str:
+        """File ``text`` as an anonymous issue in the scope's repo; return its URL."""
+        repo, token = await self._binding(scope)
         title, body = compose_issue(text, _BODY_PREAMBLE)
         return await self.gateway.open_issue(repo, token, title=title, body=body)
 
-    async def summary(self, chat_id: int, thread_id: int) -> RepoSummary:
-        """Return the topic's repo open-items summary."""
-        repo, token = await self._binding(chat_id, thread_id)
+    async def summary(self, scope: Scope) -> RepoSummary:
+        """Return the scope's repo open-items summary."""
+        repo, token = await self._binding(scope)
         return await self.gateway.open_summary(repo, token)
 
-    async def _binding(self, chat_id: int, thread_id: int) -> tuple[str, str]:
-        settings = await self.directory.resolve(chat_id, thread_id)
+    async def _binding(self, scope: Scope) -> tuple[str, str]:
+        settings = await self.directory.resolve(scope)
         if not settings.repo:
             raise NoRepoBoundError
         # The token lives with whichever tier bound the repo (a topic
         # inheriting the group repo uses the group's token).
-        token = await self.vault.fetch_token(chat_id, settings.repo_thread_id)
+        token = await self.vault.fetch_token(settings.repo_scope)
         if not token:
             raise NoTokenError
         return settings.repo, token

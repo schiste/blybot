@@ -16,7 +16,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import (
-    ActionScope,
     ActionSpec,
     Schedule,
     StepSpec,
@@ -31,7 +30,7 @@ from blybot.services.llmconf import valid_lang
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from blybot.domain.models import OutboundMessage
+    from blybot.domain.models import OutboundMessage, Scope
     from blybot.domain.ports import Clock, ProfileStore, SubscriptionStore
     from blybot.domain.subscriptions import Subscription
     from blybot.observability import Counters
@@ -103,32 +102,32 @@ class SubscriptionBinding:
 
     clock: Clock
     entry_ttl: timedelta = timedelta(minutes=10)
-    _entries: dict[int, tuple[int, int, datetime]] = field(default_factory=dict)
+    _entries: dict[Scope, tuple[Scope, datetime]] = field(default_factory=dict)
 
-    def open_entry(self, dm_chat_id: int, chat_id: int, thread_id: int) -> None:
-        """Arm the DM chat's next /subscribe for the (group, topic) scope."""
+    def open_entry(self, dm: Scope, source: Scope) -> None:
+        """Arm the DM scope's next /subscribe for the ``source`` group scope."""
         self._prune()
-        self._entries[dm_chat_id] = (chat_id, thread_id, self.clock.now())
+        self._entries[dm] = (source, self.clock.now())
 
-    def pending_target(self, dm_chat_id: int) -> tuple[int, int] | None:
-        """Return the scope this DM chat is about to subscribe to, if any."""
-        entry = self._entries.get(dm_chat_id)
+    def pending_target(self, dm: Scope) -> Scope | None:
+        """Return the scope this DM scope is about to subscribe to, if any."""
+        entry = self._entries.get(dm)
         if entry is None:
             return None
-        chat_id, thread_id, opened_at = entry
+        source, opened_at = entry
         if self.clock.now() - opened_at > self.entry_ttl:
-            del self._entries[dm_chat_id]
+            del self._entries[dm]
             return None
-        return chat_id, thread_id
+        return source
 
-    def close_entry(self, dm_chat_id: int) -> None:
-        """Disarm the pending subscribe for this DM chat."""
-        self._entries.pop(dm_chat_id, None)
+    def close_entry(self, dm: Scope) -> None:
+        """Disarm the pending subscribe for this DM scope."""
+        self._entries.pop(dm, None)
 
     def _prune(self) -> None:
         now = self.clock.now()
         self._entries = {
-            dm: value for dm, value in self._entries.items() if now - value[2] <= self.entry_ttl
+            dm: value for dm, value in self._entries.items() if now - value[1] <= self.entry_ttl
         }
 
 
@@ -201,14 +200,11 @@ class SubscriptionScheduler:
             return []
         if not sub.schedule.is_due(now, sub.last_run):
             return []
-        profile = await self.profiles.get(sub.chat_id, sub.thread_id)
+        profile = await self.profiles.get(sub.scope)
         if profile is None or profile.subscribe_code is None:
             return []  # admin revoked subscriptions for this scope — skip, don't stamp
         # Durable watermark before the side effect (no duplicate DM on crash).
         await self.subscriptions.stamp(sub.sub_id, now)
-        scope = ActionScope(chat_id=sub.chat_id, thread_id=sub.thread_id)
-        outcome = await self.engine.run(scope, _digest_spec(sub), now)
+        outcome = await self.engine.run(sub.scope, _digest_spec(sub), now)
         self.counters.increment("subscription_digests")
-        return [
-            replace(message, chat_id=sub.dm_chat_id, thread_id=0) for message in outcome.messages
-        ]
+        return [replace(message, scope=sub.dm) for message in outcome.messages]

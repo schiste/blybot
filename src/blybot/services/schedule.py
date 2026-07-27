@@ -34,7 +34,7 @@ from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from blybot.domain.models import ActionScope, ActionSpec, OutboundMessage, Schedule
+    from blybot.domain.models import ActionSpec, OutboundMessage, Schedule, Scope
     from blybot.domain.ports import ActionStore, Clock
     from blybot.observability import Counters
     from blybot.services.engine import ActionEngine
@@ -81,7 +81,7 @@ class ActionScheduler:
             scoped = (scoped[start:] + scoped[:start])[: self.max_scopes_per_tick]
         messages: list[OutboundMessage] = []
         for scope, actions in scoped:
-            if not self.groups.is_allowed(scope.chat_id):
+            if not self.groups.is_allowed(scope):
                 continue  # never run pipelines for groups the operator excluded
             try:
                 messages.extend(await self._for_scope(scope, actions))
@@ -94,7 +94,7 @@ class ActionScheduler:
         return messages
 
     async def _for_scope(
-        self, scope: ActionScope, actions: tuple[ActionSpec, ...]
+        self, scope: Scope, actions: tuple[ActionSpec, ...]
     ) -> list[OutboundMessage]:
         now = self.clock.now()
         updated = list(actions)
@@ -118,7 +118,7 @@ class ActionScheduler:
             # Persist the stamps before any side effects (module docstring).
             # If this write fails, the per-scope isolation above skips the
             # scope's runs this tick — failing toward "no duplicate publish".
-            await self.store.set_actions(scope.chat_id, scope.thread_id, tuple(updated))
+            await self.store.set_actions(scope, tuple(updated))
         messages: list[OutboundMessage] = []
         for spec in due:
             try:
@@ -131,7 +131,7 @@ class ActionScheduler:
                 log_event("action_run", "error")
         return messages
 
-    def _jitter(self, scope: ActionScope, spec: ActionSpec, schedule: Schedule) -> timedelta:
+    def _jitter(self, scope: Scope, spec: ActionSpec, schedule: Schedule) -> timedelta:
         """A stable per-action offset that desynchronizes shared slots.
 
         Zero for ``every`` schedules (already phase-spread by when each was
@@ -142,7 +142,7 @@ class ActionScheduler:
         """
         if self.jitter_window <= timedelta(0) or schedule.kind == "every":
             return timedelta(0)
-        seed = f"{scope.chat_id}:{scope.thread_id}:{spec.action_id}".encode()
+        seed = f"{scope.key}:{spec.action_id}".encode()
         digest = hashlib.blake2b(seed, digest_size=8).digest()
         offset = int.from_bytes(digest, "big") % int(self.jitter_window.total_seconds())
         return timedelta(seconds=offset)

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from blybot.domain.models import ActionContext, ActionScope, LogContent, StepSpec
+from blybot.domain.models import ActionContext, LogContent, Scope, StepSpec
 from blybot.domain.ports import ActionError
 from blybot.observability import Counters
 from blybot.services.actions import command_action
@@ -20,7 +20,7 @@ NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
 
 def context() -> ActionContext:
     return ActionContext(
-        scope=ActionScope(chat_id=-1),
+        scope=Scope("telegram", "-1"),
         spec=command_action("summarize", "summarize", []),
         now=NOW,
     )

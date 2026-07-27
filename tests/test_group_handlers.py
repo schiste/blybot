@@ -18,6 +18,7 @@ from blybot.domain.models import (
     ConsentMode,
     GroupProfile,
     Schedule,
+    Scope,
     TimestampGranularity,
 )
 from blybot.domain.subscriptions import Subscription
@@ -48,6 +49,10 @@ LOG_PAGE = "Meta:Community/Log"
 LOG_PAGE_URL = "https://meta.wikimedia.org/wiki/Meta:Community/Log"
 
 
+def gscope(chat_id: int = tg.GROUP.id, thread_id: int = 0) -> Scope:
+    return Scope("telegram", str(chat_id), str(thread_id) if thread_id else "")
+
+
 def page_url_for(title: str) -> str:
     return f"https://meta.wikimedia.org/wiki/{title.replace(' ', '_')}"
 
@@ -73,9 +78,7 @@ def make_handlers(
     if configure_page:
         # A realistic configured group has a group-default page; without
         # one, self-service /log now refuses (test_log_without_a_page).
-        store.profiles[tg.GROUP.id, 0] = GroupProfile(
-            chat_id=tg.GROUP.id, thread_id=0, log_page=LOG_PAGE
-        )
+        store.profiles[gscope()] = GroupProfile(scope=gscope(), log_page=LOG_PAGE)
     directory = ChannelDirectory(
         store=store,
         default_log_page=LOG_PAGE,
@@ -478,8 +481,8 @@ async def test_supergroup_migration_updates_the_allowlist(  # spec 8
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)
-    assert policy.is_allowed(-100999)
-    assert not policy.is_allowed(tg.GROUP.id)
+    assert policy.is_allowed(gscope(-100999))
+    assert not policy.is_allowed(gscope())
 
 
 async def test_membership_updates_outside_groups_are_ignored() -> None:
@@ -568,7 +571,7 @@ async def test_cleanup_can_be_disabled_entirely() -> None:
 async def test_consent_policy_is_resolved_per_group() -> None:
     """A group's stored consent policy overrides the deployment default."""
     handlers, publisher, _ = make_handlers(consent_mode=ConsentMode.IMMEDIATE)
-    await handlers.directory.set_consent(tg.GROUP.id, ConsentMode.AUTHOR_ONLY)
+    await handlers.directory.set_consent(gscope(), ConsentMode.AUTHOR_ONLY)
     context, bot = tg.make_context()
     target = tg.message(text="Alice's words", from_user=tg.ALICE)
     await handlers.on_log(log_command(target, sender=tg.BOB), context)
@@ -580,7 +583,7 @@ async def test_consent_policy_is_resolved_per_group() -> None:
 
 async def test_log_publishes_to_the_group_configured_page() -> None:
     handlers, publisher, _ = make_handlers()
-    await handlers.directory.set_log_page(tg.GROUP.id, 0, "WikiProject Ours")
+    await handlers.directory.set_log_page(gscope(), "WikiProject Ours")
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
 
@@ -592,8 +595,8 @@ async def test_log_publishes_to_the_group_configured_page() -> None:
 async def bind_repo(
     handlers: h.GroupHandlers, store: InMemoryProfiles, gateway: FakeRepoGateway
 ) -> None:
-    await handlers.directory.set_repo(tg.GROUP.id, 0, "wikimedia/mediawiki")
-    await store.store_token(tg.GROUP.id, 0, "ghp_group")
+    await handlers.directory.set_repo(gscope(), "wikimedia/mediawiki")
+    await store.store_token(gscope(), "ghp_group")
     gateway.valid_tokens.add("ghp_group")
 
 
@@ -626,7 +629,7 @@ async def test_issue_without_binding_or_token_explains_what_is_missing() -> None
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
     assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
 
-    await handlers.directory.set_repo(tg.GROUP.id, 0, "x/y")  # bound, but no token
+    await handlers.directory.set_repo(gscope(), "x/y")  # bound, but no token
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
     assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
@@ -702,12 +705,12 @@ async def test_repo_without_binding_or_service_explains() -> None:
 async def test_repo_reports_missing_token_and_failures() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway()
     handlers, _, _ = make_handlers(store=store, gateway=gateway)
-    await handlers.directory.set_repo(tg.GROUP.id, 0, "x/y")
+    await handlers.directory.set_repo(gscope(), "x/y")
     context, bot = tg.make_context()
     await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
     assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
 
-    await store.store_token(tg.GROUP.id, 0, "ghp_group")
+    await store.store_token(gscope(), "ghp_group")
     gateway.valid_tokens.add("ghp_group")
     gateway.fail = True
     context, bot = tg.make_context()
@@ -760,12 +763,14 @@ async def test_group_help_hides_self_service_when_disabled() -> None:
 async def test_migration_carries_the_stored_profile() -> None:
     store = InMemoryProfiles()
     handlers, _, policy = make_handlers(allowed={tg.GROUP.id}, store=store)
-    await handlers.directory.set_log_page(tg.GROUP.id, 0, "WikiProject Ours")
+    await handlers.directory.set_log_page(gscope(), "WikiProject Ours")
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)
-    assert policy.is_allowed(-100999)
-    assert (await handlers.directory.resolve(-100999)).log_page == "WikiProject Ours/Telegram logs"
+    assert policy.is_allowed(gscope(-100999))
+    assert (
+        await handlers.directory.resolve(gscope(-100999))
+    ).log_page == "WikiProject Ours/Telegram logs"
 
 
 async def test_migration_also_rekeys_subscriptions() -> None:
@@ -774,9 +779,8 @@ async def test_migration_also_rekeys_subscriptions() -> None:
     await subs.add(
         Subscription(
             sub_id="s1",
-            dm_chat_id=1,
-            chat_id=tg.GROUP.id,
-            thread_id=0,
+            dm=gscope(1),
+            scope=gscope(),
             schedule=Schedule(kind="daily", hour=8),
             recipe="summarize",
             lang="en",
@@ -786,7 +790,7 @@ async def test_migration_also_rekeys_subscriptions() -> None:
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)
-    assert subs.subs["s1"].chat_id == -100999
+    assert subs.subs["s1"].scope.channel == "-100999"
 
 
 async def test_migration_storage_failure_is_logged_not_raised() -> None:
@@ -802,8 +806,7 @@ async def test_migration_carries_the_captured_archive() -> None:
     archive = InMemoryArchive(
         messages=[
             CapturedMessage(
-                chat_id=tg.GROUP.id,
-                thread_id=7,
+                scope=gscope(tg.GROUP.id, 7),
                 message_id=1,
                 posted_at=FakeClock().now(),
                 author="abc123",
@@ -816,7 +819,7 @@ async def test_migration_carries_the_captured_archive() -> None:
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)
     # Every topic's messages follow the group to its new chat id.
-    assert [(m.chat_id, m.thread_id) for m in archive.messages] == [(-100999, 7)]
+    assert [(m.scope.channel, m.scope.thread) for m in archive.messages] == [("-100999", "7")]
 
 
 async def test_migration_archive_failure_is_logged_not_raised() -> None:
@@ -844,7 +847,7 @@ async def test_log_without_a_page_refuses_on_a_self_service_group() -> None:
 async def test_topic_page_publishes_while_general_without_a_page_refuses() -> None:
     store = InMemoryProfiles()
     handlers, publisher, _ = make_handlers(store=store, configure_page=False)
-    await handlers.directory.set_log_page(tg.GROUP.id, 77, "WikiProject Foo")  # topic only
+    await handlers.directory.set_log_page(gscope(tg.GROUP.id, 77), "WikiProject Foo")  # topic only
 
     # In the configured topic: publishes to the topic's page.
     context, bot = tg.make_context()

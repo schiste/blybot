@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from blybot.adapters.telegram._common import dm_scope
 from blybot.domain.ports import StorageError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from telegram import Update
     from telegram.ext import ContextTypes
 
+    from blybot.domain.models import Scope
     from blybot.domain.ports import ProfileStore, SubscriptionStore
     from blybot.services.subscriptions import SubscriptionBinding
 
@@ -58,43 +60,40 @@ class SubscriptionHandlers:
     binding: SubscriptionBinding
     default_lang: str
 
-    async def redeem_link(
-        self, context: ContextTypes.DEFAULT_TYPE, dm_chat_id: int, code: str
-    ) -> None:
+    async def redeem_link(self, context: ContextTypes.DEFAULT_TYPE, dm: Scope, code: str) -> None:
         """Resolve a tapped ``sub_<code>`` link and arm the /subscribe prompt."""
         try:
             profile = await self.profiles.get_by_subscribe_code(code)
         except StorageError:
-            await _reply(context, dm_chat_id, REPLY_STORAGE_DOWN)
+            await _reply(context, dm, REPLY_STORAGE_DOWN)
             return
         if profile is None:
-            await _reply(context, dm_chat_id, REPLY_LINK_INVALID)
+            await _reply(context, dm, REPLY_LINK_INVALID)
             return
-        self.binding.open_entry(dm_chat_id, profile.chat_id, profile.thread_id)
-        await _reply(context, dm_chat_id, REPLY_SUBSCRIBE_PROMPT)
+        self.binding.open_entry(dm, profile.scope)
+        await _reply(context, dm, REPLY_SUBSCRIBE_PROMPT)
 
     async def on_subscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Create a subscription for the scope the tapped link armed."""
         chat = update.effective_chat
         if chat is None:
             return
-        target = self.binding.pending_target(chat.id)
-        if target is None:
-            await _reply(context, chat.id, REPLY_NO_PENDING)
+        dm = dm_scope(chat.id)
+        source = self.binding.pending_target(dm)
+        if source is None:
+            await _reply(context, dm, REPLY_NO_PENDING)
             return
-        chat_id, thread_id = target
         try:
             schedule, recipe, lang = parse_subscription(
                 " ".join(context.args or []), self.default_lang
             )
         except SubscriptionParseError as error:
-            await _reply(context, chat.id, str(error))
+            await _reply(context, dm, str(error))
             return
         subscription = Subscription(
             sub_id=mint_sub_id(),
-            dm_chat_id=chat.id,
-            chat_id=chat_id,
-            thread_id=thread_id,
+            dm=dm,
+            scope=source,
             schedule=schedule,
             recipe=recipe,
             lang=lang,
@@ -102,13 +101,13 @@ class SubscriptionHandlers:
         try:
             await self.subscriptions.add(subscription)
         except StorageError:
-            await _reply(context, chat.id, REPLY_STORAGE_DOWN)
+            await _reply(context, dm, REPLY_STORAGE_DOWN)
             return
-        self.binding.close_entry(chat.id)
+        self.binding.close_entry(dm)
         log_event("subscription_add", "ok")
         await _reply(
             context,
-            chat.id,
+            dm,
             REPLY_SUBSCRIBED.format(
                 sub_id=subscription.sub_id, schedule=schedule.token, recipe=recipe, lang=lang
             ),
@@ -119,34 +118,36 @@ class SubscriptionHandlers:
         chat = update.effective_chat
         if chat is None:
             return
+        dm = dm_scope(chat.id)
         sub_id = ((context.args or [""])[0]).strip()
         if not sub_id:
-            await _reply(context, chat.id, REPLY_UNSUB_USAGE)
+            await _reply(context, dm, REPLY_UNSUB_USAGE)
             return
         try:
-            removed = await self.subscriptions.remove(chat.id, sub_id)
+            removed = await self.subscriptions.remove(dm, sub_id)
         except StorageError:
-            await _reply(context, chat.id, REPLY_STORAGE_DOWN)
+            await _reply(context, dm, REPLY_STORAGE_DOWN)
             return
-        await _reply(context, chat.id, REPLY_UNSUBSCRIBED if removed else REPLY_NO_SUCH_SUB)
+        await _reply(context, dm, REPLY_UNSUBSCRIBED if removed else REPLY_NO_SUCH_SUB)
 
     async def on_mysubs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List the caller's subscriptions."""
         chat = update.effective_chat
         if chat is None:
             return
+        dm = dm_scope(chat.id)
         try:
-            subs = await self.subscriptions.list_for_user(chat.id)
+            subs = await self.subscriptions.list_for_user(dm)
         except StorageError:
-            await _reply(context, chat.id, REPLY_STORAGE_DOWN)
+            await _reply(context, dm, REPLY_STORAGE_DOWN)
             return
         if not subs:
-            await _reply(context, chat.id, REPLY_NO_SUBS)
+            await _reply(context, dm, REPLY_NO_SUBS)
             return
         lines = [REPLY_SUBS_HEADER]
         lines += [f"[{s.sub_id}] {s.schedule.token} {s.recipe} ({s.lang})" for s in subs]
-        await _reply(context, chat.id, "\n".join(lines))
+        await _reply(context, dm, "\n".join(lines))
 
 
-async def _reply(context: ContextTypes.DEFAULT_TYPE, dm_chat_id: int, text: str) -> None:
-    await context.bot.send_message(chat_id=dm_chat_id, text=text)
+async def _reply(context: ContextTypes.DEFAULT_TYPE, dm: Scope, text: str) -> None:
+    await context.bot.send_message(chat_id=int(dm.channel), text=text)

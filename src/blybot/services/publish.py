@@ -219,8 +219,7 @@ class ChatConfirmSink:
             raise ActionError(msg)
         url = payload.section_url or payload.heading
         confirmation = OutboundMessage(
-            chat_id=context.scope.chat_id,
-            thread_id=context.scope.thread_id,
+            scope=context.scope,
             text=CONFIRMATION_TEMPLATE.format(url=url),
         )
         return (confirmation,)

@@ -79,16 +79,15 @@ class FeedbackService:
         """File the payload text as an issue; confirm with its URL.
 
         The confirmation carries the caller's scope verbatim — for /bug
-        that is a sentinel (0, 0): the handler routes the reply itself,
-        so no private chat id ever enters the pipeline.
+        that is a sentinel scope: the handler routes the reply itself, so
+        no private chat id ever enters the pipeline.
         """
         if not isinstance(payload, str) or not payload.strip():
             msg = "the issue tracker needs report text to file"
             raise ActionError(msg)
         url = await self.report(payload)
         confirmation = OutboundMessage(
-            chat_id=context.scope.chat_id,
-            thread_id=context.scope.thread_id,
+            scope=context.scope,
             text=CONFIRMATION_TEMPLATE.format(url=url),
         )
         return (confirmation,)

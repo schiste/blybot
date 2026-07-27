@@ -19,6 +19,7 @@ from blybot.domain.models import (
     DeliveryMode,
     EventType,
     LlmSettings,
+    Scope,
 )
 from blybot.observability import Counters
 from blybot.services.actions import MAX_ACTIONS, parse_action
@@ -32,6 +33,10 @@ from tests.fakes import FakeClock, InMemoryActions, InMemoryArchive, InMemoryPro
 
 if TYPE_CHECKING:
     from unittest.mock import AsyncMock
+
+
+def gscope(chat_id: int = tg.GROUP.id, thread_id: int = 0) -> Scope:
+    return Scope("telegram", str(chat_id), str(thread_id) if thread_id else "")
 
 
 def make_handlers(
@@ -153,7 +158,7 @@ async def test_setpage_stores_and_links_the_page() -> None:
     context, bot = admin_context(args=["WikiProject", "Ours"])
     await handlers.on_setpage(command("/setpage WikiProject Ours"), context)
 
-    assert store.profiles[tg.GROUP.id, 0].log_page == "WikiProject Ours/Telegram logs"
+    assert store.profiles[gscope()].log_page == "WikiProject Ours/Telegram logs"
     (sent,) = tg.sent_texts(bot)
     assert sent == a.REPLY_PAGE_SET.format(
         url="https://meta.wikimedia.org/wiki/WikiProject_Ours/Telegram_logs",
@@ -194,7 +199,7 @@ async def test_setconsent_stores_the_policy() -> None:
     handlers = make_handlers(store)
     context, bot = admin_context(args=["author_only"])
     await handlers.on_setconsent(command("/setconsent author_only"), context)
-    assert store.profiles[tg.GROUP.id, 0].consent_mode is ConsentMode.AUTHOR_ONLY
+    assert store.profiles[gscope()].consent_mode is ConsentMode.AUTHOR_ONLY
     assert tg.sent_texts(bot) == [a.REPLY_CONSENT_SET.format(mode="author_only")]
 
 
@@ -220,7 +225,7 @@ async def test_settings_shows_defaults_then_customization() -> None:
     assert "(all defaults)" in tg.sent_texts(bot)[0]
     assert "Next_25/Telegram_logs" in tg.sent_texts(bot)[0]
 
-    await handlers.directory.set_log_page(tg.GROUP.id, 0, "WikiProject Ours")
+    await handlers.directory.set_log_page(gscope(), "WikiProject Ours")
     await handlers.on_settings(command("/settings"), context)
     latest = tg.sent_texts(bot)[-1]
     assert "(all defaults)" not in latest
@@ -231,7 +236,7 @@ async def test_reset_returns_the_group_to_defaults() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
     context, bot = admin_context()
-    await handlers.directory.set_log_page(tg.GROUP.id, 0, "WikiProject Ours")
+    await handlers.directory.set_log_page(gscope(), "WikiProject Ours")
     await handlers.on_reset(command("/reset"), context)
     assert store.profiles == {}
     assert tg.sent_texts(bot)[-1] == a.REPLY_RESET.format(scope="the group default")
@@ -250,7 +255,7 @@ async def test_setrepo_binds_and_mints_a_deep_link() -> None:
     context, bot = admin_context(args=["wikimedia/mediawiki"])
     await handlers.on_setrepo(command("/setrepo wikimedia/mediawiki"), context)
 
-    assert store.profiles[tg.GROUP.id, 0].repo == "wikimedia/mediawiki"
+    assert store.profiles[gscope()].repo == "wikimedia/mediawiki"
     (sent,) = tg.sent_texts(bot)
     assert "https://t.me/blybot_bot?start=cfg_" in sent
     assert "fine-grained" in sent
@@ -274,7 +279,7 @@ async def test_setrepo_reports_storage_outage() -> None:
 async def test_revoke_discards_the_token() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    await store.store_token(tg.GROUP.id, 0, "ghp_x")
+    await store.store_token(gscope(), "ghp_x")
     context, bot = admin_context()
     await handlers.on_revoke(command("/revoke"), context)
     assert store.tokens == {}
@@ -302,18 +307,16 @@ async def test_events_on_requires_a_repo_at_this_scope() -> None:
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)  # no repo bound
     assert tg.sent_texts(bot) == [a.REPLY_EVENTS_NEED_REPO]
-    assert (tg.GROUP.id, 0) not in store.profiles or not store.profiles[
-        tg.GROUP.id, 0
-    ].events_enabled
+    assert gscope() not in store.profiles or not store.profiles[gscope()].events_enabled
 
 
 async def test_events_on_enables_and_seeds_starter_rules() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
+    await handlers.directory.set_repo(gscope(), "org/repo")
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)
-    profile = store.profiles[tg.GROUP.id, 0]
+    profile = store.profiles[gscope()]
     assert profile.events_enabled
     assert {rule.trigger.token for rule in profile.rules} == {"pr.merged", "release"}
     assert all(rule.mode is DeliveryMode.DIGEST for rule in profile.rules)
@@ -323,12 +326,12 @@ async def test_events_on_enables_and_seeds_starter_rules() -> None:
 async def test_events_on_keeps_existing_rules_and_does_not_reseed() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
+    await handlers.directory.set_repo(gscope(), "org/repo")
     context, _ = admin_context(args=["add", "issue.opened"])
     await handlers.on_rule(command("/rule add issue.opened"), context)
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)
-    rules = store.profiles[tg.GROUP.id, 0].rules
+    rules = store.profiles[gscope()].rules
     assert [rule.trigger.token for rule in rules] == ["issue.opened"]  # not reseeded
     assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SET.format(state="on")]
 
@@ -336,12 +339,12 @@ async def test_events_on_keeps_existing_rules_and_does_not_reseed() -> None:
 async def test_events_off_disables() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
+    await handlers.directory.set_repo(gscope(), "org/repo")
     context, _ = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)
     context, bot = admin_context(args=["off"])
     await handlers.on_events(command("/events off"), context)
-    assert not store.profiles[tg.GROUP.id, 0].events_enabled
+    assert not store.profiles[gscope()].events_enabled
     assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SET.format(state="off")]
 
 
@@ -362,7 +365,7 @@ async def test_setrepo_discards_any_previous_token() -> None:
     """A token consented for repo A must never be replayed against repo B."""
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    await store.store_token(tg.GROUP.id, 0, "ghp_for_old_repo")
+    await store.store_token(gscope(), "ghp_for_old_repo")
     context, _ = admin_context(args=["new/repo"])
     await handlers.on_setrepo(command("/setrepo new/repo"), context)
     assert store.tokens == {}
@@ -374,7 +377,7 @@ async def test_setrepo_without_a_vault_still_binds() -> None:
     handlers.vault = None
     context, bot = admin_context(args=["x/y"])
     await handlers.on_setrepo(command("/setrepo x/y"), context)
-    assert store.profiles[tg.GROUP.id, 0].repo == "x/y"
+    assert store.profiles[gscope()].repo == "x/y"
     assert "cfg_" in tg.sent_texts(bot)[0]
 
 
@@ -384,8 +387,8 @@ async def test_commands_configure_the_topic_they_are_run_in() -> None:
     context, bot = admin_context(args=["WikiProject", "Foo"])
     await handlers.on_setpage(command_in_topic("/setpage WikiProject Foo", 42), context)
 
-    assert (tg.GROUP.id, 42) in store.profiles  # the topic, not the group default
-    assert store.profiles[tg.GROUP.id, 42].log_page == "WikiProject Foo/Telegram logs"
+    assert gscope(tg.GROUP.id, 42) in store.profiles  # the topic, not the group default
+    assert store.profiles[gscope(tg.GROUP.id, 42)].log_page == "WikiProject Foo/Telegram logs"
     (sent, thread) = tg.sent_calls(bot)[0]
     assert thread == 42  # confirmation routed back into the topic
     assert "this topic" in sent
@@ -396,15 +399,15 @@ async def test_setconsent_says_group_wide_even_from_a_topic() -> None:
     handlers = make_handlers(store)
     context, bot = admin_context(args=["author_only"])
     await handlers.on_setconsent(command_in_topic("/setconsent author_only", 42), context)
-    assert store.profiles[tg.GROUP.id, 0].consent_mode is ConsentMode.AUTHOR_ONLY  # thread 0
-    assert (tg.GROUP.id, 42) not in store.profiles
+    assert store.profiles[gscope()].consent_mode is ConsentMode.AUTHOR_ONLY  # thread 0
+    assert gscope(tg.GROUP.id, 42) not in store.profiles
     assert "group-wide" in tg.sent_texts(bot)[0]
 
 
 async def test_events_storage_failure_after_repo_check_is_reported() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    await handlers.directory.set_repo(tg.GROUP.id, 0, "org/repo")
+    await handlers.directory.set_repo(gscope(), "org/repo")
     store.fail_upserts = True  # get() still works; the set_events write fails
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)
@@ -423,7 +426,7 @@ async def test_rule_add_stores_and_confirms() -> None:
     handlers = make_handlers(store)
     context, bot = admin_context(args=["add", "pr.merged", "base:main", "digest"])
     await handlers.on_rule(command("/rule add pr.merged base:main digest"), context)
-    (rule,) = store.profiles[tg.GROUP.id, 0].rules
+    (rule,) = store.profiles[gscope()].rules
     assert rule.trigger is EventType.PR_MERGED
     assert rule.filter.base == "main"
     (sent,) = tg.sent_texts(bot)
@@ -456,7 +459,7 @@ async def test_rule_remove_by_id_and_unknown() -> None:
     handlers = make_handlers(store)
     context, _ = admin_context(args=["add", "release"])
     await handlers.on_rule(command("/rule add release"), context)
-    (rule,) = store.profiles[tg.GROUP.id, 0].rules
+    (rule,) = store.profiles[gscope()].rules
 
     context, bot = admin_context(args=["remove", "nope"])
     await handlers.on_rule(command("/rule remove nope"), context)
@@ -464,7 +467,7 @@ async def test_rule_remove_by_id_and_unknown() -> None:
 
     context, bot = admin_context(args=["remove", rule.rule_id])
     await handlers.on_rule(command("/rule remove id"), context)
-    assert store.profiles[tg.GROUP.id, 0].rules == ()
+    assert store.profiles[gscope()].rules == ()
     assert tg.sent_texts(bot) == [
         a.REPLY_RULE_REMOVED.format(id=rule.rule_id, scope="the group default")
     ]
@@ -478,7 +481,7 @@ async def test_rule_clear_reports_count() -> None:
         await handlers.on_rule(command("/rule"), context)
     context, bot = admin_context(args=["clear"])
     await handlers.on_rule(command("/rule clear"), context)
-    assert store.profiles[tg.GROUP.id, 0].rules == ()
+    assert store.profiles[gscope()].rules == ()
     assert tg.sent_texts(bot) == [a.REPLY_RULES_CLEARED.format(count=2, scope="the group default")]
 
 
@@ -505,7 +508,7 @@ async def test_rule_cap_is_enforced() -> None:
         await handlers.on_rule(command("/rule add pr.merged"), context)
     context, bot = admin_context(args=["add", "release"])
     await handlers.on_rule(command("/rule add release"), context)
-    assert len(store.profiles[tg.GROUP.id, 0].rules) == MAX_RULES  # not exceeded
+    assert len(store.profiles[gscope()].rules) == MAX_RULES  # not exceeded
     assert tg.sent_texts(bot) == [
         a.REPLY_RULES_FULL.format(max=MAX_RULES, scope="the group default")
     ]
@@ -527,7 +530,7 @@ async def test_rules_configure_the_topic_they_run_in() -> None:
     handlers = make_handlers(store)
     context, bot = admin_context(args=["add", "pr.merged"])
     await handlers.on_rule(command_in_topic("/rule add pr.merged", 42), context)
-    assert store.profiles[tg.GROUP.id, 42].rules  # the topic, not the group default
+    assert store.profiles[gscope(tg.GROUP.id, 42)].rules  # the topic, not the group default
     (_sent, thread) = tg.sent_calls(bot)[0]
     assert thread == 42
     assert "this topic" in tg.sent_texts(bot)[0]
@@ -572,7 +575,7 @@ async def test_capture_on_enables_and_announces_permanently() -> None:
 
     await handlers.on_capture(command("/capture on"), context)
 
-    assert store.profiles[tg.GROUP.id, 0].capture_enabled
+    assert store.profiles[gscope()].capture_enabled
     (announcement,) = tg.sent_texts(bot)
     assert "archived" in announcement
     assert "/capture off" in announcement  # the off-ramp is in the announcement
@@ -581,15 +584,13 @@ async def test_capture_on_enables_and_announces_permanently() -> None:
 async def test_capture_off_keeps_the_archive() -> None:
     handlers, store, archive = make_capture_handlers()
     archive.messages.append(
-        CapturedMessage(
-            chat_id=tg.GROUP.id, thread_id=0, message_id=1, posted_at=tg.NOW, author="x"
-        )
+        CapturedMessage(scope=gscope(), message_id=1, posted_at=tg.NOW, author="x")
     )
     context, bot = admin_context(args=["off"])
 
     await handlers.on_capture(command("/capture off"), context)
 
-    assert not store.profiles[tg.GROUP.id, 0].capture_enabled
+    assert not store.profiles[gscope()].capture_enabled
     assert len(archive.messages) == 1  # kept until an explicit purge
     assert "purge" in tg.sent_texts(bot)[0]
 
@@ -597,9 +598,7 @@ async def test_capture_off_keeps_the_archive() -> None:
 async def test_capture_purge_erases_the_scope_archive() -> None:
     handlers, _store, archive = make_capture_handlers()
     archive.messages.append(
-        CapturedMessage(
-            chat_id=tg.GROUP.id, thread_id=0, message_id=1, posted_at=tg.NOW, author="x"
-        )
+        CapturedMessage(scope=gscope(), message_id=1, posted_at=tg.NOW, author="x")
     )
     context, bot = admin_context(args=["purge"])
 
@@ -626,7 +625,7 @@ async def test_capture_off_during_outage_tombstones_for_convergence() -> None:
     # Capture is on and durable.
     on_context, _bot = admin_context(args=["on"])
     await handlers.on_capture(command("/capture on"), on_context)
-    assert store.profiles[tg.GROUP.id, 0].capture_enabled
+    assert store.profiles[gscope()].capture_enabled
 
     # The disable write fails: the admin is told, and the scope is tombstoned
     # rather than left to resume off the stale `True` row.
@@ -634,12 +633,12 @@ async def test_capture_off_during_outage_tombstones_for_convergence() -> None:
     off_context, bot = admin_context(args=["off"])
     await handlers.on_capture(command("/capture off"), off_context)
     assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
-    assert store.profiles[tg.GROUP.id, 0].capture_enabled  # stale True, revocation pending
+    assert store.profiles[gscope()].capture_enabled  # stale True, revocation pending
 
     # Storage recovers; the maintenance tick converges the revocation.
     store.fail_upserts = False
     await service.retry_denied()
-    assert not store.profiles[tg.GROUP.id, 0].capture_enabled
+    assert not store.profiles[gscope()].capture_enabled
 
 
 async def test_settings_reports_capture_state() -> None:
@@ -665,7 +664,7 @@ async def test_subscribable_on_mints_a_share_link() -> None:
     handlers = make_handlers(store)
     context, bot = admin_context(args=["on"])
     await handlers.on_subscribable(command("/subscribable on"), context)
-    code = store.profiles[tg.GROUP.id, 0].subscribe_code
+    code = store.profiles[gscope()].subscribe_code
     assert code
     assert f"start=sub_{code}" in tg.sent_texts(bot)[0]
 
@@ -674,11 +673,11 @@ async def test_subscribable_off_clears_the_code() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
     await handlers.on_subscribable(command("/subscribable on"), admin_context(args=["on"])[0])
-    assert store.profiles[tg.GROUP.id, 0].subscribe_code  # set
+    assert store.profiles[gscope()].subscribe_code  # set
 
     context, bot = admin_context(args=["off"])
     await handlers.on_subscribable(command("/subscribable off"), context)
-    assert store.profiles[tg.GROUP.id, 0].subscribe_code is None
+    assert store.profiles[gscope()].subscribe_code is None
     assert "OFF" in tg.sent_texts(bot)[0]
 
 
@@ -738,7 +737,7 @@ async def test_llm_show_reports_defaults_then_scope_settings() -> None:
     context, bot = admin_context(args=["set", "model:large", "lang:fr"])
     await handlers.on_llm(command("/llm set model:large lang:fr"), context)
     assert "model:large" in tg.sent_texts(bot)[0]
-    assert store.profiles[tg.GROUP.id, 0].llm == LlmSettings(model="large", lang="fr")
+    assert store.profiles[gscope()].llm == LlmSettings(model="large", lang="fr")
 
     context, bot = admin_context(args=["show"])
     await handlers.on_llm(command("/llm show"), context)
@@ -760,7 +759,7 @@ async def test_llm_in_a_topic_builds_on_the_inherited_group_settings() -> None:
     # of silently resetting them to deployment defaults.
     context, _bot = admin_context(args=["set", "temp:0.4"])
     await handlers.on_llm(command_in_topic("/llm set temp:0.4", 7), context)
-    topic = store.profiles[tg.GROUP.id, 7].llm
+    topic = store.profiles[gscope(tg.GROUP.id, 7)].llm
     assert topic == LlmSettings(model="large", lang="fr", temperature=0.4)
 
 
@@ -788,7 +787,7 @@ async def test_llm_reset_returns_to_deployment_defaults() -> None:
     await handlers.on_llm(command("/llm reset"), context)
 
     assert "deployment defaults" in tg.sent_texts(bot)[0]
-    assert store.profiles[tg.GROUP.id, 0].llm is None
+    assert store.profiles[gscope()].llm is None
 
 
 async def test_llm_reports_storage_outage() -> None:
@@ -837,7 +836,7 @@ async def test_action_add_stores_a_primed_spec_and_describes_it() -> None:
 
     await handlers.on_action(command("/action add daily@06:00 summarize model=large"), context)
 
-    (spec,) = actions.actions[tg.GROUP.id, 0]
+    (spec,) = actions.actions[gscope()]
     assert spec.trigger.schedule is not None
     assert spec.last_run == FakeClock().now()  # primed at creation
     reply = tg.sent_texts(bot)[0]
@@ -855,7 +854,7 @@ async def test_action_add_relays_parse_errors_verbatim() -> None:
 async def test_action_add_enforces_the_per_scope_cap() -> None:
     handlers, actions = make_action_handlers()
     spec = parse_action("daily@06:00 summarize")
-    actions.actions[tg.GROUP.id, 0] = tuple(
+    actions.actions[gscope()] = tuple(
         replace(spec, action_id=f"a{i:03d}") for i in range(MAX_ACTIONS)
     )
     context, bot = admin_context(args=["add", "daily@07:00", "stats"])
@@ -863,14 +862,14 @@ async def test_action_add_enforces_the_per_scope_cap() -> None:
     await handlers.on_action(command("/action add daily@07:00 stats"), context)
 
     assert "maximum" in tg.sent_texts(bot)[0]
-    assert len(actions.actions[tg.GROUP.id, 0]) == MAX_ACTIONS
+    assert len(actions.actions[gscope()]) == MAX_ACTIONS
 
 
 async def test_action_remove_and_list_round_trip() -> None:
     handlers, actions = make_action_handlers()
     context, _bot = admin_context(args=["add", "daily@06:00", "summarize"])
     await handlers.on_action(command("/action add daily@06:00 summarize"), context)
-    (spec,) = actions.actions[tg.GROUP.id, 0]
+    (spec,) = actions.actions[gscope()]
 
     context, bot = admin_context(args=["list"])
     await handlers.on_action(command("/action list"), context)
@@ -879,7 +878,7 @@ async def test_action_remove_and_list_round_trip() -> None:
     context, bot = admin_context(args=["remove", spec.action_id])
     await handlers.on_action(command(f"/action remove {spec.action_id}"), context)
     assert "removed" in tg.sent_texts(bot)[0]
-    assert actions.actions[tg.GROUP.id, 0] == ()
+    assert actions.actions[gscope()] == ()
 
     context, bot = admin_context(args=["remove", "zzzz"])
     await handlers.on_action(command("/action remove zzzz"), context)
@@ -910,15 +909,12 @@ async def test_capture_purge_accepts_a_before_date() -> None:
     archive.messages.extend(
         [
             CapturedMessage(
-                chat_id=tg.GROUP.id,
-                thread_id=0,
+                scope=gscope(),
                 message_id=1,
                 posted_at=tg.NOW - timedelta(days=40),
                 author="x",
             ),
-            CapturedMessage(
-                chat_id=tg.GROUP.id, thread_id=0, message_id=2, posted_at=tg.NOW, author="x"
-            ),
+            CapturedMessage(scope=gscope(), message_id=2, posted_at=tg.NOW, author="x"),
         ]
     )
     context, bot = admin_context(args=["purge", "before:2026-07-01"])

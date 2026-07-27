@@ -15,6 +15,7 @@ from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
 from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
+from blybot.domain.models import Scope
 from blybot.domain.ports import ActionError
 from tests.test_config import REQUIRED
 
@@ -197,7 +198,7 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
     # /setpage — same policy as /log on self-service deployments.
     sink = engine.sinks["wiki_section"]
     with pytest.raises(ActionError, match="/setpage"):
-        await sink.resolve_page(-1, 0, None)
+        await sink.resolve_page(Scope("telegram", "-1"), None)
     assert seen["admin_handlers"].llm_defaults is not None
     await seen["lifecycle"].release()  # also closes the LiftWing client
 

@@ -25,6 +25,88 @@ nano ~/<name>.env                           # fill it in — see below
 The helper names everything after the instance: config `~/<name>.env`,
 wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
 
+## Choosing a platform
+
+`PLATFORM` selects the chat platform an instance runs on: `telegram`
+(default) or `discord`. It picks which composition root
+(`__main__.py`) builds and which bot-token key is required — the other
+platform's token is not needed. Every non-chat feature (wiki publishing,
+ToolsDB, capture, LLM analyses, subscriptions) is shared and configured
+identically on both.
+
+**Shared env vars (both platforms).** `WIKI_USERNAME`,
+`WIKI_BOTPASSWORD`, `WIKI_API_URL`, `LOG_TARGET_PAGE`, `DM_TARGET_BASE`,
+`USER_AGENT`, `PROFILE_ENCRYPTION_KEY`, `TOOLSDB_HOST` / `TOOLSDB_NAME` /
+`TOOLSDB_CNF`, `ARCHIVE_PSEUDONYM_KEY`, and the `LIFTWING_*` / `LLM_*`
+analysis keys all mean the same thing regardless of `PLATFORM`.
+
+**Telegram-only:** `TELEGRAM_BOT_TOKEN` (required when
+`PLATFORM=telegram`). Follow the Telegram prerequisites below.
+
+**Discord-only:** `DISCORD_BOT_TOKEN` (required when `PLATFORM=discord`).
+Follow the Discord runbook below.
+
+Missing the selected platform's token fails fast at startup with
+`configuration error: missing required configuration keys` (naming the
+key, never the value).
+
+### Discord setup runbook
+
+1. **Create the application + bot.** At
+   [discord.com/developers/applications](https://discord.com/developers/applications)
+   → **New Application**. Open **Bot**, then **Reset Token** and copy the
+   value into `DISCORD_BOT_TOKEN` in the instance env file (over SSH,
+   never into a chat or commit).
+2. **Enable the privileged intents.** On the same **Bot** page, turn on
+   **Message Content Intent** (capture cannot read message text without
+   it) and **Server Members Intent**. Both are privileged and off by
+   default.
+3. **Invite the bot.** **OAuth2 → URL Generator**: scopes `bot` and
+   `applications.commands`; bot permissions **View Channels**, **Send
+   Messages**, **Send Messages in Threads**, **Read Message History**.
+   Open the generated URL and add the bot to the server.
+4. **Configure the instance.** Set `PLATFORM=discord` and
+   `DISCORD_BOT_TOKEN=…` in `~/<name>.env`, then
+   `~/blybot/deploy-instance.sh start <name>`.
+
+Slash commands are published on startup (`CommandTree.sync`) and can take
+**several minutes** to appear in the client the first time — this is
+Discord-side propagation, not a bot fault. Onboarding is slash commands,
+not deep links (`deep_links=False`): a channel becomes subscribable the
+first time anyone runs `/subscribe` in it, rather than via an
+admin-shared link.
+
+Admin config and the digest flow are the slash commands the gateway
+registers: `/capture on|off` and `/setpage <path>` (server admins), and
+`/subscribe [schedule] [recipe] [lang:xx]`, `/mysubs`, `/unsubscribe <id>`
+for the durable-DM digests. Server-admin checks are live
+(`guild_permissions.administrator`), never stored. Capture ingestion,
+pseudonymization, the archive, LLM analyses, and subscription delivery
+reuse the same neutral services as Telegram.
+
+### What Discord does NOT do yet
+
+The Discord adapter ships capture + analyses + subscriptions only. These
+Telegram surfaces are **deferred / not yet built** on Discord, so an
+operator should not expect parity:
+
+- **Repository notifications** — `/setrepo`, `/events`, `/rule`,
+  `/rules`, and the background repo poller are Telegram-only; the Discord
+  admin surface does not configure them.
+- **Scheduled wiki analyses** — the action scheduler (`/action`) does not
+  run on Discord; only the subscription digest tick and the capture
+  reminder run in the background.
+- **Full admin parity** — `/setrepo`, `/events`, `/rule`, `/llm`,
+  `/action`, `/settings` (and the rest of the Telegram self-service menu)
+  have no Discord slash-command equivalent yet. Discord admins have only
+  `/capture` and `/setpage`.
+- **DM `/log` + the chat picker** — the private `/log` flow and the
+  "choose a shared group" picker depend on `deep_links` / `chat_picker`,
+  which Discord lacks.
+
+Everything above is intentionally absent, not broken — it lands when the
+Discord admin surface grows the corresponding commands.
+
 ## Per-instance prerequisites
 
 1. **Telegram bot** — create via @BotFather (`/newbot`). Confirm

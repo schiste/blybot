@@ -140,6 +140,33 @@ _SCOPE_SEPARATORS: Final = frozenset(":/")
 
 
 @dataclass(frozen=True, slots=True)
+class PlatformCapabilities:
+    """What a chat platform's adapter can and cannot do; features gate on it.
+
+    A frozen descriptor each transport adapter exposes so platform-agnostic
+    services and handlers can gate Telegram-shaped features (durable DMs,
+    message deletion, deep-link onboarding, supergroup-style id changes)
+    without importing the adapter. ``max_message_chars`` is the platform's
+    hard per-message character cap, injected wherever outbound text must be
+    bounded, so no service hard-codes one platform's limit.
+    """
+
+    max_message_chars: int
+    threads: bool = False
+    durable_dm: bool = False
+    deep_links: bool = False
+    chat_picker: bool = False
+    message_delete: bool = False
+    id_can_change: bool = False  # supergroup-migration-style id changes
+    rich_choices: bool = False
+
+    def __post_init__(self) -> None:
+        if self.max_message_chars <= 0:
+            msg = "PlatformCapabilities.max_message_chars must be positive"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class LogMedia:
     """One anonymous media attachment selected for wiki publication.
 

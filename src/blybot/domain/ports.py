@@ -8,7 +8,7 @@ business logic.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from blybot.domain.models import (
@@ -17,6 +17,7 @@ from blybot.domain.models import (
     CapturedMessage,
     GroupProfile,
     OutboundMessage,
+    PlatformCapabilities,
     PromptRequest,
     PromptResult,
     Pseudonym,
@@ -93,6 +94,49 @@ class Sink(Protocol):
 
     async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         """Publish ``payload``; return any chat messages to send."""
+        ...
+
+
+class TransportError(Exception):
+    """Base for send failures a platform adapter maps its SDK errors onto.
+
+    The delivery loop reasons about these abstract kinds — never a
+    platform's concrete SDK exceptions — so one loop drives every
+    transport.
+    """
+
+
+class RateLimited(TransportError):  # noqa: N818 -- the retry signal, not an error to surface
+    """The platform is throttling the bot; wait ``retry_after`` then retry."""
+
+    def __init__(self, retry_after: timedelta) -> None:
+        self.retry_after = retry_after
+        super().__init__(f"rate limited; retry after {retry_after}")
+
+
+class TransientTransportError(TransportError):
+    """A retryable transient failure (timeout, 5xx)."""
+
+
+class PermanentTransportError(TransportError):
+    """A non-retryable failure (blocked, chat gone) — drop this message."""
+
+
+class Transport(Protocol):
+    """Sends OutboundMessages for one platform; owns nothing about pipelines.
+
+    The adapter behind it holds every platform detail (SDK client, thread
+    routing, flood pacing) and exposes the platform's
+    :class:`PlatformCapabilities` so features can gate without importing it.
+    """
+
+    @property
+    def capabilities(self) -> PlatformCapabilities:
+        """The platform's capability descriptor (features gate on it)."""
+        ...
+
+    async def send(self, message: OutboundMessage) -> None:
+        """Deliver one message; raise a :class:`TransportError` subclass on failure."""
         ...
 
 

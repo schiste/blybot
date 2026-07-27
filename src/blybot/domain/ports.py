@@ -197,6 +197,10 @@ class SubscriptionStore(Protocol):
         """Advance a subscription's ``last_run`` watermark durably."""
         ...
 
+    async def migrate(self, old_chat_id: int, new_chat_id: int) -> None:
+        """Re-key a group's subscriptions after a group→supergroup upgrade."""
+        ...
+
 
 class ProfileStore(Protocol):
     """Persists per-group self-service profiles (spec 11: ToolsDB)."""

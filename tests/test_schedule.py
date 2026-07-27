@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import ActionContext, OutboundMessage, TriggerKind
+from blybot.domain.models import ActionContext, ActionScope, OutboundMessage, TriggerKind
 from blybot.observability import Counters
 from blybot.services.actions import parse_action
 from blybot.services.engine import ActionEngine
@@ -136,9 +136,10 @@ async def test_disallowed_groups_are_skipped() -> None:
 
 async def test_storage_outage_yields_an_empty_tick() -> None:
     store, clock = InMemoryActions(fail=True), FakeClock()
-    scheduler, _counters = make_scheduler(store, clock)
+    scheduler, counters = make_scheduler(store, clock)
 
     assert await scheduler.collect() == []
+    assert counters.snapshot()["action_ticks_failed"] == 1  # not a silent empty tick
 
 
 async def test_broken_scope_never_blocks_other_scopes() -> None:
@@ -147,12 +148,13 @@ async def test_broken_scope_never_blocks_other_scopes() -> None:
     await seed(store, clock, chat_id=-2)
     clock.advance(timedelta(hours=6))
     store.fail_writes_for = {(-1, 0)}  # scope -1's last_run write explodes
-    scheduler, _counters = make_scheduler(store, clock)
+    scheduler, counters = make_scheduler(store, clock)
 
     # Scope -1's tick is lost to its storage error; scope -2 still runs.
     assert await scheduler.collect() == [REPLY]
     (stored,) = store.actions[-2, 0]
     assert stored.last_run == clock.now()
+    assert counters.snapshot()["action_ticks_failed"] == 1  # the lost scope is counted
 
 
 async def test_scope_overflow_is_truncated_per_tick() -> None:
@@ -177,6 +179,57 @@ async def test_capped_ticks_rotate_so_no_scope_is_permanently_starved() -> None:
     for chat_id in (-1, -2):
         (stored,) = store.actions[chat_id, 0]
         assert stored.last_run == clock.now()  # both eventually served
+
+
+def test_jitter_is_stable_bounded_and_off_for_every() -> None:
+    store, clock = InMemoryActions(), FakeClock()
+    scheduler, _counters = make_scheduler(store, clock)
+    daily = parse_action("daily@06:00 summarize", now_iso=clock.now().isoformat())
+    every = parse_action("every:6h summarize", now_iso=clock.now().isoformat())
+    dsched, esched = daily.trigger.schedule, every.trigger.schedule
+    assert dsched is not None
+    assert esched is not None
+    scope = ActionScope(chat_id=-1)
+
+    first = scheduler._jitter(scope, daily, dsched)
+    assert first == scheduler._jitter(scope, daily, dsched)  # stable across restarts
+    assert timedelta(0) <= first < scheduler.jitter_window  # bounded to the window
+    assert scheduler._jitter(scope, every, esched) == timedelta(0)  # every: never jittered
+
+    scheduler.jitter_window = timedelta(0)
+    assert scheduler._jitter(scope, daily, dsched) == timedelta(0)  # window off
+
+
+async def test_a_daily_slot_waits_for_its_jitter_before_firing() -> None:
+    store, clock = InMemoryActions(), FakeClock()
+    spec = replace(parse_action("daily@06:00 summarize", now_iso=clock.now().isoformat()))
+    store.actions[-1, 0] = (spec,)
+    scheduler, _counters = make_scheduler(store, clock)
+    schedule = spec.trigger.schedule
+    assert schedule is not None
+    jitter = scheduler._jitter(ActionScope(chat_id=-1), spec, schedule)
+    slot = datetime(2026, 7, 11, 6, 0, tzinfo=UTC)
+
+    clock.current = slot + jitter - timedelta(minutes=1)
+    assert await scheduler.collect() == []  # slot reached, but the jitter hasn't elapsed
+
+    clock.current = slot + jitter + timedelta(minutes=1)
+    assert await scheduler.collect() == [REPLY]  # fires once the jitter has passed
+
+
+async def test_per_scope_action_cap_defers_excess_due_actions() -> None:
+    store, clock = InMemoryActions(), FakeClock()
+    for _ in range(3):
+        await seed(store, clock, "every:6h summarize")  # three aligned, all due
+    clock.advance(timedelta(hours=6))
+    scheduler, counters = make_scheduler(store, clock)
+    scheduler.max_actions_per_scope = 2
+
+    assert await scheduler.collect() == [REPLY, REPLY]  # only two run this tick
+    assert counters.snapshot()["actions_run"] == 2
+    # The deferred third was left un-stamped, so it is still due next tick.
+    assert await scheduler.collect() == [REPLY]
+    assert counters.snapshot()["actions_run"] == 3
 
 
 @dataclass

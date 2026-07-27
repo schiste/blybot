@@ -169,6 +169,9 @@ class RepoNotifier:
         try:
             profiles = await self.store.list_event_enabled()
         except StorageError:
+            # A silent empty cycle hid a persistent outage that stopped
+            # every repo digest; surface it in the logs.
+            log_event("repo_poll", "error")
             return []
         if len(profiles) > self.max_groups_per_tick:
             log_event("repo_poll", "ignored", skipped=len(profiles) - self.max_groups_per_tick)

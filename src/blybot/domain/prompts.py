@@ -37,7 +37,9 @@ MAX_ITEM_CHARS: Final = 600  # per-entry cap; longer output is a contract violat
 DEFAULT_CHUNK_CHARS: Final = 24_000  # ≈6K tokens: safe for a 16K-context model + completion
 
 # Qwen-style chat-template control tokens and lookalikes (<|anything|>).
-_CONTROL_TOKENS: Final = re.compile(r"<\|[^|>]{0,32}\|>")
+# `[^>]*?` (non-greedy, up to the first `>`) catches inner pipes and any
+# length — the earlier `[^|>]{0,32}` missed `<|a|b|>` and long tokens.
+_CONTROL_TOKENS: Final = re.compile(r"<\|[^>]*?\|>")
 
 # Heuristic injection markers (v3 plan §2.6 layer 8) — operator
 # telemetry only, never a publishing gate.

@@ -390,6 +390,14 @@ class AdminHandlers:
                 chat.id, thread_id, argument, archive, service, before
             )
         except StorageError:
+            if argument == "off":
+                # The durable disable never landed. Tombstone the scope so
+                # the maintenance tick converges the revocation instead of
+                # resuming capture off the stale `True` row when storage
+                # recovers — mirroring the channel-demotion path. `on`
+                # already fails safe (stays off) and `purge` touches no
+                # consent, so only `off` needs this.
+                service.deny_scope(chat.id, thread_id)
             reply = REPLY_STORAGE_DOWN
         await self._reply(context, chat.id, thread_id, reply)
 

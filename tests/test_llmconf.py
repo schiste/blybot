@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from blybot.domain.models import LlmSettings
@@ -65,6 +67,22 @@ def test_settings_round_trip_through_json() -> None:
     assert loads_llm("") is None
     # Older rows with missing keys default per-field.
     assert loads_llm("{}") == LlmSettings()
+
+
+def test_loads_llm_coerces_a_tampered_row_to_safe_values() -> None:
+    """A directly-edited DB row can't smuggle a crafted lang/model into use."""
+    tampered = json.dumps(
+        {
+            "platform": "evil",
+            "model": "sneaky",
+            "lang": "'; DROP TABLE",
+            "temperature": 9.0,
+            "max_tokens": -5,
+        }
+    )
+    assert loads_llm(tampered) == LlmSettings(
+        platform="liftwing", model="default", lang="en", temperature=1.0, max_tokens=1
+    )
 
 
 def test_settings_model_validates_ranges() -> None:

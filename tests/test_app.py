@@ -11,20 +11,29 @@ from unittest.mock import AsyncMock
 
 import pytest
 from telegram import Update
-from telegram.error import TelegramError
-from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler
+from telegram.error import RetryAfter, TelegramError, TimedOut
+from telegram.ext import (
+    AIORateLimiter,
+    Application,
+    ChatMemberHandler,
+    CommandHandler,
+    MessageHandler,
+)
 
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.analyze import AnalysisHandlers
 from blybot.adapters.telegram.app import (
+    _DELIVERY_MAX_RETRIES,
     Lifecycle,
     Maintenance,
+    _deliver,
+    _next_deadline,
     build_application,
     message_loop,
     run_polling,
 )
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
-from blybot.domain.models import ConsentMode, GroupProfile, OutboundMessage
+from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile, OutboundMessage
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
@@ -100,6 +109,12 @@ def test_build_registers_every_handler() -> None:
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
     assert 1 not in application.handlers  # no capture: group 1 stays empty
+
+
+def test_build_paces_outgoing_calls_under_telegram_limits() -> None:
+    """Every send goes through a rate limiter so a fan-out can't flood."""
+    application = build()
+    assert isinstance(application.bot.rate_limiter, AIORateLimiter)
 
 
 def test_run_polling_opts_into_exactly_the_updates_privacy_mode_needs(
@@ -320,6 +335,93 @@ async def test_notify_loop_survives_a_crashing_collect() -> None:
     assert calls["n"] >= 2  # it kept polling after the crash
 
 
+class _Flaky:
+    """A bot that fails the first ``fail`` sends with ``error``, then succeeds."""
+
+    def __init__(self, error: TelegramError, fail: int) -> None:
+        self._error = error
+        self._remaining = fail
+        self.sent: list[str] = []
+
+    async def send_message(
+        self, chat_id: int, text: str, message_thread_id: int | None = None
+    ) -> None:
+        del chat_id, message_thread_id
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise self._error
+        self.sent.append(text)
+
+
+async def _collect_sleeps() -> tuple[list[float], Any]:
+    waits: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    return waits, sleep
+
+
+async def test_deliver_waits_out_flood_control_then_sends() -> None:
+    waits, sleep = await _collect_sleeps()
+    bot = _Flaky(RetryAfter(2), fail=1)
+    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    await _deliver(cast("Any", bot), message, "repo_poll", sleep)
+    assert bot.sent == ["hi"]
+    assert waits == [3.0]  # retry_after (2) + a 1s margin, then the retry lands
+
+
+async def test_deliver_retries_a_timeout_then_sends() -> None:
+    waits, sleep = await _collect_sleeps()
+    bot = _Flaky(TimedOut(), fail=1)
+    message = OutboundMessage(chat_id=-1, thread_id=7, text="hi")
+    await _deliver(cast("Any", bot), message, "action_tick", sleep)
+    assert bot.sent == ["hi"]
+    assert waits == [1.0]
+
+
+async def test_deliver_drops_after_persistent_flood_control() -> None:
+    waits, sleep = await _collect_sleeps()
+    bot = _Flaky(RetryAfter(1), fail=99)  # never recovers within the budget
+    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    await _deliver(cast("Any", bot), message, "repo_poll", sleep)
+    assert bot.sent == []  # dropped, not retried forever
+    assert len(waits) == _DELIVERY_MAX_RETRIES  # bounded retries, then give up
+
+
+async def test_deliver_drops_after_persistent_timeout() -> None:
+    waits, sleep = await _collect_sleeps()
+    bot = _Flaky(TimedOut(), fail=99)
+    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    await _deliver(cast("Any", bot), message, "action_tick", sleep)
+    assert bot.sent == []
+    assert len(waits) == _DELIVERY_MAX_RETRIES
+
+
+def test_next_deadline_holds_cadence_and_resyncs_after_overrun() -> None:
+    # Work fit inside the interval: stay exactly on previous + interval.
+    assert _next_deadline(previous=10.0, interval=5.0, now=12.0) == 15.0
+    # Work overran the interval: resync to now + interval, no catch-up burst.
+    assert _next_deadline(previous=10.0, interval=5.0, now=18.0) == 23.0
+
+
+async def test_deliver_survives_a_non_telegram_error() -> None:
+    """A bug in one send must not escape and kill the whole delivery task."""
+    _waits, sleep = await _collect_sleeps()
+
+    class Boom:
+        async def send_message(
+            self, chat_id: int, text: str, message_thread_id: int | None = None
+        ) -> None:
+            del chat_id, text, message_thread_id
+            msg = "schema drift"
+            raise RuntimeError(msg)
+
+    message = OutboundMessage(chat_id=-1, thread_id=0, text="hi")
+    # Must return (drop the message), not propagate.
+    await _deliver(cast("Any", Boom()), message, "action_tick", sleep)
+
+
 def make_capture_handlers() -> Any:
     store = InMemoryProfiles()
     clock = FakeClock()
@@ -528,6 +630,46 @@ async def test_heartbeat_reports_archive_size(caplog: pytest.LogCaptureFixture) 
         with pytest.raises(asyncio.CancelledError):
             await task
     assert any("archive_size" in message and "error" in message for message in caplog.messages)
+
+
+async def test_maintenance_sweeps_archive_retention_on_the_heartbeat() -> None:
+    clock = FakeClock()
+    store, archive = InMemoryProfiles(), InMemoryArchive()
+    await store.upsert(GroupProfile(chat_id=-1, capture_enabled=True))
+    archive.messages.append(
+        CapturedMessage(
+            chat_id=-1,
+            thread_id=0,
+            message_id=1,
+            posted_at=clock.now() - timedelta(days=100),
+            author="a",
+        )
+    )
+    service = CaptureService(
+        store=store,
+        archive=archive,
+        limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
+        clock=clock,
+        counters=Counters(),
+        retention_window=timedelta(days=7),
+    )
+    sessions = SessionRegistry(
+        pseudonyms=SequentialPseudonyms(), clock=clock, ttl=timedelta(minutes=45)
+    )
+    # archive left None: also exercises the archive-absent branch at the heartbeat.
+    maintenance = Maintenance(
+        sessions=sessions, counters=Counters(), capture=service, heartbeat_every_ticks=1
+    )
+    maintenance.interval_seconds = 0
+
+    task = asyncio.ensure_future(maintenance.run_forever())
+    for _ in range(10):
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert archive.messages == []  # the 100-day-old message was purged on the tick
 
 
 async def test_post_init_starts_the_reminder_task_when_configured() -> None:

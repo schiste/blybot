@@ -121,6 +121,10 @@ class FakeToolsDb:
                 row["capture_enabled"] = None
         return []
 
+    def run_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        for query, params in statements:
+            self.run(query, params)
+
     def run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         if self.fail:
             msg = "db down"
@@ -327,6 +331,12 @@ async def test_list_event_enabled_filters() -> None:
     assert [profile.chat_id for profile in enabled] == [-100500]
 
 
+def test_scan_queries_request_a_stable_order() -> None:
+    """The scheduler/notifier rotation relies on a deterministic scan order."""
+    for query in (Q_ACTIONS_LIST, Q_LIST_EVENT_ENABLED, Q_LIST_CAPTURE_ENABLED):
+        assert query.rstrip().endswith("ORDER BY chat_id, thread_id")
+
+
 async def test_cursors_roundtrip_and_default() -> None:
     store, _ = make_store()
     await store.upsert(PROFILE)
@@ -414,6 +424,8 @@ async def test_database_failure_raises_storage_error() -> None:
     fake.fail = True
     with pytest.raises(StorageError):
         await store.get(-1, 0)
+    with pytest.raises(StorageError):
+        await store.migrate(-1, -2)  # the transactional path degrades the same way
 
 
 def test_pymysql_runner_connects_with_cnf_credentials(
@@ -461,6 +473,74 @@ def test_pymysql_runner_connects_with_cnf_credentials(
     explicit = PymysqlRunner(host="h", database="custom__db", cnf_path=cnf)
     explicit.run("SELECT 1", ())
     assert seen["database"] == "custom__db"
+
+
+def _tx_connection(events: list[str], *, fail: bool) -> tuple[type, list[str]]:
+    executed: list[str] = []
+
+    class FakeCursor:
+        def __enter__(self) -> FakeCursor:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[Any, ...]) -> None:
+            del params
+            executed.append(query)
+            if fail:
+                msg = "boom"
+                raise RuntimeError(msg)
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+        def commit(self) -> None:
+            events.append("commit")
+
+        def rollback(self) -> None:
+            events.append("rollback")
+
+        def close(self) -> None:
+            events.append("close")
+
+    return FakeConnection, executed
+
+
+def test_run_tx_commits_all_statements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cnf = tmp_path / "replica.my.cnf"
+    cnf.write_text("[client]\nuser='s12345'\npassword='hunter2'\n")
+    events: list[str] = []
+    connection_cls, executed = _tx_connection(events, fail=False)
+    seen: dict[str, Any] = {}
+
+    def fake_connect(**kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return connection_cls()
+
+    monkeypatch.setattr(pymysql, "connect", fake_connect)
+    runner = PymysqlRunner(host="h", database="d", cnf_path=cnf)
+
+    runner.run_tx([("DELETE 1", (1,)), ("UPDATE 2", (2, 3))])
+
+    assert seen["autocommit"] is False  # one transaction, not autocommit-per-statement
+    assert executed == ["DELETE 1", "UPDATE 2"]
+    assert events == ["commit", "close"]
+
+
+def test_run_tx_rolls_back_on_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cnf = tmp_path / "replica.my.cnf"
+    cnf.write_text("[client]\nuser='s12345'\npassword='hunter2'\n")
+    events: list[str] = []
+    connection_cls, _executed = _tx_connection(events, fail=True)
+    monkeypatch.setattr(pymysql, "connect", lambda **_kwargs: connection_cls())
+    runner = PymysqlRunner(host="h", database="d", cnf_path=cnf)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        runner.run_tx([("DELETE 1", (1,))])
+
+    assert events == ["rollback", "close"]  # partial work is undone, never committed
 
 
 async def test_cursor_writes_are_repo_guarded() -> None:

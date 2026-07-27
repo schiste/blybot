@@ -388,7 +388,12 @@ rows keep their old labels and later messages get new ones — a one-time
 discontinuity where stats windows spanning the migration count an
 author under two labels. Media bodies are not archived (a `media_note` row records
 that media was posted). Ingest is guarded by text truncation at 4096
-chars and a per-scope per-minute ceiling.
+chars and a per-scope per-minute ceiling. The archive reflects neither
+edits nor deletions: an edited or deleted Telegram message keeps its
+originally-captured text — edits are a v3 non-goal, and the Bot API never
+reports deletions to bots at all — so `/capture purge` (optionally with a
+`CAPTURE_RETENTION_DAYS` window that purges older messages on the tick) is
+the erasure mechanism.
 
 **R-v3.3 — Actions.** Bot behavior composes as
 `trigger → source → transforms → sink` pipelines stored per scope as

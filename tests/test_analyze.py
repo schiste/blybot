@@ -156,6 +156,29 @@ async def test_multi_chunk_windows_map_then_reduce() -> None:
     assert "partial a" in runner.requests[2].user_content  # reduce sees the partials
 
 
+def _fence_of(content: str) -> str:
+    start = content.index("DATA-")
+    return content[start : content.index("\n", start)]
+
+
+async def test_map_and_reduce_use_distinct_fences() -> None:
+    """A map partial must not be able to predict the reduce fence."""
+    runner = FakePromptRunner(
+        results=[
+            PromptResult(content='["a"]'),
+            PromptResult(content='["b"]'),
+            PromptResult(content='["merged"]'),
+        ]
+    )
+    transform, _counters = make_transform(runner, chunk_chars=60)
+
+    await transform.apply(context(), prompt_step(), transcript(msg(1, "x" * 50), msg(2, "y" * 50)))
+
+    fences = [_fence_of(request.user_content) for request in runner.requests]
+    assert fences[0] == fences[1]  # both maps share the one map fence
+    assert fences[2] != fences[0]  # the reduce fence is freshly minted
+
+
 async def test_chunk_cap_samples_the_window_and_says_so() -> None:
     runner = FakePromptRunner(results=[PromptResult(content='["only chunk analyzed"]')])
     transform, _counters = make_transform(runner, max_chunks=1, chunk_chars=60)
@@ -197,6 +220,33 @@ async def test_truncated_output_is_never_published() -> None:
     with pytest.raises(ActionError, match="nothing was published"):
         await transform.apply(context(), prompt_step(), transcript(msg(1)))
     assert counters.snapshot()["analyses_aborted"] == 1
+
+
+async def test_non_stop_finish_reason_is_never_published() -> None:
+    """Even valid-looking JSON must not publish unless the model stopped cleanly."""
+    runner = FakePromptRunner(
+        results=[
+            PromptResult(content='["filtered"]', finish_reason="content_filter"),
+            PromptResult(content='["still filtered"]', finish_reason="content_filter"),
+        ]
+    )
+    transform, counters = make_transform(runner)
+    with pytest.raises(ActionError, match="nothing was published"):
+        await transform.apply(context(), prompt_step(), transcript(msg(1)))
+    assert counters.snapshot()["analyses_aborted"] == 1
+
+
+async def test_analysis_aborts_when_the_token_budget_is_exhausted() -> None:
+    """The per-run budget stops retry amplification, publishing nothing."""
+    runner = FakePromptRunner(results=[PromptResult(content="not json", prompt_tokens=120)])
+    transform, counters = make_transform(runner)
+    transform.max_tokens_per_run = 100  # one call's 120 tokens already overruns it
+
+    with pytest.raises(ActionError, match="nothing was published"):
+        await transform.apply(context(), prompt_step(), transcript(msg(1)))
+
+    assert counters.snapshot()["analyses_aborted"] == 1
+    assert len(runner.requests) == 1  # the retry was refused before a second call
 
 
 async def test_transport_failure_aborts_the_analysis() -> None:
@@ -255,11 +305,12 @@ async def test_topic_without_its_own_settings_inherits_the_group_default() -> No
 async def test_storage_outage_falls_back_to_deployment_defaults() -> None:
     store = InMemoryProfiles(fail=True)
     runner = FakePromptRunner(results=[PromptResult(content='["ok"]')])
-    transform, _counters = make_transform(runner, store=store)
+    transform, counters = make_transform(runner, store=store)
 
     report = await transform.apply(context(), prompt_step(), transcript(msg(1)))
 
     assert report.model_label == "default model on liftwing"
+    assert counters.snapshot()["llm_settings_unavailable"] == 1  # the downgrade is visible
 
 
 async def test_stats_narrative_feeds_numbers_not_content() -> None:

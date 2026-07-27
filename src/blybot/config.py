@@ -86,6 +86,7 @@ class Config:
     archive_pseudonym_key: str
     capture_max_per_minute: int
     capture_reannounce_days: int
+    capture_retention_days: int
     liftwing_api_base: str
     liftwing_model_default: str
     liftwing_model_large: str
@@ -93,6 +94,7 @@ class Config:
     llm_default_lang: str
     llm_max_tokens_ceiling: int
     llm_max_chunks_per_run: int
+    llm_max_tokens_per_run: int
     user_agent: str
 
     @property
@@ -166,6 +168,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         archive_pseudonym_key=source.get("ARCHIVE_PSEUDONYM_KEY", ""),
         capture_max_per_minute=_parse_positive_int(source, "CAPTURE_MAX_PER_MINUTE", 60),
         capture_reannounce_days=_parse_non_negative_int(source, "CAPTURE_REANNOUNCE_DAYS", 0),
+        # 0 keeps the archive forever; >0 purges messages older than N days
+        # on the maintenance tick.
+        capture_retention_days=_parse_non_negative_int(source, "CAPTURE_RETENTION_DAYS", 0),
         liftwing_api_base=source.get(
             "LIFTWING_API_BASE", "https://api.wikimedia.org/service/lw/inference/v1"
         ),
@@ -175,6 +180,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         llm_default_lang=source.get("LLM_DEFAULT_LANG", "en"),
         llm_max_tokens_ceiling=_parse_positive_int(source, "LLM_MAX_TOKENS_CEILING", 4096),
         llm_max_chunks_per_run=_parse_positive_int(source, "LLM_MAX_CHUNKS_PER_RUN", 12),
+        # 0 disables the per-run cap; the default bounds a fully-retrying
+        # 12-chunk map-reduce without tripping on a normal analysis.
+        llm_max_tokens_per_run=_parse_non_negative_int(source, "LLM_MAX_TOKENS_PER_RUN", 200_000),
         user_agent=source["USER_AGENT"],
     )
 

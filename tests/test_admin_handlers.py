@@ -618,6 +618,30 @@ async def test_capture_reports_storage_outage() -> None:
     assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
 
 
+async def test_capture_off_during_outage_tombstones_for_convergence() -> None:
+    store = InMemoryProfiles()
+    handlers, _store, _archive = make_capture_handlers(store)
+    service = handlers.capture_service
+    assert service is not None
+    # Capture is on and durable.
+    on_context, _bot = admin_context(args=["on"])
+    await handlers.on_capture(command("/capture on"), on_context)
+    assert store.profiles[tg.GROUP.id, 0].capture_enabled
+
+    # The disable write fails: the admin is told, and the scope is tombstoned
+    # rather than left to resume off the stale `True` row.
+    store.fail_upserts = True
+    off_context, bot = admin_context(args=["off"])
+    await handlers.on_capture(command("/capture off"), off_context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
+    assert store.profiles[tg.GROUP.id, 0].capture_enabled  # stale True, revocation pending
+
+    # Storage recovers; the maintenance tick converges the revocation.
+    store.fail_upserts = False
+    await service.retry_denied()
+    assert not store.profiles[tg.GROUP.id, 0].capture_enabled
+
+
 async def test_settings_reports_capture_state() -> None:
     store = InMemoryProfiles()
     handlers, _store, _archive = make_capture_handlers(store)

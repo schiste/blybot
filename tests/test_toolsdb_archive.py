@@ -34,6 +34,10 @@ class FakeMessagesDb:
         self.schema_created = False
         self.fail = False
 
+    def run_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
+        for query, params in statements:
+            self.run(query, params)
+
     def run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         if self.fail:
             msg = "db down"
@@ -180,6 +184,8 @@ async def test_database_failure_raises_storage_error() -> None:
         await archive.window(-1, 0, NOW, NOW)
     with pytest.raises(StorageError):
         await archive.purge(-1, 0)
+    with pytest.raises(StorageError):
+        await archive.migrate(-1, -2)  # the transactional path degrades the same way
 
 
 async def test_purge_before_trims_only_the_older_rows() -> None:

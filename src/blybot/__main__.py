@@ -185,6 +185,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             max_tokens_ceiling=config.llm_max_tokens_ceiling,
             max_chunks=config.llm_max_chunks_per_run,
             counters=counters,
+            max_tokens_per_run=config.llm_max_tokens_per_run,
         )
         transforms["stats"] = StatsTransform()
         sinks["wiki_section"] = WikiSectionSink(
@@ -265,6 +266,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             ),
             clock=clock,
             counters=counters,
+            retention_window=timedelta(days=config.capture_retention_days),
         )
         capture_handlers = CaptureHandlers(
             service=capture_service,

@@ -16,12 +16,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from telegram import Update
-from telegram.error import TelegramError
-from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters
+from telegram.error import RetryAfter, TelegramError, TimedOut
+from telegram.ext import (
+    AIORateLimiter,
+    Application,
+    ChatMemberHandler,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 from blybot.adapters.telegram._common import send_threaded
 from blybot.domain.models import OutboundMessage
@@ -74,8 +83,11 @@ class Maintenance:
             self.tick(ticks)
             if self.capture is not None:
                 await self.capture.retry_denied()
-            if self.archive is not None and ticks % self.heartbeat_every_ticks == 0:
-                await _archive_heartbeat(self.archive)
+            if ticks % self.heartbeat_every_ticks == 0:
+                if self.capture is not None:
+                    await self.capture.sweep_retention()
+                if self.archive is not None:
+                    await _archive_heartbeat(self.archive)
 
     def tick(self, ticks: int) -> None:
         """Sweep expired sessions; prove liveness every Nth tick."""
@@ -175,24 +187,98 @@ class MessageCollector(Protocol):
         ...
 
 
-async def message_loop(
-    bot: Bot, collector: MessageCollector, interval_seconds: float, label: str
+_DELIVERY_MAX_RETRIES: Final = 3
+
+
+async def _deliver(
+    bot: Bot,
+    message: OutboundMessage,
+    label: str,
+    sleep: Callable[[float], Awaitable[None]],
 ) -> None:
-    """Poll ``collector`` and deliver its messages until cancelled."""
+    """Send one message, honoring Telegram flood-control.
+
+    ``RetryAfter`` (the bot is rate-limited) is waited out and retried;
+    ``TimedOut`` is a transient network blip and retried after a short
+    pause. Both are bounded by ``_DELIVERY_MAX_RETRIES`` — a scope that
+    stays rate-limited past the budget is dropped like any other
+    undeliverable message, never retried forever. Every other
+    ``TelegramError`` (kicked, muted, chat-not-found) is permanent for
+    this message and dropped at once. These three are *subclasses* of
+    ``TelegramError``, so they must be caught before it.
+    """
+    reason = ""
+    delay = 0.0
+    for attempt in range(_DELIVERY_MAX_RETRIES + 1):
+        try:
+            await send_threaded(bot, message.chat_id, message.thread_id, message.text)
+        except RetryAfter as exc:
+            # retry_after is a timedelta under PTB_TIMEDELTA (an int on the
+            # legacy path); honor the stated wait plus a 1s margin.
+            wait = exc.retry_after
+            seconds = wait.total_seconds() if isinstance(wait, timedelta) else wait
+            reason, delay = "flood", seconds + 1
+        except TimedOut:
+            reason, delay = "timeout", 1.0
+        except TelegramError:
+            # Kicked from the group, muted, etc. — that scope's message is
+            # lost, every other scope's still goes out.
+            log_event(f"{label}_delivery", "ignored")
+            return
+        except Exception as exc:  # keep the delivery task alive
+            # A non-Telegram error (a bug, an asyncio glitch) must not
+            # escape and kill the whole background task — drop this one
+            # message and carry on, mirroring the collect() guard. Log the
+            # exception *type* only (privacy: never its message text).
+            log_event(f"{label}_delivery", "error", error=type(exc).__name__)
+            return
+        else:
+            return  # sent
+        if attempt < _DELIVERY_MAX_RETRIES:
+            await sleep(delay)
+    # Still rate-limited/timing-out past the retry budget: drop like any
+    # other undeliverable message rather than retry forever.
+    log_event(f"{label}_delivery", "ignored", reason=reason)
+
+
+def _next_deadline(previous: float, interval: float, now: float) -> float:
+    """The next tick deadline: anchored to the schedule, missed ticks not replayed.
+
+    When the work finished within the interval the cadence stays exactly
+    on ``previous + interval`` (no drift); when it overran, the deadline
+    resyncs to ``now + interval`` so a slow tick does not trigger a burst
+    of catch-up ticks.
+    """
+    candidate = previous + interval
+    return candidate if candidate > now else now + interval
+
+
+async def message_loop(  # noqa: PLR0913 -- sleep/monotonic are injected test seams
+    bot: Bot,
+    collector: MessageCollector,
+    interval_seconds: float,
+    label: str,
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> None:
+    """Poll ``collector`` and deliver its messages until cancelled.
+
+    The cadence is anchored to a fixed deadline rather than sleeping a
+    whole interval *after* the work, so a slow tick (e.g. a minutes-long
+    analysis) does not push every later tick progressively late.
+    """
+    next_at = monotonic() + interval_seconds
     while True:
-        await asyncio.sleep(interval_seconds)
+        await sleep(max(0.0, next_at - monotonic()))
         try:
             messages = await collector.collect()
         except Exception:
             log_event(label, "error")
-            continue
+            messages = []
         for message in messages:
-            try:
-                await send_threaded(bot, message.chat_id, message.thread_id, message.text)
-            except TelegramError:
-                # Kicked from the group, muted, etc. — that scope's
-                # message is lost, every other scope's still goes out.
-                log_event(f"{label}_delivery", "ignored")
+            await _deliver(bot, message, label, sleep)
+        next_at = _next_deadline(next_at, interval_seconds, monotonic())
 
 
 def build_application(  # noqa: PLR0913 -- one handler bundle per concern
@@ -208,6 +294,12 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
     application = (
         Application.builder()
         .token(token)
+        # Proactively pace every outgoing call under Telegram's ~30 msg/s
+        # global and ~20 msg/min per-group ceilings. This is what keeps a
+        # multi-scope digest/analysis fan-out from tripping flood control;
+        # `_deliver` only has to mop up the rare RetryAfter that still leaks
+        # through (max_retries=0 here so the two don't both retry).
+        .rate_limiter(AIORateLimiter(max_retries=0))
         .post_init(lifecycle.post_init)
         .post_shutdown(lifecycle.post_shutdown)
         .build()

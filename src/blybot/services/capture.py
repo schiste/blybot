@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import GroupProfile, OutboundMessage
 from blybot.domain.ports import StorageError
+from blybot.observability import log_event
 
 if TYPE_CHECKING:
     from blybot.domain.models import CapturedMessage
@@ -37,6 +38,9 @@ class CaptureService:
     clock: Clock
     counters: Counters
     cache_ttl: timedelta = timedelta(seconds=60)
+    # Age past which archived messages are purged on the maintenance tick.
+    # 0 keeps the archive forever (the historical behavior).
+    retention_window: timedelta = timedelta(0)
     # (chat_id, thread_id) → (capture_enabled, valid_until). High-volume
     # scopes must not cost one profile read per message.
     _enabled_cache: dict[tuple[int, int], tuple[bool, datetime]] = field(
@@ -47,6 +51,11 @@ class CaptureService:
     # ToolsDB outage). A denied scope is never archived, and each of its
     # messages retries the durable disable until one lands.
     _denied: set[tuple[int, int]] = field(default_factory=set, init=False)
+    # Per-chat cache epoch, bumped by every invalidation (forget_scope /
+    # deny). An `_enabled` read snapshots it before awaiting the store and
+    # refuses to cache if it changed meanwhile — so a consent revocation
+    # that lands mid-read can never be re-poisoned by the stale value.
+    _epoch: dict[int, int] = field(default_factory=dict, init=False)
     # Serializes consent transitions (enable_scope vs. the tombstone
     # retries): a stale in-flight disable must never overwrite a freshly
     # announced enable, and a check-then-write guard alone is TOCTOU.
@@ -76,6 +85,9 @@ class CaptureService:
 
     def forget_scope(self, chat_id: int, thread_id: int) -> None:
         """Drop the scope's cached policy so /capture changes apply promptly."""
+        # Bump the chat's epoch first: any `_enabled` read now mid-await
+        # will see the change and decline to cache its (now stale) result.
+        self._epoch[chat_id] = self._epoch.get(chat_id, 0) + 1
         if thread_id:
             self._enabled_cache.pop((chat_id, thread_id), None)
             return
@@ -128,6 +140,30 @@ class CaptureService:
         for key in list(self._denied):
             await self._retry_disable(key)
 
+    async def sweep_retention(self) -> None:
+        """Purge messages older than the retention window (0 = keep forever).
+
+        Bounds unbounded archive growth on shared ToolsDB. A per-scope
+        storage error is isolated so one bad scope never stops the sweep.
+        """
+        if self.retention_window <= timedelta(0):
+            return
+        try:
+            profiles = await self.store.list_capture_enabled()
+        except StorageError:
+            log_event("archive_retention", "error")
+            return
+        before = self.clock.now() - self.retention_window
+        removed = 0
+        for profile in profiles:
+            try:
+                removed += await self.archive.purge(profile.chat_id, profile.thread_id, before)
+            except StorageError:
+                log_event("archive_retention", "error")
+        if removed:
+            self.counters.increment("archive_pruned", removed)
+            log_event("archive_retention", "ok", pruned=removed)
+
     async def _retry_disable(self, key: tuple[int, int]) -> None:
         """Try to make a denied scope's disable durable; keep denying on failure."""
         chat_id, thread_id = key
@@ -143,6 +179,9 @@ class CaptureService:
             except StorageError:
                 return  # storage still down: the tombstone stays
             self._denied.discard(key)
+            # Bust the cache so the freshly durable `False` is served at
+            # once, not up to the TTL later (symmetry with enable_scope).
+            self.forget_scope(chat_id, thread_id)
 
     async def _enabled(self, chat_id: int, thread_id: int) -> bool:
         key = (chat_id, thread_id)
@@ -150,6 +189,7 @@ class CaptureService:
         cached = self._enabled_cache.get(key)
         if cached is not None and cached[1] > now:
             return cached[0]
+        epoch = self._epoch.get(chat_id, 0)
         try:
             profile = await self.store.get(chat_id, thread_id)
             decision = profile.capture_enabled if profile else None
@@ -162,7 +202,12 @@ class CaptureService:
         except StorageError:
             return False  # fail closed, and never cache an outage
         enabled = bool(decision)
-        self._enabled_cache[key] = (enabled, now + self.cache_ttl)
+        if self._epoch.get(chat_id, 0) == epoch:
+            # No invalidation landed while we awaited the store, so this
+            # read still reflects current consent — safe to cache. If one
+            # did (a revocation mid-read), skip the write: it would
+            # re-poison the cache the invalidation just cleared.
+            self._enabled_cache[key] = (enabled, now + self.cache_ttl)
         return enabled
 
 
@@ -195,6 +240,7 @@ class CaptureReminder:
         try:
             profiles = await self.store.list_capture_enabled()
         except StorageError:
+            log_event("capture_remind", "error")  # don't hide a persistent outage
             return []
         now = self.clock.now()
         messages: list[OutboundMessage] = []

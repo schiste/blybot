@@ -89,6 +89,32 @@ async def test_policy_is_cached_until_forgotten_or_expired() -> None:
     assert len(archive.messages) == 3
 
 
+async def test_a_revocation_mid_read_never_repoisons_the_cache() -> None:
+    """A consent change landing during a policy read must not be cached."""
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)  # durable True at read time
+    service, _counters = make_service(store, archive, clock)
+    original_get = store.get
+    fired = {"done": False}
+
+    async def racing_get(chat_id: int, thread_id: int) -> GroupProfile | None:
+        # The read observes the stale True, but a revocation lands before
+        # it returns — exactly the deny_scope-vs-in-flight-_enabled race.
+        profile = await original_get(chat_id, thread_id)
+        if not fired["done"]:
+            fired["done"] = True
+            service.deny_scope(chat_id, thread_id)
+        return profile
+
+    store.get = racing_get  # type: ignore[method-assign]
+
+    await service.ingest(msg(1))
+
+    # The epoch guard refused to cache the stale True the read observed, so
+    # nothing lingers to serve capture after consent was revoked.
+    assert (-1, 0) not in service._enabled_cache
+
+
 async def test_ingest_ceiling_throttles_a_flood() -> None:
     store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
     await enable(store)
@@ -313,6 +339,58 @@ async def test_forum_topics_inherit_the_group_capture_default() -> None:
         )
     )
     assert len(archive.messages) == 2
+
+
+def _at(clock: FakeClock, days_ago: int, message_id: int) -> CapturedMessage:
+    return CapturedMessage(
+        chat_id=-1,
+        thread_id=0,
+        message_id=message_id,
+        posted_at=clock.now() - timedelta(days=days_ago),
+        author="a",
+    )
+
+
+async def test_retention_sweep_is_a_noop_when_disabled() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)
+    service, _counters = make_service(store, archive, clock)  # retention_window defaults to 0
+    archive.messages.append(_at(clock, days_ago=100, message_id=1))
+
+    await service.sweep_retention()
+
+    assert len(archive.messages) == 1  # kept forever
+
+
+async def test_retention_sweep_purges_messages_past_the_window() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)
+    service, counters = make_service(store, archive, clock)
+    service.retention_window = timedelta(days=7)
+    archive.messages.extend(
+        [_at(clock, days_ago=10, message_id=1), _at(clock, days_ago=1, message_id=2)]
+    )
+
+    await service.sweep_retention()
+
+    assert [m.message_id for m in archive.messages] == [2]  # only the fresh message remains
+    assert counters.snapshot()["archive_pruned"] == 1
+
+
+async def test_retention_sweep_survives_storage_outages() -> None:
+    store, archive, clock = InMemoryProfiles(), InMemoryArchive(), FakeClock()
+    await enable(store)
+    service, counters = make_service(store, archive, clock)
+    service.retention_window = timedelta(days=7)
+
+    store.fail = True  # the scope listing is down
+    await service.sweep_retention()  # must not raise
+
+    store.fail = False
+    archive.messages.append(_at(clock, days_ago=100, message_id=1))
+    archive.fail = True  # a per-scope purge fails
+    await service.sweep_retention()  # isolated, must not raise
+    assert "archive_pruned" not in counters.snapshot()  # nothing was actually removed
 
 
 def make_reminder(store: InMemoryProfiles, clock: FakeClock, days: int = 30) -> CaptureReminder:

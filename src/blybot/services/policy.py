@@ -49,10 +49,12 @@ class SlidingWindowLimiter:
     limit: int
     window: timedelta
     _events: dict[tuple[str, int], deque[datetime]] = field(default_factory=dict)
+    _next_evict: datetime | None = field(default=None, init=False)
 
     def allow(self, scope: str, key: int) -> bool:
         """Record one event for ``(scope, key)``; return whether it is within the cap."""
         now = self.clock.now()
+        self._evict_expired(now)
         history = self._events.setdefault((scope, key), deque())
         cutoff = now - self.window
         while history and history[0] <= cutoff:
@@ -61,3 +63,18 @@ class SlidingWindowLimiter:
             return False
         history.append(now)
         return True
+
+    def _evict_expired(self, now: datetime) -> None:
+        """Drop keys whose events have all expired (amortized once per window).
+
+        Without this the per-``(scope, key)`` map grows forever — one entry
+        per distinct user (``/log``, ``/bug``) or scope ever seen — since
+        ``allow`` only ever prunes the key it touches.
+        """
+        if self._next_evict is not None and now < self._next_evict:
+            return
+        self._next_evict = now + self.window
+        cutoff = now - self.window
+        stale = [key for key, history in self._events.items() if history[-1] <= cutoff]
+        for key in stale:
+            del self._events[key]

@@ -11,18 +11,31 @@ which scope it is for. The durable half of the link is the scope's
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
-from blybot.domain.models import Schedule
+from blybot.domain.models import (
+    ActionScope,
+    ActionSpec,
+    Schedule,
+    StepSpec,
+    TriggerKind,
+    TriggerSpec,
+)
+from blybot.domain.ports import StorageError
+from blybot.observability import log_event
 from blybot.services.actions import ActionParseError, parse_schedule
 from blybot.services.llmconf import valid_lang
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from blybot.domain.ports import Clock
+    from blybot.domain.models import OutboundMessage
+    from blybot.domain.ports import Clock, ProfileStore, SubscriptionStore
+    from blybot.domain.subscriptions import Subscription
+    from blybot.observability import Counters
+    from blybot.services.engine import ActionEngine
 
 RECIPES: Final = frozenset({"summarize", "talking_points", "stats"})
 _DEFAULT_HOUR: Final = 8
@@ -117,3 +130,85 @@ class SubscriptionBinding:
         self._entries = {
             dm: value for dm, value in self._entries.items() if now - value[2] <= self.entry_ttl
         }
+
+
+def _recipe_transforms(recipe: str, lang: str) -> tuple[StepSpec, ...]:
+    if recipe == "stats":
+        return (StepSpec(name="stats"),)  # deterministic, no LLM / language
+    return (StepSpec(name="prompt", params=(("template", recipe), ("lang", lang))),)
+
+
+def _digest_spec(sub: Subscription) -> ActionSpec:
+    """Build the one-shot digest pipeline for a subscription.
+
+    ``window=since_last_run`` with ``last_run`` = the subscription's *old*
+    watermark tiles the archive exactly-once between deliveries. The sink
+    renders to a chat message; the scheduler re-targets it to the DM.
+    """
+    return ActionSpec(
+        action_id="sub",
+        trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="subscription"),
+        source=StepSpec(name="archive_window", params=(("window", "since_last_run"),)),
+        transforms=_recipe_transforms(sub.recipe, sub.lang),
+        sink=StepSpec(name="telegram_reply"),
+        last_run=sub.last_run,
+    )
+
+
+@dataclass(eq=False)
+class SubscriptionScheduler:
+    """Runs due digest subscriptions each tick, delivering privately.
+
+    A :class:`~blybot.adapters.telegram.app.MessageCollector`. Mirrors
+    :class:`~blybot.services.schedule.ActionScheduler`: baseline unstamped
+    rows, select due, **stamp the watermark durably before delivering**
+    (a crash-after-send reads as "already ran", never a duplicate DM), and
+    isolate per-subscription failures. The digest runs on the *group*
+    scope; only the final re-wrap carries the subscriber's DM chat id, so
+    ``ActionContext`` stays identifier-free.
+    """
+
+    subscriptions: SubscriptionStore
+    profiles: ProfileStore
+    engine: ActionEngine
+    clock: Clock
+    counters: Counters
+    max_per_tick: int = 200
+
+    async def collect(self) -> list[OutboundMessage]:
+        """Return the DM digests for every due subscription this tick."""
+        try:
+            subs = await self.subscriptions.list_all()
+        except StorageError:
+            self.counters.increment("subscription_ticks_failed")
+            log_event("subscription_tick", "error")
+            return []
+        now = self.clock.now()
+        messages: list[OutboundMessage] = []
+        for sub in subs[: self.max_per_tick]:
+            try:
+                messages.extend(await self._run_one(sub, now))
+            except Exception:
+                # Per-subscription isolation: one broken scope/adapter must
+                # not abort the tick. Deliberately broad.
+                self.counters.increment("subscription_ticks_failed")
+                log_event("subscription_tick", "error")
+        return messages
+
+    async def _run_one(self, sub: Subscription, now: datetime) -> list[OutboundMessage]:
+        if sub.last_run is None:  # baseline: next slot, never a replay
+            await self.subscriptions.stamp(sub.sub_id, now)
+            return []
+        if not sub.schedule.is_due(now, sub.last_run):
+            return []
+        profile = await self.profiles.get(sub.chat_id, sub.thread_id)
+        if profile is None or profile.subscribe_code is None:
+            return []  # admin revoked subscriptions for this scope — skip, don't stamp
+        # Durable watermark before the side effect (no duplicate DM on crash).
+        await self.subscriptions.stamp(sub.sub_id, now)
+        scope = ActionScope(chat_id=sub.chat_id, thread_id=sub.thread_id)
+        outcome = await self.engine.run(scope, _digest_spec(sub), now)
+        self.counters.increment("subscription_digests")
+        return [
+            replace(message, chat_id=sub.dm_chat_id, thread_id=0) for message in outcome.messages
+        ]

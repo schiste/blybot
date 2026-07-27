@@ -30,7 +30,7 @@ from blybot.services.llmconf import valid_lang
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from blybot.domain.models import OutboundMessage, Scope
+    from blybot.domain.models import OutboundMessage, PlatformCapabilities, Scope
     from blybot.domain.ports import Clock, ProfileStore, SubscriptionStore
     from blybot.domain.subscriptions import Subscription
     from blybot.observability import Counters
@@ -172,10 +172,15 @@ class SubscriptionScheduler:
     engine: ActionEngine
     clock: Clock
     counters: Counters
+    # Digest delivery needs durable direct messages; a platform without
+    # them (capabilities.durable_dm False) has no subscriptions to run.
+    capabilities: PlatformCapabilities
     max_per_tick: int = 200
 
     async def collect(self) -> list[OutboundMessage]:
         """Return the DM digests for every due subscription this tick."""
+        if not self.capabilities.durable_dm:
+            return []
         try:
             subs = await self.subscriptions.list_all()
         except StorageError:

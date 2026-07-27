@@ -28,6 +28,7 @@ from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
 from blybot.adapters.telegram.token_entry import TokenEntryHandler
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
 from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
@@ -202,7 +203,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             edit_summary=config.edit_summary,
             bot_name=config.bot_name,
         )
-        sinks["reply"] = ChatReplySink(max_chars=4096)
+        sinks["reply"] = ChatReplySink(max_chars=TELEGRAM_CAPABILITIES.max_message_chars)
     engine = ActionEngine(
         sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock
     )
@@ -212,6 +213,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             subscriptions=subscriptions_store,
             binding=subscription_binding,
             default_lang=config.llm_default_lang,
+            capabilities=TELEGRAM_CAPABILITIES,
         )
         if subscriptions_store is not None and store is not None
         else None
@@ -223,6 +225,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             engine=engine,
             clock=clock,
             counters=counters,
+            capabilities=TELEGRAM_CAPABILITIES,
         )
         if subscriptions_store is not None and store is not None
         else None
@@ -244,6 +247,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         repo_service=(
             GroupRepoService(gateway=gateway, vault=store, directory=directory) if store else None
         ),
+        capabilities=TELEGRAM_CAPABILITIES,
         archive=archive,
         subscriptions=subscriptions_store,
         cleanup_delay_seconds=config.log_cleanup_seconds,
@@ -295,7 +299,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
             ),
             clock=clock,
             counters=counters,
-            max_chars=4096,
+            max_chars=TELEGRAM_CAPABILITIES.max_message_chars,
             retention_window=timedelta(days=config.capture_retention_days),
         )
         capture_handlers = CaptureHandlers(
@@ -385,6 +389,7 @@ def main() -> int:  # noqa: PLR0915 -- the composition root enumerates the objec
         capture_handlers=capture_handlers,
         analysis_handlers=analysis_handlers,
         subscription_handlers=subscription_handlers,
+        capabilities=TELEGRAM_CAPABILITIES,
     )
     return 0
 

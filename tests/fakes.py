@@ -171,6 +171,13 @@ class InMemoryProfiles:
             return None
         return replace(profile, has_token=key in self.tokens)
 
+    async def get_by_subscribe_code(self, code: str) -> GroupProfile | None:
+        self._check()
+        for key, profile in self.profiles.items():
+            if profile.subscribe_code == code:
+                return replace(profile, has_token=key in self.tokens)
+        return None
+
     async def upsert(self, profile: GroupProfile) -> None:
         self._check()
         if self.fail_upserts:

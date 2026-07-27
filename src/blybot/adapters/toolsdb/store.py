@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     consent_mode VARCHAR(16) NULL,
     events_enabled TINYINT(1) NOT NULL DEFAULT 0,
     capture_enabled TINYINT(1) NULL DEFAULT NULL,
+    subscribe_code VARCHAR(32) NULL DEFAULT NULL,
     rules_json TEXT NULL,
     llm_json TEXT NULL,
     cursors_json TEXT NULL,
@@ -52,10 +53,12 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 _PROFILE_COLUMNS: Final = (
     "chat_id, thread_id, log_page, repo, consent_mode, events_enabled, "
-    "capture_enabled, rules_json, llm_json, token_ciphertext IS NOT NULL"
+    "capture_enabled, rules_json, llm_json, subscribe_code, token_ciphertext IS NOT NULL"
 )
 _KEY: Final = "chat_id = %s AND thread_id = %s"
 Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: S608
+# Resolve a subscribe deep-link code back to its scope (unique random code).
+Q_GET_BY_CODE: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE subscribe_code = %s"  # noqa: S608
 # The ORDER BY makes the scan order stable across ticks, which the
 # per-tick rotation in the scheduler/notifier relies on to keep any scope
 # above the cap from being permanently starved.
@@ -70,12 +73,12 @@ Q_LIST_CAPTURE_ENABLED: Final = (
 Q_UPSERT: Final = """
 INSERT INTO profiles
     (chat_id, thread_id, log_page, repo, consent_mode, events_enabled,
-     capture_enabled, rules_json, llm_json)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+     capture_enabled, rules_json, llm_json, subscribe_code)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE log_page = VALUES(log_page), repo = VALUES(repo),
     consent_mode = VALUES(consent_mode), events_enabled = VALUES(events_enabled),
     capture_enabled = VALUES(capture_enabled), rules_json = VALUES(rules_json),
-    llm_json = VALUES(llm_json)
+    llm_json = VALUES(llm_json), subscribe_code = VALUES(subscribe_code)
 """
 Q_DELETE: Final = f"DELETE FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_GET_CURSORS: Final = f"SELECT cursors_json FROM profiles WHERE {_KEY}"  # noqa: S608
@@ -126,6 +129,9 @@ MIGRATE_CAPTURE_UNSET: Final = (
     "UPDATE profiles SET capture_enabled = NULL WHERE capture_enabled = 0"
 )
 MIGRATE_ADD_LLM: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS llm_json TEXT NULL"
+MIGRATE_ADD_SUBSCRIBE_CODE: Final = (
+    "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS subscribe_code VARCHAR(32) NULL DEFAULT NULL"
+)
 Q_ACTIONS_READ: Final = f"SELECT actions_json FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_ACTIONS_WRITE: Final = """
 INSERT INTO profiles (chat_id, thread_id, actions_json) VALUES (%s, %s, %s)
@@ -243,6 +249,7 @@ class ToolsDbStore:
         await self._run(MIGRATE_ADD_ACTIONS, ())
         await self._run(MIGRATE_ADD_CAPTURE, ())
         await self._run(MIGRATE_ADD_LLM, ())
+        await self._run(MIGRATE_ADD_SUBSCRIBE_CODE, ())
         rows = await self._run(Q_CAPTURE_NULLABLE, ())
         if rows and rows[0][0] == "NO":
             await self._run(MIGRATE_CAPTURE_NULLABLE, ())
@@ -256,6 +263,11 @@ class ToolsDbStore:
     async def get(self, chat_id: int, thread_id: int) -> GroupProfile | None:
         """Return the (group, topic) profile, or ``None`` if unconfigured."""
         rows = await self._run(Q_GET, (chat_id, thread_id))
+        return _profile_from_row(rows[0]) if rows else None
+
+    async def get_by_subscribe_code(self, code: str) -> GroupProfile | None:
+        """Return the scope whose subscribe_code matches, or ``None``."""
+        rows = await self._run(Q_GET_BY_CODE, (code,))
         return _profile_from_row(rows[0]) if rows else None
 
     async def upsert(self, profile: GroupProfile) -> None:
@@ -272,6 +284,7 @@ class ToolsDbStore:
                 None if profile.capture_enabled is None else int(profile.capture_enabled),
                 dumps_rules(profile.rules),
                 dumps_llm(profile.llm) if profile.llm is not None else None,
+                profile.subscribe_code,
             ),
         )
 
@@ -392,6 +405,7 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         capture_enabled,
         rules_json,
         llm_json,
+        subscribe_code,
         has_token,
     ) = row
     return GroupProfile(
@@ -404,5 +418,6 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         capture_enabled=None if capture_enabled is None else bool(capture_enabled),
         rules=loads_rules(rules_json),
         llm=loads_llm(llm_json),
+        subscribe_code=subscribe_code,
         has_token=bool(has_token),
     )

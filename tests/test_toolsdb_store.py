@@ -17,6 +17,7 @@ from blybot.adapters.toolsdb.store import (
     MIGRATE_ADD_CURSORS,
     MIGRATE_ADD_LLM,
     MIGRATE_ADD_RULES,
+    MIGRATE_ADD_SUBSCRIBE_CODE,
     MIGRATE_ADD_THREAD,
     MIGRATE_CAPTURE_NULLABLE,
     MIGRATE_CAPTURE_UNSET,
@@ -27,6 +28,7 @@ from blybot.adapters.toolsdb.store import (
     Q_CAPTURE_NULLABLE,
     Q_DELETE,
     Q_GET,
+    Q_GET_BY_CODE,
     Q_GET_CURSORS,
     Q_LIST_CAPTURE_ENABLED,
     Q_LIST_EVENT_ENABLED,
@@ -70,6 +72,7 @@ class FakeToolsDb:
                 "capture_enabled": None,
                 "rules_json": None,
                 "llm_json": None,
+                "subscribe_code": None,
                 "token": None,
                 "cursors": None,
                 "actions": None,
@@ -89,6 +92,7 @@ class FakeToolsDb:
             row["capture_enabled"],
             row["rules_json"],
             row["llm_json"],
+            row["subscribe_code"],
             row["token"] is not None,
         )
 
@@ -144,6 +148,7 @@ class FakeToolsDb:
             MIGRATE_ADD_CURSORS,
             MIGRATE_ADD_CAPTURE,
             MIGRATE_ADD_LLM,
+            MIGRATE_ADD_SUBSCRIBE_CODE,
         ):
             return []  # column add: no-op in the fake
         if query in (MIGRATE_ADD_ACTIONS, Q_ACTIONS_WRITE, Q_ACTIONS_READ, Q_ACTIONS_LIST):
@@ -162,7 +167,7 @@ class FakeToolsDb:
                 del self.tables[key]
             return []
         if query == Q_UPSERT:
-            chat_id, thread_id, log_page, repo, consent, events, capture, rules, llm = params
+            chat_id, thread_id, log_page, repo, consent, events, capture, rules, llm, code = params
             row = self._row((chat_id, thread_id))
             row.update(
                 log_page=log_page,
@@ -172,11 +177,16 @@ class FakeToolsDb:
                 capture_enabled=capture,
                 rules_json=rules,
                 llm_json=llm,
+                subscribe_code=code,
             )
             return []
         if query == Q_GET:
             key = (params[0], params[1])
             return [self._as_profile_row(key)] if key in self.tables else []
+        if query == Q_GET_BY_CODE:
+            (code,) = params
+            hits = [k for k, row in self.tables.items() if row["subscribe_code"] == code]
+            return [self._as_profile_row(hits[0])] if hits else []
         if query == Q_LIST_EVENT_ENABLED:
             return [
                 self._as_profile_row(key)
@@ -206,6 +216,11 @@ class FakeToolsDb:
             for chat_id, thread_id in [k for k in self.tables if k[0] == old_id]:
                 self.tables[new_id, thread_id] = self.tables.pop((chat_id, thread_id))
             return []
+        if query in (Q_VAULT_WRITE, Q_VAULT_READ, Q_VAULT_CLEAR):
+            return self._run_vault(query, params)
+        pytest.fail(f"unexpected query: {query}")
+
+    def _run_vault(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         if query == Q_VAULT_WRITE:
             chat_id, thread_id, ciphertext = params
             self._row((chat_id, thread_id))["token"] = bytes(ciphertext)
@@ -213,12 +228,10 @@ class FakeToolsDb:
         if query == Q_VAULT_READ:
             key = (params[0], params[1])
             return [(self.tables[key]["token"],)] if key in self.tables else []
-        if query == Q_VAULT_CLEAR:
-            key = (params[0], params[1])
-            if key in self.tables:
-                self.tables[key]["token"] = None
-            return []
-        pytest.fail(f"unexpected query: {query}")
+        key = (params[0], params[1])  # Q_VAULT_CLEAR
+        if key in self.tables:
+            self.tables[key]["token"] = None
+        return []
 
 
 def make_store() -> tuple[ToolsDbStore, FakeToolsDb]:
@@ -335,6 +348,20 @@ def test_scan_queries_request_a_stable_order() -> None:
     """The scheduler/notifier rotation relies on a deterministic scan order."""
     for query in (Q_ACTIONS_LIST, Q_LIST_EVENT_ENABLED, Q_LIST_CAPTURE_ENABLED):
         assert query.rstrip().endswith("ORDER BY chat_id, thread_id")
+
+
+async def test_subscribe_code_round_trips_and_resolves() -> None:
+    store, _ = make_store()
+    await store.upsert(GroupProfile(chat_id=-7, subscribe_code="abc123"))
+
+    got = await store.get(-7, 0)
+    assert got is not None
+    assert got.subscribe_code == "abc123"
+
+    by_code = await store.get_by_subscribe_code("abc123")
+    assert by_code is not None
+    assert by_code.chat_id == -7
+    assert await store.get_by_subscribe_code("nope") is None
 
 
 async def test_cursors_roundtrip_and_default() -> None:

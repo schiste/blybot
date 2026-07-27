@@ -205,6 +205,10 @@ class ProfileStore(Protocol):
         """Return the (group, topic) profile, or ``None`` if unconfigured."""
         ...
 
+    async def get_by_subscribe_code(self, code: str) -> GroupProfile | None:
+        """Return the scope whose ``subscribe_code`` matches, or ``None``."""
+        ...
+
     async def upsert(self, profile: GroupProfile) -> None:
         """Create or update the profile (token and cursor are untouched)."""
         ...

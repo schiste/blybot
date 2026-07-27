@@ -14,18 +14,26 @@ from cryptography.fernet import Fernet
 from blybot.adapters.toolsdb.store import (
     MIGRATE_ADD_ACTIONS,
     MIGRATE_ADD_CAPTURE,
+    MIGRATE_ADD_CHANNEL,
     MIGRATE_ADD_CURSORS,
     MIGRATE_ADD_LLM,
+    MIGRATE_ADD_PLATFORM,
     MIGRATE_ADD_RULES,
     MIGRATE_ADD_SUBSCRIBE_CODE,
     MIGRATE_ADD_THREAD,
+    MIGRATE_ADD_THREAD_STR,
+    MIGRATE_BACKFILL_IDENTITY,
     MIGRATE_CAPTURE_NULLABLE,
     MIGRATE_CAPTURE_UNSET,
+    MIGRATE_CHAT_ID_NULLABLE,
     MIGRATE_REBUILD_PK,
+    MIGRATE_THREAD_ID_NULLABLE,
     Q_ACTIONS_LIST,
     Q_ACTIONS_READ,
     Q_ACTIONS_WRITE,
     Q_CAPTURE_NULLABLE,
+    Q_CHANNEL_IN_PK,
+    Q_CHAT_ID_NULLABLE,
     Q_DELETE,
     Q_GET,
     Q_GET_BY_CODE,
@@ -35,7 +43,6 @@ from blybot.adapters.toolsdb.store import (
     Q_MIGRATE,
     Q_MIGRATE_CLEAR,
     Q_SET_CURSORS,
-    Q_THREAD_IN_PK,
     Q_UPSERT,
     Q_VAULT_CLEAR,
     Q_VAULT_READ,
@@ -51,40 +58,83 @@ from blybot.services.rules import parse_rule
 
 
 class FakeToolsDb:
-    """Interprets the store's exact query constants against a dict."""
+    """Interprets the store's exact query constants against a list of rows.
+
+    Rows are plain dicts carrying BOTH the string identity (platform,
+    channel, thread) and the legacy ints (chat_id, thread_id), so the fake
+    can model dual-write and the in-place migration — backfill, string-PK
+    rebuild, nullable relax — the way the real table would.
+    """
+
+    _DATA_DEFAULTS: dict[str, Any] = {  # noqa: RUF012 -- copied per row, never mutated in place
+        "log_page": None,
+        "repo": None,
+        "consent_mode": None,
+        "events_enabled": 0,
+        "capture_enabled": None,
+        "rules_json": None,
+        "llm_json": None,
+        "subscribe_code": None,
+        "token": None,
+        "cursors": None,
+        "actions": None,
+    }
 
     def __init__(self) -> None:
-        self.tables: dict[tuple[int, int], dict[str, Any]] = {}
-        self.thread_in_pk = False  # simulates an old (single-key) table
-        self.capture_nullable = False  # simulates the NOT NULL era column
+        self.rows: list[dict[str, Any]] = []
+        self.channel_in_pk = False  # old table: PK is still (chat_id, thread_id)
+        self.chat_id_nullable = False  # old table: the ints are NOT NULL
+        self.capture_nullable = False  # old table: NOT NULL tri-state column
         self.schema_migrated = False
         self.fail = False
         self.schema_created = False
 
-    def _row(self, key: tuple[int, int]) -> dict[str, Any]:
-        return self.tables.setdefault(
-            key,
-            {
-                "log_page": None,
-                "repo": None,
-                "consent_mode": None,
-                "events_enabled": 0,
-                "capture_enabled": None,
-                "rules_json": None,
-                "llm_json": None,
-                "subscribe_code": None,
-                "token": None,
-                "cursors": None,
-                "actions": None,
-            },
-        )
+    def seed_legacy(self, chat_id: int, thread_id: int = 0, **data: Any) -> dict[str, Any]:
+        """Append a pre-migration row: only the ints set, string key blank."""
+        row = {
+            **self._DATA_DEFAULTS,
+            "platform": "telegram",
+            "channel": "",
+            "thread": "",
+            "chat_id": chat_id,
+            "thread_id": thread_id,
+            **data,
+        }
+        self.rows.append(row)
+        return row
 
-    def _as_profile_row(self, key: tuple[int, int]) -> tuple[Any, ...]:
-        chat_id, thread_id = key
-        row = self.tables[key]
+    def _find(self, platform: str, channel: str, thread: str) -> dict[str, Any] | None:
+        for row in self.rows:
+            if (row["platform"], row["channel"], row["thread"]) == (platform, channel, thread):
+                return row
+        return None
+
+    def _upsert_row(
+        self, platform: str, channel: str, thread: str, chat_id: Any, thread_id: Any
+    ) -> dict[str, Any]:
+        row = self._find(platform, channel, thread)
+        if row is None:
+            row = {
+                **self._DATA_DEFAULTS,
+                "platform": platform,
+                "channel": channel,
+                "thread": thread,
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+            }
+            self.rows.append(row)
+        else:  # dual-write keeps the ints in step on every touch
+            row["chat_id"], row["thread_id"] = chat_id, thread_id
+        return row
+
+    def _sorted(self) -> list[dict[str, Any]]:
+        return sorted(self.rows, key=lambda r: (r["platform"], r["channel"], r["thread"]))
+
+    def _as_profile_row(self, row: dict[str, Any]) -> tuple[Any, ...]:
         return (
-            chat_id,
-            thread_id,
+            row["platform"],
+            row["channel"],
+            row["thread"],
             row["log_page"],
             row["repo"],
             row["consent_mode"],
@@ -98,19 +148,21 @@ class FakeToolsDb:
 
     def _run_actions(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         """The actions_json queries, kept apart to keep :meth:`run` readable."""
+        row: dict[str, Any] | None
         if query == Q_ACTIONS_WRITE:
-            chat_id, thread_id, actions_json = params
-            self._row((chat_id, thread_id))["actions"] = actions_json
+            platform, channel, thread, chat_id, thread_id, actions_json = params
+            row = self._upsert_row(platform, channel, thread, chat_id, thread_id)
+            row["actions"] = actions_json
         if query == Q_ACTIONS_READ:
-            key = (params[0], params[1])
-            return [(self.tables[key]["actions"],)] if key in self.tables else []
+            row = self._find(*params)
+            return [(row["actions"],)] if row else []
         if query == Q_ACTIONS_LIST:
             return [
-                (key[0], key[1], row["actions"])
-                for key, row in self.tables.items()
+                (row["platform"], row["channel"], row["thread"], row["actions"])
+                for row in self._sorted()
                 if row["actions"] not in (None, "[]")
             ]
-        return []  # MIGRATE_ADD_ACTIONS / write: no rows
+        return []  # MIGRATE_ADD_ACTIONS: no rows
 
     def _run_capture_migration(self, query: str) -> list[tuple[Any, ...]]:
         """The tri-state capture conversion, kept apart like the actions queries."""
@@ -120,7 +172,7 @@ class FakeToolsDb:
             self.capture_nullable = True
             self.schema_migrated = True
             return []
-        for row in self.tables.values():  # MIGRATE_CAPTURE_UNSET
+        for row in self.rows:  # MIGRATE_CAPTURE_UNSET
             if row["capture_enabled"] == 0:
                 row["capture_enabled"] = None
         return []
@@ -129,17 +181,13 @@ class FakeToolsDb:
         for query, params in statements:
             self.run(query, params)
 
-    def run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
-        if self.fail:
-            msg = "db down"
-            raise OSError(msg)
-        # Guard the exact failure the fake would otherwise mask: a SQL
-        # constant whose %s count drifts from what the caller passes.
-        assert query.count("%s") == len(params), f"placeholder/param mismatch: {query!r}"
+    def _run_migration(self, query: str) -> list[tuple[Any, ...]] | None:
+        """Handle schema/migration statements; return None for data queries."""
         if query == SCHEMA:
             if not self.schema_created:  # CREATE IF NOT EXISTS: no-op on old tables
                 self.schema_created = True
-                self.thread_in_pk = True  # a freshly created table has the composite key
+                self.channel_in_pk = True  # a fresh table already has the string PK...
+                self.chat_id_nullable = True  # ...nullable ints...
                 self.capture_nullable = True  # ...and the nullable tri-state column
             return []
         if query in (
@@ -149,26 +197,69 @@ class FakeToolsDb:
             MIGRATE_ADD_CAPTURE,
             MIGRATE_ADD_LLM,
             MIGRATE_ADD_SUBSCRIBE_CODE,
+            MIGRATE_ADD_PLATFORM,
+            MIGRATE_ADD_CHANNEL,
+            MIGRATE_ADD_THREAD_STR,
         ):
-            return []  # column add: no-op in the fake
-        if query in (MIGRATE_ADD_ACTIONS, Q_ACTIONS_WRITE, Q_ACTIONS_READ, Q_ACTIONS_LIST):
-            return self._run_actions(query, params)
-        if query == Q_THREAD_IN_PK:
-            return [(1 if self.thread_in_pk else 0,)]
+            return []  # column add: no-op (columns always present in the fake row)
+        if query == MIGRATE_BACKFILL_IDENTITY:
+            for row in self.rows:
+                if row["channel"] == "" and row["chat_id"] is not None:
+                    row["channel"] = str(row["chat_id"])
+                    row["thread"] = "" if row["thread_id"] == 0 else str(row["thread_id"])
+            return []
+        if query == Q_CHANNEL_IN_PK:
+            return [(1 if self.channel_in_pk else 0,)]
         if query == MIGRATE_REBUILD_PK:
-            self.thread_in_pk = True
+            self.channel_in_pk = True
+            self.schema_migrated = True
+            return []
+        if query == Q_CHAT_ID_NULLABLE:
+            return [("YES" if self.chat_id_nullable else "NO",)]
+        if query in (MIGRATE_CHAT_ID_NULLABLE, MIGRATE_THREAD_ID_NULLABLE):
+            self.chat_id_nullable = True
             self.schema_migrated = True
             return []
         if query in (Q_CAPTURE_NULLABLE, MIGRATE_CAPTURE_NULLABLE, MIGRATE_CAPTURE_UNSET):
             return self._run_capture_migration(query)
+        return None
+
+    def run(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+        if self.fail:
+            msg = "db down"
+            raise OSError(msg)
+        # Guard the exact failure the fake would otherwise mask: a SQL
+        # constant whose %s count drifts from what the caller passes.
+        assert query.count("%s") == len(params), f"placeholder/param mismatch: {query!r}"
+        row: dict[str, Any] | None
+        migrated = self._run_migration(query)
+        if migrated is not None:
+            return migrated
+        if query in (MIGRATE_ADD_ACTIONS, Q_ACTIONS_WRITE, Q_ACTIONS_READ, Q_ACTIONS_LIST):
+            return self._run_actions(query, params)
         if query == Q_MIGRATE_CLEAR:
-            (chat_id,) = params
-            for key in [k for k in self.tables if k[0] == chat_id]:
-                del self.tables[key]
+            platform, channel = params
+            self.rows = [
+                r for r in self.rows if (r["platform"], r["channel"]) != (platform, channel)
+            ]
             return []
         if query == Q_UPSERT:
-            chat_id, thread_id, log_page, repo, consent, events, capture, rules, llm, code = params
-            row = self._row((chat_id, thread_id))
+            (
+                platform,
+                channel,
+                thread,
+                chat_id,
+                thread_id,
+                log_page,
+                repo,
+                consent,
+                events,
+                capture,
+                rules,
+                llm,
+                code,
+            ) = params
+            row = self._upsert_row(platform, channel, thread, chat_id, thread_id)
             row.update(
                 log_page=log_page,
                 repo=repo,
@@ -181,40 +272,35 @@ class FakeToolsDb:
             )
             return []
         if query == Q_GET:
-            key = (params[0], params[1])
-            return [self._as_profile_row(key)] if key in self.tables else []
+            row = self._find(*params)
+            return [self._as_profile_row(row)] if row else []
         if query == Q_GET_BY_CODE:
             (code,) = params
-            hits = [k for k, row in self.tables.items() if row["subscribe_code"] == code]
+            hits = [r for r in self.rows if r["subscribe_code"] == code]
             return [self._as_profile_row(hits[0])] if hits else []
         if query == Q_LIST_EVENT_ENABLED:
-            return [
-                self._as_profile_row(key)
-                for key, row in self.tables.items()
-                if row["events_enabled"]
-            ]
+            return [self._as_profile_row(r) for r in self._sorted() if r["events_enabled"]]
         if query == Q_LIST_CAPTURE_ENABLED:
-            return [
-                self._as_profile_row(key)
-                for key, row in self.tables.items()
-                if row["capture_enabled"]
-            ]
+            return [self._as_profile_row(r) for r in self._sorted() if r["capture_enabled"]]
         if query == Q_DELETE:
-            self.tables.pop((params[0], params[1]), None)
+            row = self._find(*params)
+            if row is not None:
+                self.rows.remove(row)
             return []
         if query == Q_GET_CURSORS:
-            key = (params[0], params[1])
-            return [(self.tables[key]["cursors"],)] if key in self.tables else []
+            row = self._find(*params)
+            return [(row["cursors"],)] if row else []
         if query == Q_SET_CURSORS:
-            cursors, chat_id, thread_id, repo = params
-            key = (chat_id, thread_id)
-            if key in self.tables and self.tables[key]["repo"] == repo:
-                self.tables[key]["cursors"] = cursors
+            cursors, platform, channel, thread, repo = params
+            row = self._find(platform, channel, thread)
+            if row is not None and row["repo"] == repo:
+                row["cursors"] = cursors
             return []
         if query == Q_MIGRATE:
-            new_id, old_id = params
-            for chat_id, thread_id in [k for k in self.tables if k[0] == old_id]:
-                self.tables[new_id, thread_id] = self.tables.pop((chat_id, thread_id))
+            new_channel, new_chat_id, platform, old_channel = params
+            for row in self.rows:
+                if (row["platform"], row["channel"]) == (platform, old_channel):
+                    row["channel"], row["chat_id"] = new_channel, new_chat_id
             return []
         if query in (Q_VAULT_WRITE, Q_VAULT_READ, Q_VAULT_CLEAR):
             return self._run_vault(query, params)
@@ -222,15 +308,17 @@ class FakeToolsDb:
 
     def _run_vault(self, query: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
         if query == Q_VAULT_WRITE:
-            chat_id, thread_id, ciphertext = params
-            self._row((chat_id, thread_id))["token"] = bytes(ciphertext)
+            platform, channel, thread, chat_id, thread_id, ciphertext = params
+            self._upsert_row(platform, channel, thread, chat_id, thread_id)["token"] = bytes(
+                ciphertext
+            )
             return []
         if query == Q_VAULT_READ:
-            key = (params[0], params[1])
-            return [(self.tables[key]["token"],)] if key in self.tables else []
-        key = (params[0], params[1])  # Q_VAULT_CLEAR
-        if key in self.tables:
-            self.tables[key]["token"] = None
+            row = self._find(*params)
+            return [(row["token"],)] if row else []
+        row = self._find(*params)  # Q_VAULT_CLEAR
+        if row is not None:
+            row["token"] = None
         return []
 
 
@@ -255,20 +343,56 @@ async def test_bootstrap_creates_a_fresh_schema_without_migrating() -> None:
     assert not fake.schema_migrated  # fresh table is already up to date
 
 
-async def test_bootstrap_upgrades_an_old_single_key_table_in_place() -> None:
+async def test_bootstrap_upgrades_an_old_int_keyed_table_in_place() -> None:
     store, fake = make_store()
-    fake.schema_created = True  # pretend the table predates thread_id...
-    fake.thread_in_pk = False  # ...with a single-column primary key
+    fake.schema_created = True  # pretend the table predates the string identity...
+    fake.channel_in_pk = False  # ...keyed on (chat_id, thread_id)
+    fake.chat_id_nullable = False
     await store.bootstrap()
-    assert fake.schema_migrated  # primary key rebuilt, no data dropped
+    assert fake.schema_migrated  # string PK rebuilt + ints relaxed, no data dropped
+    assert fake.channel_in_pk  # channel is now the primary key
+    assert fake.chat_id_nullable  # ...and the ints may be NULL for future platforms
+
+
+async def test_bootstrap_backfills_a_legacy_int_only_row_and_is_idempotent() -> None:
+    """A pre-existing row with ONLY the ints set is readable via the string key."""
+    store, fake = make_store()
+    fake.schema_created = True  # an old table...
+    fake.channel_in_pk = False  # ...still keyed on the ints, capture NOT NULL
+    fake.chat_id_nullable = False
+    fake.seed_legacy(-100500, log_page="Legacy", events_enabled=1)
+    fake.seed_legacy(-100500, thread_id=7, log_page="Legacy topic")
+
+    await store.bootstrap()
+    await store.bootstrap()  # second pass must be a no-op (backfill guard holds)
+
+    loaded = await store.get(Scope("telegram", "-100500"))
+    assert loaded is not None
+    assert loaded.log_page == "Legacy"  # the string key resolves the pre-existing row
+    topic = await store.get(Scope("telegram", "-100500", "7"))
+    assert topic is not None
+    assert topic.log_page == "Legacy topic"  # thread_id 7 backfilled to thread "7"
+    listed = await store.list_event_enabled()
+    assert [p.scope for p in listed] == [Scope("telegram", "-100500")]
+
+
+async def test_upsert_dual_writes_both_identities() -> None:
+    """A freshly upserted row carries the string identity AND the legacy ints."""
+    store, fake = make_store()
+    await store.upsert(replace(PROFILE, scope=Scope("telegram", "-100500", "7")))
+    row = fake._find("telegram", "-100500", "7")
+    assert row is not None
+    assert (row["platform"], row["channel"], row["thread"]) == ("telegram", "-100500", "7")
+    assert (row["chat_id"], row["thread_id"]) == (-100500, 7)  # ints dual-written for rollback
 
 
 async def test_bootstrap_converts_the_capture_column_to_tri_state_once() -> None:
     store, fake = make_store()
     fake.schema_created = True  # a table from the NOT-NULL-DEFAULT-0 era
-    fake.thread_in_pk = True
-    fake._row((-1, 0))["capture_enabled"] = 0  # "never decided" back then
-    fake._row((-2, 0))["capture_enabled"] = 1
+    fake.channel_in_pk = False
+    fake.chat_id_nullable = False
+    fake.seed_legacy(-1, capture_enabled=0)  # "never decided" back then
+    fake.seed_legacy(-2, capture_enabled=1)
 
     await store.bootstrap()
 
@@ -347,7 +471,7 @@ async def test_list_event_enabled_filters() -> None:
 def test_scan_queries_request_a_stable_order() -> None:
     """The scheduler/notifier rotation relies on a deterministic scan order."""
     for query in (Q_ACTIONS_LIST, Q_LIST_EVENT_ENABLED, Q_LIST_CAPTURE_ENABLED):
-        assert query.rstrip().endswith("ORDER BY chat_id, thread_id")
+        assert query.rstrip().endswith("ORDER BY platform, channel, thread")
 
 
 async def test_subscribe_code_round_trips_and_resolves() -> None:
@@ -377,7 +501,9 @@ async def test_tokens_are_encrypted_at_rest_and_roundtrip() -> None:
     store, fake = make_store()
     await store.store_token(Scope("telegram", "-100500"), "ghp_secret")
 
-    stored = fake.tables[-100500, 0]["token"]
+    row = fake._find("telegram", "-100500", "")
+    assert row is not None
+    stored = row["token"]
     assert b"ghp_secret" not in stored  # ciphertext only in the database
     assert await store.fetch_token(Scope("telegram", "-100500")) == "ghp_secret"
 

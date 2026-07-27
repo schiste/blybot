@@ -551,6 +551,7 @@ def make_capture_handlers(
         limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
         clock=clock,
         counters=Counters(),
+        max_chars=4096,
     )
     return handlers, store, archive
 

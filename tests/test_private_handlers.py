@@ -202,6 +202,12 @@ async def test_privacy_statement_covers_the_guarantees() -> None:
     assert "Toolforge" in sent
     assert "https://github.com/schiste/blybot" in sent
     assert "AGPL" in sent
+    # The subscription carve-out must be disclosed honestly: the copy no
+    # longer promises "no user IDs ever", and it names /subscribe as the
+    # one place a Telegram identifier is durably kept (R6 §21.1).
+    assert "no user IDs or usernames — ever" not in sent
+    assert "/subscribe" in sent
+    assert "/unsubscribe" in sent
 
 
 async def test_private_commands_outside_private_chats_are_ignored() -> None:

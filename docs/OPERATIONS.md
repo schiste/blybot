@@ -1,7 +1,8 @@
 # Operations runbook
 
 How to run one or many Blybot instances on Wikimedia Toolforge. An
-**instance** = one Telegram bot identity + one config file + one
+**instance** = one bot identity (Telegram or Discord, chosen by
+`PLATFORM` — see "Choosing a platform" below) + one config file + one
 continuous job, publishing to its own wiki pages. All instances on a
 tool share the repository checkout, the virtualenv, and the on-wiki
 account.

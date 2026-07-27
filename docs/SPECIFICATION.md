@@ -1,12 +1,12 @@
 # Product Spec: Blybot
 
-**A privacy-first Telegram bot that publishes explicitly selected messages to a Meta-wiki page, anonymously.**
+**A privacy-first chat bot — Telegram or Discord — that publishes explicitly selected messages to a Meta-wiki page, anonymously.**
 
 | | |
 |---|---|
 | Status | Draft for review |
 | Name | Blybot |
-| Platform | Telegram Bot API + MediaWiki API (Meta-wiki) |
+| Platforms | Telegram Bot API or Discord gateway (one per instance, see §22) + MediaWiki API (Meta-wiki) |
 | Runtime | Wikimedia Toolforge (continuous job) |
 | Version | v1 scope defined below; later phases parked |
 

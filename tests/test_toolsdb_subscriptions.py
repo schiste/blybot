@@ -71,6 +71,27 @@ async def test_add_dual_writes_both_identities() -> None:
     assert (row["dm_chat_id"], row["chat_id"], row["thread_id"]) == (500, -100, 0)
 
 
+async def test_add_a_discord_subscription_leaves_the_int_columns_null() -> None:
+    """A non-telegram subscription is keyed by string identity; its ints stay NULL."""
+    store, db = make()
+    await store.add(
+        Subscription(
+            sub_id="d1",
+            dm=Scope("discord", "900"),
+            scope=Scope("discord", "123"),
+            schedule=Schedule(kind="daily", hour=8),
+            recipe="summarize",
+            lang="en",
+        )
+    )
+    row = db.rows["d1"]
+    assert (row["dm_platform"], row["dm_channel"]) == ("discord", "900")
+    assert (row["platform"], row["channel"]) == ("discord", "123")
+    assert (row["dm_chat_id"], row["chat_id"], row["thread_id"]) == (None, None, None)
+    (mine,) = await store.list_for_user(Scope("discord", "900"))
+    assert mine.scope == Scope("discord", "123")
+
+
 async def test_add_list_and_round_trip() -> None:
     store, _ = make()
     await store.add(sub("s1", dm=500))

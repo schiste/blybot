@@ -89,6 +89,19 @@ async def test_upsert_dual_writes_both_identities() -> None:
     assert (row["chat_id"], row["thread_id"]) == (-100500, 7)  # ints dual-written for rollback
 
 
+async def test_upsert_a_discord_scope_leaves_the_legacy_int_columns_null() -> None:
+    """A non-telegram scope is stored + read by its string identity; ints stay NULL."""
+    store, fake = make_store()
+    await store.upsert(GroupProfile(scope=Scope("discord", "123", "456"), log_page="D"))
+    row = fake._find("discord", "123", "456")
+    assert row is not None
+    assert (row["chat_id"], row["thread_id"]) == (None, None)
+    got = await store.get(Scope("discord", "123", "456"))
+    assert got is not None
+    assert got.scope == Scope("discord", "123", "456")
+    assert got.log_page == "D"
+
+
 async def test_bootstrap_converts_the_capture_column_to_tri_state_once() -> None:
     store, fake = make_store()
     fake.schema_created = True  # a table from the NOT-NULL-DEFAULT-0 era

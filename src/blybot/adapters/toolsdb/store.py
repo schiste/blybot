@@ -46,14 +46,22 @@ def _keys(scope: Scope) -> tuple[str, str, str]:
     return scope.platform, scope.channel, scope.thread
 
 
-def _target(scope: Scope) -> tuple[int, int]:
-    """Split a telegram :class:`Scope` into its legacy ``(chat_id, thread_id)`` pair.
+def _target(scope: Scope) -> tuple[int | None, int | None]:
+    """The legacy ``(chat_id, thread_id)`` ints for a telegram scope.
 
-    Retained only for the dual-write of the (now nullable) int columns;
-    the string identity from :func:`_keys` is what every read keys on.
+    Only telegram scopes have these — a non-telegram platform (e.g. Discord)
+    leaves the nullable int columns ``NULL`` and is addressed purely by the
+    string identity from :func:`_keys`. Retained only for the dual-write that
+    keeps a telegram row readable by the prior release after a rollback.
     """
-    assert scope.platform == _PLATFORM  # noqa: S101 -- single-platform invariant this PR
+    if scope.platform != _PLATFORM:
+        return None, None
     return int(scope.channel), int(scope.thread) if scope.thread else 0
+
+
+def _legacy_dm_id(dm: Scope) -> int | None:
+    """The legacy ``dm_chat_id`` int for a telegram DM scope, else ``None``."""
+    return int(dm.channel) if dm.platform == _PLATFORM else None
 
 
 # Final shape for a brand-new deployment: string columns present, int

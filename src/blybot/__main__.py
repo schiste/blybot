@@ -50,6 +50,7 @@ from blybot.domain.ports import StorageError
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging, log_event
+from blybot.services.analysis_run import AnalysisService
 from blybot.services.analyze import (
     ArchiveWindowSource,
     ChatReplySink,
@@ -334,11 +335,13 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
 
     if store is not None and archive is not None:
         analysis_handlers = AnalysisHandlers(
-            engine=engine,
+            analysis=AnalysisService(
+                engine=engine,
+                limiter=SlidingWindowLimiter(clock=clock, limit=6, window=timedelta(hours=1)),
+                clock=clock,
+                counters=counters,
+            ),
             groups=group_policy,
-            limiter=SlidingWindowLimiter(clock=clock, limit=6, window=timedelta(hours=1)),
-            clock=clock,
-            counters=counters,
         )
 
     commands = CommandService(
@@ -506,6 +509,15 @@ def run_discord(config: Config) -> int:
     """
     counters = Counters()
     clock = SystemClock()
+    sanitizer = WikitextSanitizer()
+    publisher = MetaWikiPublisher(
+        api_url=config.wiki_api_url,
+        username=config.wiki_username,
+        botpassword=config.wiki_botpassword,
+        user_agent=config.user_agent,
+        max_attempts=config.wiki_max_retries,
+        counters=counters,
+    )
     group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
 
     store: ToolsDbStore | None = None
@@ -533,6 +545,7 @@ def run_discord(config: Config) -> int:
     llm_client: LiftWingClient | None = None
     capture_service: CaptureService | None = None
     masker: DiscordAuthorMasker | None = None
+    analysis_service: AnalysisService | None = None
     collectors: list[tuple[MessageCollector, str]] = []
     if store is not None and archive is not None and subscriptions_store is not None:
         llm_client = LiftWingClient(
@@ -559,9 +572,27 @@ def run_discord(config: Config) -> int:
                 ),
                 "stats": StatsTransform(),
             },
-            sinks={"reply": ChatReplySink(max_chars=DISCORD_CAPABILITIES.max_message_chars)},
+            sinks={
+                # The on-demand analyses publish to the wiki (mirroring
+                # Telegram); the reply sink stays for scheduled digest DMs.
+                "wiki_section": WikiSectionSink(
+                    publisher=publisher,
+                    sanitizer=sanitizer,
+                    resolve_page=explicit_page_resolver(directory),
+                    page_url_for=config.page_url,
+                    edit_summary=config.edit_summary,
+                    bot_name=config.bot_name,
+                ),
+                "reply": ChatReplySink(max_chars=DISCORD_CAPABILITIES.max_message_chars),
+            },
             counters=counters,
             clock=clock,
+        )
+        analysis_service = AnalysisService(
+            engine=engine,
+            limiter=SlidingWindowLimiter(clock=clock, limit=6, window=timedelta(hours=1)),
+            clock=clock,
+            counters=counters,
         )
         capture_service = CaptureService(
             store=store,
@@ -616,10 +647,12 @@ def run_discord(config: Config) -> int:
         capture=capture_service,
         masker=masker,
         subscriptions=subscriptions_store,
+        analysis=analysis_service,
         default_lang=config.llm_default_lang,
     )
 
     async def release_clients() -> None:
+        await publisher.aclose()
         if llm_client is not None:
             await llm_client.aclose()
 

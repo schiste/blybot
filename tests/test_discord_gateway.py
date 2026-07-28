@@ -24,15 +24,26 @@ from blybot.adapters.discord.gateway import (
     build_gateway_client,
     default_intents,
 )
-from blybot.domain.models import ConsentMode, GroupProfile, Schedule, Scope
+from blybot.domain.models import ConsentMode, GroupProfile, OutboundMessage, Schedule, Scope
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
+from blybot.services import analysis_run as ar
 from blybot.services import commands as cmd
+from blybot.services.analysis_run import AnalysisService
 from blybot.services.capture import CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
+from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
-from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles, InMemorySubscriptions
+from tests.fakes import (
+    FakeClock,
+    FakeSink,
+    FakeSource,
+    InMemoryArchive,
+    InMemoryProfiles,
+    InMemorySubscriptions,
+    SuffixTransform,
+)
 
 if TYPE_CHECKING:
     from blybot.domain.ports import ProfileStore
@@ -60,6 +71,7 @@ def _make_gateway(
     capture: CaptureService | None = None,
     masker: DiscordAuthorMasker | None = None,
     subscriptions: InMemorySubscriptions | None = None,
+    analysis: AnalysisService | None = None,
     default_lang: str = "en",
 ) -> DiscordGateway:
     """A gateway wired to a matching CommandService (identity page_url_for)."""
@@ -77,7 +89,35 @@ def _make_gateway(
         capture=capture,
         masker=masker,
         subscriptions=subscriptions,
+        analysis=analysis,
         default_lang=default_lang,
+    )
+
+
+_CONFIRMATION = OutboundMessage(scope=_SCOPE, text="Published: url")
+
+
+def _analysis_service(source: FakeSource | None = None) -> AnalysisService:
+    """An AnalysisService whose engine mirrors the on-demand recipe wiring."""
+    clock = FakeClock()
+    engine = ActionEngine(
+        sources={"archive_window": source or FakeSource(payload="transcript")},
+        transforms={"prompt": SuffixTransform(), "stats": SuffixTransform()},
+        sinks={"wiki_section": FakeSink(messages=(_CONFIRMATION,))},
+        counters=Counters(),
+        clock=clock,
+    )
+    return AnalysisService(
+        engine=engine,
+        limiter=SlidingWindowLimiter(clock=clock, limit=10, window=timedelta(hours=1)),
+        clock=clock,
+        counters=Counters(),
+    )
+
+
+def _analysis_gateway(analysis: AnalysisService | None) -> DiscordGateway:
+    return _make_gateway(
+        _directory(InMemoryProfiles()), GroupPolicy(allowed=set()), analysis=analysis
     )
 
 
@@ -273,6 +313,33 @@ async def test_setpage_command_reports_storage_down() -> None:
     assert reply == cmd.REPLY_STORAGE_DOWN
 
 
+# --- DiscordGateway.analyze_command ------------------------------------------
+
+
+async def test_analyze_reports_when_analyses_are_unavailable() -> None:
+    gateway = _analysis_gateway(analysis=None)  # deployment without an archive
+    reply = await gateway.analyze_command(
+        _CHANNEL, None, command="summarize", recipe="summarize", is_admin=True
+    )
+    assert reply == gw.REPLY_ANALYSES_UNAVAILABLE
+
+
+async def test_analyze_refuses_non_admins() -> None:
+    gateway = _analysis_gateway(_analysis_service())
+    reply = await gateway.analyze_command(
+        _CHANNEL, None, command="summarize", recipe="summarize", is_admin=False
+    )
+    assert reply == ar.REPLY_NOT_ADMIN
+
+
+async def test_analyze_publishes_and_returns_the_confirmation() -> None:
+    gateway = _analysis_gateway(_analysis_service())
+    reply = await gateway.analyze_command(
+        _CHANNEL, None, command="stats", recipe="stats", is_admin=True
+    )
+    assert reply == "Published: url"
+
+
 # --- DiscordGateway subscription commands ------------------------------------
 
 
@@ -446,11 +513,20 @@ def _command(client: DiscordGatewayClient, name: str) -> Any:
     return cast("Any", client.tree.get_command(name))
 
 
-def test_build_registers_the_five_slash_commands() -> None:
+def test_build_registers_every_slash_command() -> None:
     gateway, _store, _archive, _capture = _capture_gateway()
     client = build_gateway_client(gateway)
     names = sorted(command.name for command in client.tree.get_commands())
-    assert names == ["capture", "mysubs", "setpage", "subscribe", "unsubscribe"]
+    assert names == [
+        "capture",
+        "mysubs",
+        "setpage",
+        "stats",
+        "subscribe",
+        "summarize",
+        "talkingpoints",
+        "unsubscribe",
+    ]
     assert client.intents.message_content is True  # default privileged intents
 
 
@@ -563,6 +639,84 @@ async def test_setpage_slash_command_answers_ephemerally() -> None:
     await _command(client, "setpage").callback(interaction, "WikiProject Foo")
     assert interaction.response.sent[0][1] is True
     assert store.profiles[_SCOPE].log_page == "WikiProject Foo/Discord logs"
+
+
+class _DeferInteraction:
+    """A slash interaction recording the defer→run→follow-up ordering.
+
+    Its ``response.defer`` and ``followup.send`` append to a shared event
+    log, and the analysis engine's source appends ``"run"`` between them, so
+    a test can prove the interaction is acknowledged *before* the long
+    analysis starts — Discord kills an un-deferred interaction after 3s.
+    """
+
+    def __init__(self, channel: object, events: list[Any], *, admin: bool = True) -> None:
+        self.channel = channel
+        self.user = SimpleNamespace(guild_permissions=SimpleNamespace(administrator=admin))
+        self._events = events
+        self.response = SimpleNamespace(defer=self._defer)
+        self.followup = SimpleNamespace(send=self._send)
+
+    async def _defer(self) -> None:
+        self._events.append("defer")
+
+    async def _send(self, content: str) -> None:
+        self._events.append(("send", content))
+
+
+class _RecordingSource:
+    """An archive-window source that records the run order and the built spec."""
+
+    def __init__(self, events: list[Any], specs: list[Any]) -> None:
+        self._events = events
+        self._specs = specs
+
+    async def fetch(self, context: Any) -> str:
+        self._events.append("run")
+        self._specs.append(context.spec)
+        return "transcript"
+
+
+async def _drive_analysis(name: str) -> tuple[list[Any], list[Any]]:
+    events: list[Any] = []
+    specs: list[Any] = []
+    analysis = _analysis_service(source=cast("Any", _RecordingSource(events, specs)))
+    gateway = _analysis_gateway(analysis)
+    client = build_gateway_client(gateway)
+    interaction = _DeferInteraction(SimpleNamespace(id=_CHANNEL), events)
+    await _command(client, name).callback(cast("Any", interaction))
+    return events, specs
+
+
+async def test_summarize_slash_command_defers_before_running_then_follows_up() -> None:
+    events, specs = await _drive_analysis("summarize")
+    # Acknowledged first, THEN the long run, THEN the confirmation follow-up.
+    assert events == ["defer", "run", ("send", "Published: url")]
+    assert specs[0].trigger.command == "summarize"
+    assert specs[0].transforms[0].param("template") == "summarize"
+
+
+async def test_stats_slash_command_runs_the_stats_recipe() -> None:
+    events, specs = await _drive_analysis("stats")
+    assert events == ["defer", "run", ("send", "Published: url")]
+    assert specs[0].transforms[0].name == "stats"  # the deterministic recipe
+
+
+async def test_talkingpoints_slash_command_maps_to_the_talking_points_recipe() -> None:
+    events, specs = await _drive_analysis("talkingpoints")
+    assert events == ["defer", "run", ("send", "Published: url")]
+    assert specs[0].transforms[0].param("template") == "talking_points"
+
+
+async def test_analysis_slash_command_refuses_a_non_admin_after_deferring() -> None:
+    events: list[Any] = []
+    gateway = _analysis_gateway(_analysis_service())
+    client = build_gateway_client(gateway)
+    interaction = _DeferInteraction(SimpleNamespace(id=_CHANNEL), events, admin=False)
+    await _command(client, "summarize").callback(cast("Any", interaction))
+    # Still deferred first (the deadline applies before the admit check),
+    # then the refusal arrives as the follow-up.
+    assert events == ["defer", ("send", ar.REPLY_NOT_ADMIN)]
 
 
 async def test_subscribe_slash_command_uses_the_callers_dm_channel() -> None:

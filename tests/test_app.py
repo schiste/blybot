@@ -34,6 +34,7 @@ from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
 from blybot.domain.models import CapturedMessage, ConsentMode, GroupProfile, OutboundMessage, Scope
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
+from blybot.services.analysis_run import AnalysisService
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureReminder, CaptureService
 from blybot.services.commands import CommandService
@@ -369,13 +370,15 @@ def test_run_polling_subscribes_channel_posts_only_with_capture(
 
 def make_analysis_handlers() -> Any:
     return AnalysisHandlers(
-        engine=ActionEngine(
-            sources={}, transforms={}, sinks={}, counters=Counters(), clock=FakeClock()
+        analysis=AnalysisService(
+            engine=ActionEngine(
+                sources={}, transforms={}, sinks={}, counters=Counters(), clock=FakeClock()
+            ),
+            limiter=SlidingWindowLimiter(clock=FakeClock(), limit=6, window=timedelta(hours=1)),
+            clock=FakeClock(),
+            counters=Counters(),
         ),
         groups=GroupPolicy(allowed=set()),
-        limiter=SlidingWindowLimiter(clock=FakeClock(), limit=6, window=timedelta(hours=1)),
-        clock=FakeClock(),
-        counters=Counters(),
     )
 
 

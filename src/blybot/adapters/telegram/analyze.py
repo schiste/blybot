@@ -1,11 +1,14 @@
 """On-demand analysis commands: /summarize, /talkingpoints, /stats, /run.
 
-Each command builds a one-shot action (same recipes and parameters as
-``/action add``) and runs it through the engine immediately. Commands
-are admin-gated (analyses cost inference calls and publish publicly)
-and throttled per chat. The bot acknowledges before running — a chunked
-analysis can take minutes — and the pipeline's confirmation message
-(with the published page URL) lands when it finishes.
+Each command runs a one-shot analysis (same recipes and parameters as
+``/action add``) through the neutral
+:class:`~blybot.services.analysis_run.AnalysisService` and publishes the
+result to the scope's wiki page. These handlers keep only the Telegram
+bits — resolving the admin scope, sending the "analysing…" progress
+pre-message, and routing the final reply into the forum topic; the run
+logic (admit → throttle → parse → run → outcome) lives once in the
+service (issue #41, contract-first). Commands are admin-gated (analyses
+cost inference calls and publish publicly) and throttled per chat.
 """
 
 from __future__ import annotations
@@ -21,26 +24,18 @@ from blybot.adapters.telegram._common import (
     thread_of,
 )
 from blybot.adapters.telegram.admin import REPLY_NOT_ADMIN, is_group_admin
-from blybot.domain.ports import ActionError
-from blybot.observability import log_event
-from blybot.services.actions import ActionParseError, command_action
 
 if TYPE_CHECKING:
     from telegram import Update
     from telegram.ext import ContextTypes
 
     from blybot.domain.models import Scope
-    from blybot.domain.ports import Clock
-    from blybot.observability import Counters
-    from blybot.services.engine import ActionEngine
-    from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
+    from blybot.services.analysis_run import AnalysisService
+    from blybot.services.policy import GroupPolicy
 
-REPLY_THROTTLED: Final = "Too many analyses recently — try again later."
 REPLY_WORKING: Final = (
     "Analyzing… a large window can take a few minutes. I'll post the result here."
 )
-REPLY_FAILED: Final = "The analysis failed and nothing was published — try again later."
-REPLY_EMPTY: Final = "Nothing to analyze: the archive has no messages in that window."
 REPLY_RUN_USAGE: Final = "Usage: /run <template> [24h|7d] [key=value …]"
 
 
@@ -48,11 +43,8 @@ REPLY_RUN_USAGE: Final = "Usage: /run <template> [24h|7d] [key=value …]"
 class AnalysisHandlers:
     """Group command handlers driving one-shot analysis pipelines."""
 
-    engine: ActionEngine
+    analysis: AnalysisService
     groups: GroupPolicy
-    limiter: SlidingWindowLimiter
-    clock: Clock
-    counters: Counters
 
     async def on_summarize(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Summarize the scope's recent archive onto its wiki page."""
@@ -87,35 +79,24 @@ class AnalysisHandlers:
             return
         chat_id, thread_id = telegram_target(scope)
         thread_id = thread_id or 0
-        if not self.limiter.allow("analysis", chat_id):
-            await send_threaded(context.bot, chat_id, thread_id, REPLY_THROTTLED)
-            return
         tokens = arg_tokens if arg_tokens is not None else list(context.args or ())
-        try:
-            spec = command_action(command, recipe, tokens)
-        except ActionParseError as error:
-            await send_threaded(context.bot, chat_id, thread_id, str(error))
-            return
-        await send_threaded(context.bot, chat_id, thread_id, REPLY_WORKING)
-        try:
-            outcome = await self.engine.run(scope, spec, self.clock.now())
-        except ActionError as error:
-            await send_threaded(context.bot, chat_id, thread_id, str(error))
-            return
-        except Exception:
-            # Adapter failures (wiki write, storage) after retries: tell
-            # the admin plainly, log operationally. Deliberately broad —
-            # a command handler must never let an exception escape.
-            self.counters.increment("analyses_failed")
-            log_event("analysis_command", "error")
-            await send_threaded(context.bot, chat_id, thread_id, REPLY_FAILED)
-            return
-        if not outcome.messages:
-            await send_threaded(context.bot, chat_id, thread_id, REPLY_EMPTY)
-            return
-        for message in outcome.messages:
-            target_chat, target_thread = telegram_target(message.scope)
-            await send_threaded(context.bot, target_chat, target_thread or 0, message.text)
+
+        async def announce() -> None:
+            # The "analysing…" pre-message lands only when the run is
+            # committed to — the service calls this after the throttle and
+            # a clean parse, so a refusal or parse error never precedes it.
+            await send_threaded(context.bot, chat_id, thread_id, REPLY_WORKING)
+
+        # The admin scope resolved above, so the caller is an admin here.
+        result = await self.analysis.run_analysis(
+            scope,
+            is_admin=True,
+            command=command,
+            recipe=recipe,
+            tokens=tokens,
+            on_started=announce,
+        )
+        await send_threaded(context.bot, chat_id, thread_id, result.text)
 
     async def _admin_scope(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE

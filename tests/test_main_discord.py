@@ -66,6 +66,7 @@ async def test_discord_full_deployment_wires_every_neutral_service(
     assert gateway.capture is not None  # capture ingestion is live
     assert gateway.masker is not None
     assert gateway.subscriptions is not None
+    assert gateway.analysis is not None  # on-demand analyses are wired
     assert isinstance(gateway.directory.store, ToolsDbStore)
 
     collectors = _collectors(client)
@@ -73,7 +74,10 @@ async def test_discord_full_deployment_wires_every_neutral_service(
     engine = collectors["sub_tick"].engine
     assert set(engine.sources) == {"archive_window"}
     assert set(engine.transforms) == {"prompt", "stats"}
-    assert set(engine.sinks) == {"reply"}
+    # The wiki_section sink lets the on-demand analyses publish to the wiki,
+    # exactly like Telegram; the reply sink stays for scheduled digest DMs.
+    assert set(engine.sinks) == {"wiki_section", "reply"}
+    assert gateway.analysis.engine is engine  # analyses run through this engine
 
     # The bootstrap closure covers all three stores.
     bootstrap = cast("Any", client._on_setup).keywords["bootstrap"]
@@ -94,6 +98,7 @@ async def test_discord_store_only_deployment_has_no_capture(
     gateway = client._gateway
     assert gateway.capture is None  # no pseudonym key: capture stays off
     assert gateway.subscriptions is None
+    assert gateway.analysis is None  # analyses need the archive too
     assert _collectors(client) == {}
 
     # bootstrap runs only the profile store (archive/subs were never built).

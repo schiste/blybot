@@ -278,10 +278,15 @@ async def _respond(interaction: discord.Interaction, text: str) -> None:
 
 
 def default_intents() -> discord.Intents:
-    """The gateway intents: message content (privileged) + members."""
+    """The gateway intents: message content (the one privileged intent capture needs).
+
+    Members/presence are deliberately NOT requested — join detection is not
+    wired on Discord, so keeping to the single privileged intent is least
+    privilege and means an operator only has to enable Message Content in the
+    Developer Portal.
+    """
     intents = discord.Intents.default()
     intents.message_content = True
-    intents.members = True
     return intents
 
 

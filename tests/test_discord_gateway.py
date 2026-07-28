@@ -377,10 +377,11 @@ async def test_unsubscribe_reports_storage_down() -> None:
 # --- helpers on the shell ----------------------------------------------------
 
 
-def test_default_intents_enable_the_privileged_gateway_intents() -> None:
+def test_default_intents_request_only_message_content() -> None:
+    """Least privilege: message content is the one privileged intent we need."""
     intents = default_intents()
     assert intents.message_content is True
-    assert intents.members is True
+    assert intents.members is False  # join detection not wired — do not request it
 
 
 def test_channel_ids_splits_threads_from_plain_channels() -> None:

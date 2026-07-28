@@ -8,7 +8,18 @@ from typing import Any
 import pytest
 
 from blybot.adapters.toolsdb.archive import (
+    MESSAGES_ADD_CHANNEL,
+    MESSAGES_ADD_PLATFORM,
+    MESSAGES_ADD_THREAD,
+    MESSAGES_BACKFILL_IDENTITY,
+    MESSAGES_CHAT_ID_NULLABLE,
+    MESSAGES_REBUILD_BY_TIME,
+    MESSAGES_REBUILD_PK,
     MESSAGES_SCHEMA,
+    MESSAGES_THREAD_ID_NULLABLE,
+    Q_CHANNEL_IN_BY_TIME,
+    Q_CHANNEL_IN_PK,
+    Q_CHAT_ID_NULLABLE,
     Q_COUNT,
     Q_COUNT_BEFORE,
     Q_MIGRATE,
@@ -27,12 +38,51 @@ NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
 
 
 class FakeMessagesDb:
-    """Interprets the archive's exact query constants against a dict."""
+    """Interprets the archive's exact query constants against a list of rows.
+
+    Rows are dicts carrying both the string identity and the legacy ints,
+    so the fake can model dual-write and the in-place migration.
+    """
 
     def __init__(self) -> None:
-        self.rows: dict[tuple[int, int, int], tuple[Any, ...]] = {}
+        self.rows: list[dict[str, Any]] = []
+        self.channel_in_pk = False  # old table: PK is still (chat_id, thread_id, message_id)
+        self.channel_in_by_time = False  # old table: by_time is still (chat_id, thread_id, ...)
+        self.chat_id_nullable = False  # old table: the ints are NOT NULL
         self.schema_created = False
+        self.schema_migrated = False
         self.fail = False
+
+    def seed_legacy(
+        self, chat_id: int, thread_id: int, message_id: int, posted_at: Any, **extra: Any
+    ) -> dict[str, Any]:
+        """Append a pre-migration row: only the ints set, string key blank."""
+        row = {
+            "platform": "telegram",
+            "channel": "",
+            "thread": "",
+            "chat_id": chat_id,
+            "thread_id": thread_id,
+            "message_id": message_id,
+            # the DATETIME column holds naive UTC, as the adapter writes it
+            "posted_at": posted_at.astimezone(UTC).replace(tzinfo=None),
+            "author": extra.get("author", ""),
+            "kind": extra.get("kind", "text"),
+            "text": extra.get("text"),
+            "reply_to": extra.get("reply_to"),
+        }
+        self.rows.append(row)
+        return row
+
+    def _scope_rows(
+        self, platform: str, channel: str, thread: str, before: Any = None
+    ) -> list[dict[str, Any]]:
+        return [
+            row
+            for row in self.rows
+            if (row["platform"], row["channel"], row["thread"]) == (platform, channel, thread)
+            and (before is None or row["posted_at"] < before)
+        ]
 
     def run_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
         for query, params in statements:
@@ -44,57 +94,119 @@ class FakeMessagesDb:
             raise OSError(msg)
         assert query.count("%s") == len(params), f"placeholder/param mismatch: {query!r}"
         if query == MESSAGES_SCHEMA:
-            self.schema_created = True
+            if not self.schema_created:  # CREATE IF NOT EXISTS: no-op on old tables
+                self.schema_created = True
+                self.channel_in_pk = True  # a fresh table already has the string identity...
+                self.channel_in_by_time = True
+                self.chat_id_nullable = True  # ...and nullable ints
+            return []
+        if query in (MESSAGES_ADD_PLATFORM, MESSAGES_ADD_CHANNEL, MESSAGES_ADD_THREAD):
+            return []  # column add: no-op (columns always present in the fake row)
+        if query == MESSAGES_BACKFILL_IDENTITY:
+            for row in self.rows:
+                if row["channel"] == "" and row["chat_id"] is not None:
+                    row["channel"] = str(row["chat_id"])
+                    row["thread"] = "" if row["thread_id"] == 0 else str(row["thread_id"])
+            return []
+        if query == Q_CHANNEL_IN_PK:
+            return [(1 if self.channel_in_pk else 0,)]
+        if query == MESSAGES_REBUILD_PK:
+            self.channel_in_pk = True
+            self.schema_migrated = True
+            return []
+        if query == Q_CHANNEL_IN_BY_TIME:
+            return [(1 if self.channel_in_by_time else 0,)]
+        if query == MESSAGES_REBUILD_BY_TIME:
+            self.channel_in_by_time = True
+            self.schema_migrated = True
+            return []
+        if query == Q_CHAT_ID_NULLABLE:
+            return [("YES" if self.chat_id_nullable else "NO",)]
+        if query in (MESSAGES_CHAT_ID_NULLABLE, MESSAGES_THREAD_ID_NULLABLE):
+            self.chat_id_nullable = True
+            self.schema_migrated = True
             return []
         if query == Q_STORE:
-            chat_id, thread_id, message_id = params[0], params[1], params[2]
-            self.rows.setdefault((chat_id, thread_id, message_id), params)  # INSERT IGNORE
-            return []
+            return self._store(params)
         if query == Q_WINDOW:
-            chat_id, thread_id, since, until = params
+            platform, channel, thread, since, until = params
             hits = [
-                (row[2], row[3], row[4], row[5], row[6], row[7])
-                for row in self.rows.values()
-                if row[0] == chat_id and row[1] == thread_id and since <= row[3] < until
+                (
+                    row["message_id"],
+                    row["posted_at"],
+                    row["author"],
+                    row["kind"],
+                    row["text"],
+                    row["reply_to"],
+                )
+                for row in self._scope_rows(platform, channel, thread)
+                if since <= row["posted_at"] < until
             ]
             return sorted(hits, key=lambda row: (row[1], row[0]))
         if query == Q_COUNT:
-            return [(len(self._scope_rows(params)),)]
+            return [(len(self._scope_rows(*params)),)]
         if query == Q_COUNT_BEFORE:
-            return [(len(self._scope_rows(params[:2], before=params[2])),)]
+            return [(len(self._scope_rows(params[0], params[1], params[2], before=params[3])),)]
         if query == Q_PURGE:
-            for key in self._scope_rows(params):
-                del self.rows[key]
+            for row in self._scope_rows(*params):
+                self.rows.remove(row)
             return []
         if query == Q_PURGE_BEFORE:
-            for key in self._scope_rows(params[:2], before=params[2]):
-                del self.rows[key]
+            for row in self._scope_rows(params[0], params[1], params[2], before=params[3]):
+                self.rows.remove(row)
             return []
         if query == Q_TOTAL:
             return [(len(self.rows),)]
         if query == Q_MIGRATE_CLEAR:
-            (new_chat_id,) = params
-            for key in [k for k in self.rows if k[0] == new_chat_id]:
-                del self.rows[key]
+            platform, channel = params
+            self.rows = [
+                r for r in self.rows if (r["platform"], r["channel"]) != (platform, channel)
+            ]
             return []
         if query == Q_MIGRATE:
-            new_chat_id, old_chat_id = params
-            for key in [k for k in self.rows if k[0] == old_chat_id]:
-                row = self.rows.pop(key)
-                self.rows[new_chat_id, key[1], key[2]] = (new_chat_id, *row[1:])
+            new_channel, new_chat_id, platform, old_channel = params
+            for row in self.rows:
+                if (row["platform"], row["channel"]) == (platform, old_channel):
+                    row["channel"], row["chat_id"] = new_channel, new_chat_id
             return []
         msg = f"unexpected query: {query!r}"
         raise AssertionError(msg)
 
-    def _scope_rows(
-        self, params: tuple[Any, ...], before: Any = None
-    ) -> list[tuple[int, int, int]]:
-        chat_id, thread_id = params
-        return [
-            key
-            for key, row in self.rows.items()
-            if key[0] == chat_id and key[1] == thread_id and (before is None or row[3] < before)
-        ]
+    def _store(self, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+        (
+            platform,
+            channel,
+            thread,
+            chat_id,
+            thread_id,
+            message_id,
+            posted_at,
+            author,
+            kind,
+            text,
+            reply_to,
+        ) = params
+        key = (platform, channel, thread, message_id)
+        if any(
+            (r["platform"], r["channel"], r["thread"], r["message_id"]) == key for r in self.rows
+        ):
+            return []  # INSERT IGNORE: first stored version wins
+        self.rows.append(
+            {
+                "platform": platform,
+                "channel": channel,
+                "thread": thread,
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "message_id": message_id,
+                "posted_at": posted_at,
+                "author": author,
+                "kind": kind,
+                "text": text,
+                "reply_to": reply_to,
+            }
+        )
+        return []
 
 
 def make_archive() -> tuple[ToolsDbArchive, FakeMessagesDb]:
@@ -116,6 +228,39 @@ async def test_bootstrap_creates_the_messages_table() -> None:
     archive, db = make_archive()
     await archive.bootstrap()
     assert db.schema_created
+    assert not db.schema_migrated  # a fresh table is already in final shape
+
+
+async def test_bootstrap_backfills_a_legacy_int_only_row_and_is_idempotent() -> None:
+    """A pre-existing message with ONLY the ints set is readable via the string key."""
+    archive, db = make_archive()
+    db.schema_created = True  # an old int-keyed table...
+    db.channel_in_pk = False
+    db.channel_in_by_time = False
+    db.chat_id_nullable = False
+    db.seed_legacy(-1, 0, 1, NOW, text="legacy", author="abc")
+    db.seed_legacy(-1, 7, 2, NOW, author="topic")
+
+    await archive.bootstrap()
+    await archive.bootstrap()  # second pass is a no-op (backfill guard holds)
+
+    span = (NOW - timedelta(hours=1), NOW + timedelta(hours=1))
+    window = await archive.window(Scope("telegram", "-1"), *span)
+    assert [m.message_id for m in window] == [1]  # channel default resolves the pre-existing row
+    topic = await archive.window(Scope("telegram", "-1", "7"), *span)
+    assert [m.message_id for m in topic] == [2]  # thread_id 7 backfilled to thread "7"
+    assert db.schema_migrated
+
+
+async def test_store_dual_writes_both_identities() -> None:
+    """A freshly stored message carries the string identity AND the legacy ints."""
+    archive, db = make_archive()
+    await archive.store(
+        CapturedMessage(scope=Scope("telegram", "-1", "7"), message_id=1, posted_at=NOW, author="x")
+    )
+    (row,) = db.rows
+    assert (row["platform"], row["channel"], row["thread"]) == ("telegram", "-1", "7")
+    assert (row["chat_id"], row["thread_id"]) == (-1, 7)  # ints dual-written for rollback
 
 
 async def test_messages_round_trip_with_utc_restored() -> None:
@@ -233,4 +378,7 @@ async def test_migrate_rekeys_every_topic_and_clears_collisions() -> None:
 
     await archive.migrate(Scope("telegram", "-1"), Scope("telegram", "-100999"))
 
-    assert sorted(db.rows) == [(-100999, 0, 1), (-100999, 7, 2)]
+    assert sorted((r["channel"], r["thread"], r["message_id"]) for r in db.rows) == [
+        ("-100999", "", 1),
+        ("-100999", "7", 2),
+    ]

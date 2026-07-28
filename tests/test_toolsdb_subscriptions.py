@@ -10,12 +10,25 @@ import pytest
 
 from blybot.adapters.toolsdb.subscriptions import (
     Q_ADD,
+    Q_CHAT_ID_NULLABLE,
     Q_DELETE,
+    Q_DM_CHANNEL_IN_BY_USER,
     Q_LIST_ALL,
     Q_LIST_FOR_USER,
     Q_MIGRATE,
     Q_OWNED,
     Q_STAMP,
+    SUBS_ADD_CHANNEL,
+    SUBS_ADD_DM_CHANNEL,
+    SUBS_ADD_DM_PLATFORM,
+    SUBS_ADD_PLATFORM,
+    SUBS_ADD_THREAD,
+    SUBS_BACKFILL_DM,
+    SUBS_BACKFILL_SCOPE,
+    SUBS_CHAT_ID_NULLABLE,
+    SUBS_DM_CHAT_ID_NULLABLE,
+    SUBS_REBUILD_BY_USER,
+    SUBS_THREAD_ID_NULLABLE,
     SUBSCRIPTIONS_SCHEMA,
     ToolsDbSubscriptions,
 )
@@ -28,11 +41,52 @@ NOW = datetime(2026, 7, 25, 8, 0, tzinfo=UTC)
 
 @dataclass
 class FakeSubscriptionsDb:
-    """Interprets the adapter's exact query constants against a dict."""
+    """Interprets the adapter's exact query constants against a dict of rows.
 
-    rows: dict[str, tuple[Any, ...]] = field(default_factory=dict)  # sub_id -> row tuple
+    Each row is a dict carrying both string identities (DM and group) and
+    the legacy ints, so the fake can model dual-write and the migration.
+    """
+
+    rows: dict[str, dict[str, Any]] = field(default_factory=dict)  # sub_id -> row
+    dm_channel_in_by_user: bool = False  # old table: by_user is still (dm_chat_id)
+    chat_id_nullable: bool = False  # old table: the ints are NOT NULL
     schema_created: bool = False
+    schema_migrated: bool = False
     fail: bool = False
+
+    def seed_legacy(
+        self, sub_id: str, dm_chat_id: int, chat_id: int, thread_id: int = 0, **extra: Any
+    ) -> None:
+        """Insert a pre-migration row: only the ints set, string keys blank."""
+        self.rows[sub_id] = {
+            "sub_id": sub_id,
+            "dm_platform": "telegram",
+            "dm_channel": "",
+            "platform": "telegram",
+            "channel": "",
+            "thread": "",
+            "dm_chat_id": dm_chat_id,
+            "chat_id": chat_id,
+            "thread_id": thread_id,
+            "schedule": extra.get("schedule", "daily@08:00"),
+            "recipe": extra.get("recipe", "summarize"),
+            "lang": extra.get("lang", "en"),
+            "last_run": extra.get("last_run"),
+        }
+
+    def _select_row(self, row: dict[str, Any]) -> tuple[Any, ...]:
+        return (
+            row["sub_id"],
+            row["dm_platform"],
+            row["dm_channel"],
+            row["platform"],
+            row["channel"],
+            row["thread"],
+            row["schedule"],
+            row["recipe"],
+            row["lang"],
+            row["last_run"],
+        )
 
     def run_tx(self, statements: list[tuple[str, tuple[Any, ...]]]) -> None:
         for query, params in statements:
@@ -43,39 +97,122 @@ class FakeSubscriptionsDb:
             msg = "db down"
             raise OSError(msg)
         assert query.count("%s") == len(params), f"placeholder/param mismatch: {query!r}"
-        if query == SUBSCRIPTIONS_SCHEMA:
-            self.schema_created = True
-            return []
+        migrated = self._run_migration(query)
+        if migrated is not None:
+            return migrated
         if query == Q_ADD:
-            self.rows[params[0]] = params
+            (
+                sub_id,
+                dm_platform,
+                dm_channel,
+                platform,
+                channel,
+                thread,
+                dm_chat_id,
+                chat_id,
+                thread_id,
+                schedule,
+                recipe,
+                lang,
+                last_run,
+            ) = params
+            self.rows[sub_id] = {
+                "sub_id": sub_id,
+                "dm_platform": dm_platform,
+                "dm_channel": dm_channel,
+                "platform": platform,
+                "channel": channel,
+                "thread": thread,
+                "dm_chat_id": dm_chat_id,
+                "chat_id": chat_id,
+                "thread_id": thread_id,
+                "schedule": schedule,
+                "recipe": recipe,
+                "lang": lang,
+                "last_run": last_run,
+            }
             return []
         if query == Q_OWNED:
-            sub_id, dm = params
+            sub_id, dm_platform, dm_channel = params
             row = self.rows.get(sub_id)
-            return [(sub_id,)] if row is not None and row[1] == dm else []
+            owns = row is not None and (row["dm_platform"], row["dm_channel"]) == (
+                dm_platform,
+                dm_channel,
+            )
+            return [(sub_id,)] if owns else []
         if query == Q_DELETE:
-            sub_id, dm = params
+            sub_id, dm_platform, dm_channel = params
             row = self.rows.get(sub_id)
-            if row is not None and row[1] == dm:
+            if row is not None and (row["dm_platform"], row["dm_channel"]) == (
+                dm_platform,
+                dm_channel,
+            ):
                 del self.rows[sub_id]
             return []
         if query == Q_LIST_FOR_USER:
-            (dm,) = params
-            return sorted((r for r in self.rows.values() if r[1] == dm), key=lambda r: r[0])
+            dm_platform, dm_channel = params
+            mine = [
+                r
+                for r in self.rows.values()
+                if (r["dm_platform"], r["dm_channel"]) == (dm_platform, dm_channel)
+            ]
+            return [self._select_row(r) for r in sorted(mine, key=lambda r: r["sub_id"])]
         if query == Q_LIST_ALL:
-            return sorted(self.rows.values(), key=lambda r: r[0])
+            ordered = sorted(self.rows.values(), key=lambda r: r["sub_id"])
+            return [self._select_row(r) for r in ordered]
         if query == Q_STAMP:
             last_run, sub_id = params
             if sub_id in self.rows:
-                self.rows[sub_id] = (*self.rows[sub_id][:7], last_run)
+                self.rows[sub_id]["last_run"] = last_run
             return []
         if query == Q_MIGRATE:
-            new_id, old_id = params
-            for sub_id, row in list(self.rows.items()):
-                if row[2] == old_id:
-                    self.rows[sub_id] = (row[0], row[1], new_id, *row[3:])
+            new_channel, new_chat_id, platform, old_channel = params
+            for row in self.rows.values():
+                if (row["platform"], row["channel"]) == (platform, old_channel):
+                    row["channel"], row["chat_id"] = new_channel, new_chat_id
             return []
         pytest.fail(f"unexpected query: {query}")
+
+    def _run_migration(self, query: str) -> list[tuple[Any, ...]] | None:
+        """Handle schema/migration statements; return None for data queries."""
+        if query == SUBSCRIPTIONS_SCHEMA:
+            if not self.schema_created:  # CREATE IF NOT EXISTS: no-op on old tables
+                self.schema_created = True
+                self.dm_channel_in_by_user = True  # a fresh table already has the string index...
+                self.chat_id_nullable = True  # ...and nullable ints
+            return []
+        if query in (
+            SUBS_ADD_DM_PLATFORM,
+            SUBS_ADD_DM_CHANNEL,
+            SUBS_ADD_PLATFORM,
+            SUBS_ADD_CHANNEL,
+            SUBS_ADD_THREAD,
+        ):
+            return []  # column add: no-op (columns always present in the fake row)
+        if query == SUBS_BACKFILL_SCOPE:
+            for row in self.rows.values():
+                if row["channel"] == "" and row["chat_id"] is not None:
+                    row["channel"] = str(row["chat_id"])
+                    row["thread"] = "" if row["thread_id"] == 0 else str(row["thread_id"])
+            return []
+        if query == SUBS_BACKFILL_DM:
+            for row in self.rows.values():
+                if row["dm_channel"] == "" and row["dm_chat_id"] is not None:
+                    row["dm_channel"] = str(row["dm_chat_id"])
+            return []
+        if query == Q_DM_CHANNEL_IN_BY_USER:
+            return [(1 if self.dm_channel_in_by_user else 0,)]
+        if query == SUBS_REBUILD_BY_USER:
+            self.dm_channel_in_by_user = True
+            self.schema_migrated = True
+            return []
+        if query == Q_CHAT_ID_NULLABLE:
+            return [("YES" if self.chat_id_nullable else "NO",)]
+        if query in (SUBS_CHAT_ID_NULLABLE, SUBS_THREAD_ID_NULLABLE, SUBS_DM_CHAT_ID_NULLABLE):
+            self.chat_id_nullable = True
+            self.schema_migrated = True
+            return []
+        return None
 
 
 def make() -> tuple[ToolsDbSubscriptions, FakeSubscriptionsDb]:
@@ -104,6 +241,34 @@ async def test_bootstrap_creates_the_table() -> None:
     store, db = make()
     await store.bootstrap()
     assert db.schema_created
+    assert not db.schema_migrated  # a fresh table is already in final shape
+
+
+async def test_bootstrap_backfills_a_legacy_int_only_row_and_is_idempotent() -> None:
+    """A pre-existing subscription with ONLY the ints set is readable via the string keys."""
+    store, db = make()
+    db.schema_created = True  # an old int-keyed table...
+    db.dm_channel_in_by_user = False
+    db.chat_id_nullable = False
+    db.seed_legacy("s1", dm_chat_id=500, chat_id=-100)
+
+    await store.bootstrap()
+    await store.bootstrap()  # second pass is a no-op (backfill guards hold)
+
+    mine = await store.list_for_user(Scope("telegram", "500"))
+    assert [s.sub_id for s in mine] == ["s1"]  # the DM string key resolves the pre-existing row
+    assert int(mine[0].scope.channel) == -100  # group channel backfilled from chat_id
+    assert db.schema_migrated
+
+
+async def test_add_dual_writes_both_identities() -> None:
+    """A freshly added subscription carries both string identities AND the legacy ints."""
+    store, db = make()
+    await store.add(sub("s1", dm=500, chat=-100))
+    row = db.rows["s1"]
+    assert (row["dm_platform"], row["dm_channel"]) == ("telegram", "500")
+    assert (row["platform"], row["channel"], row["thread"]) == ("telegram", "-100", "")
+    assert (row["dm_chat_id"], row["chat_id"], row["thread_id"]) == (500, -100, 0)
 
 
 async def test_add_list_and_round_trip() -> None:

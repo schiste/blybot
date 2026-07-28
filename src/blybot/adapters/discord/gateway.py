@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 
     from blybot.domain.models import Scope
     from blybot.domain.ports import SubscriptionStore
+    from blybot.services.analysis_run import AnalysisService
     from blybot.services.capture import CaptureService
     from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 # their wording lives in blybot.services.commands. The strings that remain here
 # belong to commands this adapter still owns end to end (the DM digest flow).
 REPLY_STORAGE_DOWN: Final = "That's temporarily unavailable — please try again later."
+REPLY_ANALYSES_UNAVAILABLE: Final = "On-demand analyses aren't available on this deployment."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
 REPLY_SUBSCRIBED: Final = (
     "Subscribed [{sub_id}]: {schedule} {recipe} ({lang}) — digests arrive in your DMs. "
@@ -83,6 +85,7 @@ class DiscordGateway:
     capture: CaptureService | None = None
     masker: DiscordAuthorMasker | None = None
     subscriptions: SubscriptionStore | None = None
+    analysis: AnalysisService | None = None
     default_lang: str = "en"
 
     async def ingest_message(  # noqa: PLR0913 -- the flattened message facts
@@ -138,6 +141,34 @@ class DiscordGateway:
         """Point this channel's analyses at a wiki page (server admins only)."""
         result = await self.commands.set_page(
             scope_of(channel_id, thread_id), is_admin=is_admin, page=page
+        )
+        return result.text
+
+    async def analyze_command(
+        self,
+        channel_id: int,
+        thread_id: int | None,
+        *,
+        command: str,
+        recipe: str,
+        is_admin: bool,
+    ) -> str:
+        """Run one on-demand analysis and publish it to the channel's wiki page.
+
+        A thin map to the neutral :class:`AnalysisService`: pull the scope off
+        the Discord ids, delegate, and render the reply. The slash-command
+        shell defers the interaction before calling this — a chunked analysis
+        runs well past Discord's 3-second acknowledgement deadline.
+        """
+        analysis = self.analysis
+        if analysis is None:
+            return REPLY_ANALYSES_UNAVAILABLE
+        result = await analysis.run_analysis(
+            scope_of(channel_id, thread_id),
+            is_admin=is_admin,
+            command=command,
+            recipe=recipe,
+            tokens=[],
         )
         return result.text
 
@@ -318,6 +349,40 @@ class DiscordGatewayClient(discord.Client):
                 channel_id, thread_id, page, is_admin=_is_admin(interaction.user)
             )
             await _respond(interaction, reply)
+
+        async def run_analysis(interaction: discord.Interaction, command: str, recipe: str) -> None:
+            # CRITICAL: acknowledge FIRST. A chunked analysis runs for minutes,
+            # far past Discord's 3-second interaction deadline; deferring keeps
+            # the interaction alive so the result can arrive as a follow-up.
+            await interaction.response.defer()
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.analyze_command(
+                channel_id,
+                thread_id,
+                command=command,
+                recipe=recipe,
+                is_admin=_is_admin(interaction.user),
+            )
+            await interaction.followup.send(reply)
+
+        @self.tree.command(
+            name="summarize", description="Summarize this channel onto its wiki page."
+        )
+        @app_commands.guild_only()
+        async def summarize(interaction: discord.Interaction) -> None:
+            await run_analysis(interaction, "summarize", "summarize")
+
+        @self.tree.command(name="stats", description="Publish this channel's activity statistics.")
+        @app_commands.guild_only()
+        async def stats(interaction: discord.Interaction) -> None:
+            await run_analysis(interaction, "stats", "stats")
+
+        @self.tree.command(
+            name="talkingpoints", description="Extract this channel's talking points."
+        )
+        @app_commands.guild_only()
+        async def talkingpoints(interaction: discord.Interaction) -> None:
+            await run_analysis(interaction, "talkingpoints", "talking_points")
 
         @self.tree.command(name="subscribe", description="Get this channel's digest in your DMs.")
         @app_commands.guild_only()

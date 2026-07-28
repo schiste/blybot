@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, cast
 
 import pytest
@@ -13,6 +15,7 @@ from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
 from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
 from blybot.domain.ports import StorageError
+from blybot.observability import Counters
 from tests.test_config import REQUIRED
 
 
@@ -138,8 +141,21 @@ def _recorder(sink: list[str], name: str) -> Any:
 # --- the startup hook, background spawner, and network shell ------------------
 
 
+def _startup_kwargs(**overrides: Any) -> dict[str, Any]:
+    base: dict[str, Any] = {
+        "bootstrap": None,
+        "collectors": (),
+        "poll_interval": 300,
+        "counters": Counters(),
+        "archive": None,
+        "heartbeat_interval": 900.0,
+    }
+    base.update(overrides)
+    return base
+
+
 async def test_discord_startup_bootstraps_then_starts_the_delivery_loops(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     spawned: list[Any] = []
 
@@ -154,14 +170,14 @@ async def test_discord_startup_bootstraps_then_starts_the_delivery_loops(
         booted.append(1)
 
     collectors = ((object(), "sub_tick"), (object(), "capture_remind"))
-    await entry._discord_startup(
-        cast("DiscordGatewayClient", object()),
-        bootstrap=bootstrap,
-        collectors=cast("Any", collectors),
-        poll_interval=300,
-    )
+    with caplog.at_level(logging.INFO, logger="blybot"):
+        await entry._discord_startup(
+            cast("DiscordGatewayClient", object()),
+            **_startup_kwargs(bootstrap=bootstrap, collectors=cast("Any", collectors)),
+        )
     assert booted == [1]
-    assert len(spawned) == 2  # one delivery loop per collector
+    assert len(spawned) == 3  # one delivery loop per collector + the heartbeat
+    assert any("event=startup outcome=ok" in m for m in caplog.messages)
 
 
 async def test_discord_startup_without_a_bootstrap_still_starts_loops(
@@ -176,11 +192,9 @@ async def test_discord_startup_without_a_bootstrap_still_starts_loops(
     monkeypatch.setattr(entry, "_spawn", fake_spawn)
     await entry._discord_startup(
         cast("DiscordGatewayClient", object()),
-        bootstrap=None,
-        collectors=cast("Any", ((object(), "sub_tick"),)),
-        poll_interval=300,
+        **_startup_kwargs(collectors=cast("Any", ((object(), "sub_tick"),))),
     )
-    assert len(spawned) == 1
+    assert len(spawned) == 2  # the delivery loop + the heartbeat
 
 
 async def test_discord_startup_contains_a_bootstrap_failure(
@@ -193,11 +207,59 @@ async def test_discord_startup_contains_a_bootstrap_failure(
 
     # A storage outage is logged, not raised: the gateway still comes up.
     await entry._discord_startup(
-        cast("DiscordGatewayClient", object()),
-        bootstrap=bootstrap,
-        collectors=(),
-        poll_interval=300,
+        cast("DiscordGatewayClient", object()), **_startup_kwargs(bootstrap=bootstrap)
     )
+
+
+class _StubArchive:
+    def __init__(self, *, total: int | None = None) -> None:
+        self._total = total
+
+    async def total(self) -> int:
+        if self._total is None:
+            raise StorageError
+        return self._total
+
+
+def _sleep_then_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the heartbeat run exactly one body, then break its endless loop."""
+    calls = {"n": 0}
+
+    async def fake_sleep(_seconds: float) -> None:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+
+async def test_discord_heartbeat_logs_liveness_and_archive_size(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _sleep_then_cancel(monkeypatch)
+    with caplog.at_level(logging.INFO, logger="blybot"), pytest.raises(asyncio.CancelledError):
+        await entry._discord_heartbeat(Counters(), cast("Any", _StubArchive(total=7)), 900.0)
+    assert any("event=heartbeat outcome=ok" in m for m in caplog.messages)
+    assert any("event=archive_size outcome=ok rows=7" in m for m in caplog.messages)
+
+
+async def test_discord_heartbeat_reports_an_archive_outage(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _sleep_then_cancel(monkeypatch)
+    with caplog.at_level(logging.INFO, logger="blybot"), pytest.raises(asyncio.CancelledError):
+        await entry._discord_heartbeat(Counters(), cast("Any", _StubArchive(total=None)), 900.0)
+    assert any("event=archive_size outcome=error" in m for m in caplog.messages)
+
+
+async def test_discord_heartbeat_without_an_archive_still_beats(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _sleep_then_cancel(monkeypatch)
+    with caplog.at_level(logging.INFO, logger="blybot"), pytest.raises(asyncio.CancelledError):
+        await entry._discord_heartbeat(Counters(), None, 900.0)
+    assert any("event=heartbeat outcome=ok" in m for m in caplog.messages)
+    assert not any("archive_size" in m for m in caplog.messages)
 
 
 async def test_spawn_schedules_a_background_task() -> None:

@@ -11,7 +11,7 @@ import sys
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -420,18 +420,46 @@ def _spawn(coro: Coroutine[object, object, None]) -> asyncio.Task[None]:
     return asyncio.ensure_future(coro)
 
 
-async def _discord_startup(
+# Roughly one liveness line every 15 minutes, matching the Telegram cadence.
+_DISCORD_HEARTBEAT_SECONDS: Final = 900.0
+
+
+async def _discord_heartbeat(
+    counters: Counters, archive: ToolsDbArchive | None, interval_seconds: float
+) -> None:
+    """Emit a liveness heartbeat (and archive size) on a fixed cadence.
+
+    Mirrors the Telegram maintenance heartbeat so a *healthy* Discord instance
+    is visible in the logs — otherwise "connected and running" is
+    indistinguishable from "crash-looping" (see issue #28).
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        log_event("heartbeat", "ok", **counters.snapshot())
+        if archive is not None:
+            try:
+                log_event("archive_size", "ok", rows=await archive.total())
+            except StorageError:
+                log_event("archive_size", "error")
+
+
+async def _discord_startup(  # noqa: PLR0913 -- setup-hook wiring enumerates its dependencies
     client: DiscordGatewayClient,
     *,
     bootstrap: Callable[[], Awaitable[None]] | None,
     collectors: tuple[tuple[MessageCollector, str], ...],
     poll_interval: float,
+    counters: Counters,
+    archive: ToolsDbArchive | None,
+    heartbeat_interval: float,
 ) -> None:
     """Client ``setup_hook`` body: bootstrap storage, start the delivery loops.
 
     The transport wraps the now-live client and drives the shared neutral
     :func:`message_loop` for every collector (subscription digests, capture
-    reminders) — the same loop the Telegram lifecycle uses.
+    reminders) — the same loop the Telegram lifecycle uses. A liveness
+    heartbeat runs alongside, and a final ``startup`` line marks readiness,
+    matching the Telegram lifecycle's observability.
     """
     if bootstrap is not None:
         try:
@@ -441,6 +469,8 @@ async def _discord_startup(
     transport = DiscordTransport(client)
     for collector, label in collectors:
         _spawn(message_loop(transport, collector, poll_interval, label))
+    _spawn(_discord_heartbeat(counters, archive, heartbeat_interval))
+    log_event("startup", "ok")
 
 
 def discord_run(
@@ -596,6 +626,9 @@ def run_discord(config: Config) -> int:
             bootstrap=bootstrap,
             collectors=tuple(collectors),
             poll_interval=config.events_poll_minutes * 60,
+            counters=counters,
+            archive=archive,
+            heartbeat_interval=_DISCORD_HEARTBEAT_SECONDS,
         ),
     )
     discord_run(client, config.discord_bot_token, release_clients)

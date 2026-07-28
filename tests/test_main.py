@@ -199,7 +199,7 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
     sink = engine.sinks["wiki_section"]
     with pytest.raises(ActionError, match="/setpage"):
         await sink.resolve_page(Scope("telegram", "-1"), None)
-    assert seen["admin_handlers"].llm_defaults is not None
+    assert seen["admin_handlers"].commands.llm_defaults is not None
     await seen["lifecycle"].release()  # also closes the LiftWing client
 
 

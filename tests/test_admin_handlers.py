@@ -623,8 +623,8 @@ async def test_capture_off_keeps_the_archive() -> None:
 
     assert not store.profiles[gscope()].capture_enabled
     assert len(archive.messages) == 1  # kept until an explicit purge
-    # The neutral OFF confirmation no longer names /capture purge (Discord has none).
-    assert tg.sent_texts(bot)[0] == cmd.REPLY_CAPTURE_DISABLED
+    # Neutral shared text, with Telegram re-appending its own /capture purge hint.
+    assert tg.sent_texts(bot)[0] == f"{cmd.REPLY_CAPTURE_DISABLED} {a.REPLY_CAPTURE_PURGE_HINT}"
 
 
 async def test_capture_purge_erases_the_scope_archive() -> None:

@@ -59,7 +59,7 @@ REPLY_PAGE_REFUSED: Final = (
 REPLY_SETPAGE_USAGE: Final = (
     "Usage: /setpage <page path> — I publish under <path>/{suffix}, e.g. /setpage WikiProject Foo"
 )
-REPLY_PAGE_SET: Final = "Done. Analyses now publish to {url}."
+REPLY_PAGE_SET: Final = "Done. This scope now publishes to {url}."
 
 
 @dataclass(eq=False)
@@ -83,12 +83,12 @@ class CommandService:
     async def capture(self, scope: Scope, *, is_admin: bool, enabled: bool) -> CommandResult:
         """Turn this scope's message capture on or off (admins only)."""
         if not is_admin:
-            return CommandResult(REPLY_NOT_ADMIN)
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
         service = self.capture_service
         if service is None:
-            return CommandResult(REPLY_CAPTURE_OFF_DEPLOY)
+            return CommandResult(REPLY_CAPTURE_OFF_DEPLOY, ok=False)
         if not self.groups.is_allowed(scope):
-            return CommandResult(REPLY_NOT_ALLOWED)
+            return CommandResult(REPLY_NOT_ALLOWED, ok=False)
         try:
             await self.directory.set_capture(scope, enabled=enabled)
             service.forget_scope(scope)
@@ -98,7 +98,7 @@ class CommandService:
                 # the maintenance tick converges the revocation instead of
                 # resuming off the stale row. `on` already fails safe.
                 service.deny_scope(scope)
-            return CommandResult(REPLY_STORAGE_DOWN)
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
         self.counters.increment("profiles_configured")
         log_event("profile_update", "ok")
         # The ON confirmation *is* the permanent in-chat announcement.
@@ -107,18 +107,22 @@ class CommandService:
     async def set_page(self, scope: Scope, *, is_admin: bool, page: str) -> CommandResult:
         """Point this scope's analyses at a wiki page (admins only)."""
         if not is_admin:
-            return CommandResult(REPLY_NOT_ADMIN)
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
         title = page.strip()
         if not title:
-            return CommandResult(REPLY_SETPAGE_USAGE.format(suffix=self.directory.page_suffix))
+            return CommandResult(
+                REPLY_SETPAGE_USAGE.format(suffix=self.directory.page_suffix), ok=False
+            )
         try:
             normalized = await self.directory.set_log_page(scope, title)
         except PageNotAllowedError:
-            return CommandResult(REPLY_PAGE_REFUSED.format(suffix=self.directory.page_suffix))
+            return CommandResult(
+                REPLY_PAGE_REFUSED.format(suffix=self.directory.page_suffix), ok=False
+            )
         except SelfServiceUnavailableError:
-            return CommandResult(REPLY_SELF_SERVICE_OFF)
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
         except StorageError:
-            return CommandResult(REPLY_STORAGE_DOWN)
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
         self.counters.increment("profiles_configured")
         log_event("profile_update", "ok")
         return CommandResult(REPLY_PAGE_SET.format(url=self.page_url_for(normalized)))

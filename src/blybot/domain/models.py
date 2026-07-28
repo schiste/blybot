@@ -176,9 +176,15 @@ class CommandResult:
     later increment adds structured ``choices`` for platforms whose
     :class:`PlatformCapabilities` advertise ``rich_choices``; for now the
     ready-to-send message is the whole result.
+
+    ``ok`` marks whether the command actually did its thing (vs. a refusal,
+    usage hint, or transient failure) so an adapter may decorate a *success*
+    with a platform-specific affordance — e.g. Telegram appending its
+    ``/capture purge`` hint — without re-implementing the outcome logic.
     """
 
     text: str
+    ok: bool = True
 
     def __post_init__(self) -> None:
         if not self.text:

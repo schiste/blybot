@@ -142,6 +142,9 @@ REPLY_ACTIONS_FULL: Final = (
     "You already have the maximum of {max} actions at {scope}; remove one with /action remove <id>."
 )
 REPLY_CAPTURE_USAGE: Final = "Usage: /capture on | off | purge [before:YYYY-MM-DD]"
+# Telegram-only affordance appended to a successful /capture toggle — Discord
+# has no purge, so the shared CommandService text stays neutral (issue #32).
+REPLY_CAPTURE_PURGE_HINT: Final = "Erase the archive with /capture purge."
 REPLY_CAPTURE_OFF_DEPLOY: Final = (
     "Message capture isn't enabled on this deployment; ask the operator."
 )
@@ -406,7 +409,9 @@ class AdminHandlers:
             reply = await self._purge_capture(scope, before)
         else:
             result = await self.commands.capture(scope, is_admin=True, enabled=argument == "on")
-            reply = result.text
+            # Re-append Telegram's own erase hint on a successful toggle; the
+            # shared service text is neutral because Discord has no purge.
+            reply = f"{result.text} {REPLY_CAPTURE_PURGE_HINT}" if result.ok else result.text
         await self._reply(context, chat_id, thread_id, reply)
 
     async def _purge_capture(self, scope: Scope, before: datetime | None) -> str:

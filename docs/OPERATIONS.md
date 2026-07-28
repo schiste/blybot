@@ -1,11 +1,11 @@
 # Operations runbook
 
 How to run one or many Blybot instances on Wikimedia Toolforge. An
-**instance** = one bot identity (Telegram or Discord, chosen by
-`PLATFORM` — see "Choosing a platform" below) + one config file + one
-continuous job, publishing to its own wiki pages. All instances on a
-tool share the repository checkout, the virtualenv, and the on-wiki
-account.
+**instance** = one config file `~/<name>.env` publishing to its own wiki
+pages; it runs **one continuous job per platform it has a token for**
+(`<name>-telegram`, `<name>-discord`, …) — see "Choosing a platform"
+below. All instances on a tool share the repository checkout, the
+virtualenv, and the on-wiki account.
 
 Everything below runs on a Toolforge bastion **as the tool user**:
 
@@ -28,28 +28,35 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
 
 ## Choosing a platform
 
-`PLATFORM` selects the chat platform an instance runs on: `telegram`
-(default) or `discord`. It picks which composition root
-(`__main__.py`) builds and which bot-token key is required — the other
-platform's token is not needed. Every non-chat feature (wiki publishing,
-ToolsDB, capture, LLM analyses, subscriptions) is shared and configured
-identically on both.
+One instance runs **every platform it has a token for**, each as its own
+isolated continuous job. Put whichever bot tokens you have in the single
+base env `~/<name>.env`, and `deploy-instance.sh` starts one job per
+platform whose token is present: `TELEGRAM_BOT_TOKEN` → job
+`<name>-telegram`, `DISCORD_BOT_TOKEN` → job `<name>-discord`. Deploying an
+instance always (re)deploys all of them; removing a token retires that
+platform's job on the next deploy. You never hand-create per-platform
+instances, and a crash in one platform's job cannot touch the other's
+(separate process, memory, and `<name>-<platform>.out`/`.err` logs).
 
-**Shared env vars (both platforms).** `WIKI_USERNAME`,
-`WIKI_BOTPASSWORD`, `WIKI_API_URL`, `LOG_TARGET_PAGE`, `DM_TARGET_BASE`,
-`USER_AGENT`, `PROFILE_ENCRYPTION_KEY`, `TOOLSDB_HOST` / `TOOLSDB_NAME` /
-`TOOLSDB_CNF`, `ARCHIVE_PSEUDONYM_KEY`, and the `LIFTWING_*` / `LLM_*`
-analysis keys all mean the same thing regardless of `PLATFORM`.
+Every non-chat feature (wiki publishing, ToolsDB, capture, LLM analyses,
+subscriptions) is shared: the platforms run against the **same** ToolsDB,
+whose rows are platform-tagged (`platform, channel, thread`), so Telegram
+and Discord state coexist without collision.
 
-**Telegram-only:** `TELEGRAM_BOT_TOKEN` (required when
-`PLATFORM=telegram`). Follow the Telegram prerequisites below.
+**Shared env vars (all platforms).** `WIKI_USERNAME`, `WIKI_BOTPASSWORD`,
+`WIKI_API_URL`, `LOG_TARGET_PAGE`, `DM_TARGET_BASE`, `USER_AGENT`,
+`PROFILE_ENCRYPTION_KEY`, `TOOLSDB_HOST` / `TOOLSDB_NAME` / `TOOLSDB_CNF`,
+`ARCHIVE_PSEUDONYM_KEY`, and the `LIFTWING_*` / `LLM_*` analysis keys mean
+the same thing for every platform.
 
-**Discord-only:** `DISCORD_BOT_TOKEN` (required when `PLATFORM=discord`).
-Follow the Discord runbook below.
+**Per-platform tokens:** `TELEGRAM_BOT_TOKEN` (Telegram prerequisites
+below), `DISCORD_BOT_TOKEN` (Discord runbook below). Set as many as you
+want to run; an instance with none fails fast with
+`deploy-instance: … has no bot token yet`.
 
-Missing the selected platform's token fails fast at startup with
-`configuration error: missing required configuration keys` (naming the
-key, never the value).
+(`PLATFORM` in the env file is only consulted for a direct
+single-platform run — `python -m blybot`; the Toolforge deploy overrides it
+per job from the tokens present, so you normally leave it unset.)
 
 ### Discord setup runbook
 
@@ -66,9 +73,10 @@ key, never the value).
    `applications.commands`; bot permissions **View Channels**, **Send
    Messages**, **Send Messages in Threads**, **Read Message History**.
    Open the generated URL and add the bot to the server.
-4. **Configure the instance.** Set `PLATFORM=discord` and
-   `DISCORD_BOT_TOKEN=…` in `~/<name>.env`, then
-   `~/blybot/deploy-instance.sh start <name>`.
+4. **Configure the instance.** Add `DISCORD_BOT_TOKEN=…` to `~/<name>.env`
+   (alongside any `TELEGRAM_BOT_TOKEN` — both run side by side), then
+   `~/blybot/deploy-instance.sh start <name>`. That starts (or restarts) a
+   `<name>-discord` job automatically; no `PLATFORM` line is needed.
 
 Slash commands are published on startup (`CommandTree.sync`) and can take
 **several minutes** to appear in the client the first time — this is

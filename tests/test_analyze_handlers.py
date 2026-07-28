@@ -14,6 +14,8 @@ from blybot.adapters.telegram import analyze as a
 from blybot.domain.models import OutboundMessage, Scope
 from blybot.domain.ports import ActionError
 from blybot.observability import Counters
+from blybot.services import analysis_run as ar
+from blybot.services.analysis_run import AnalysisService
 from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests import tg
@@ -38,13 +40,13 @@ def make_handlers(
         counters=Counters(),
         clock=clock,
     )
-    return a.AnalysisHandlers(
+    analysis = AnalysisService(
         engine=engine,
-        groups=GroupPolicy(allowed=set()),
         limiter=SlidingWindowLimiter(clock=clock, limit=limit, window=timedelta(hours=1)),
         clock=clock,
         counters=Counters(),
     )
+    return a.AnalysisHandlers(analysis=analysis, groups=GroupPolicy(allowed=set()))
 
 
 def admin_context(
@@ -97,7 +99,7 @@ async def test_analyses_are_throttled_per_chat() -> None:
     await handlers.on_stats(command("/stats"), context)
     await handlers.on_stats(command("/stats"), context)
 
-    assert tg.sent_texts(bot).count(a.REPLY_THROTTLED) == 1
+    assert tg.sent_texts(bot).count(ar.REPLY_THROTTLED) == 1
 
 
 async def test_bad_arguments_reply_with_the_parse_error() -> None:
@@ -130,7 +132,7 @@ async def test_action_errors_reach_the_admin_verbatim() -> None:
             raise ActionError(msg)
 
     handlers = make_handlers()
-    handlers.engine.sinks = {"wiki_section": ExplodingSink()}
+    handlers.analysis.engine.sinks = {"wiki_section": ExplodingSink()}
     context, bot = admin_context()
 
     await handlers.on_summarize(command("/summarize"), context)
@@ -144,8 +146,8 @@ async def test_unexpected_failures_reply_generically_and_count() -> None:
 
     await handlers.on_summarize(command("/summarize"), context)
 
-    assert tg.sent_texts(bot)[-1] == a.REPLY_FAILED
-    assert handlers.counters.snapshot()["analyses_failed"] == 1
+    assert tg.sent_texts(bot)[-1] == ar.REPLY_FAILED
+    assert handlers.analysis.counters.snapshot()["analyses_failed"] == 1
 
 
 async def test_empty_windows_get_a_quiet_notice() -> None:
@@ -154,7 +156,7 @@ async def test_empty_windows_get_a_quiet_notice() -> None:
 
     await handlers.on_summarize(command("/summarize"), context)
 
-    assert tg.sent_texts(bot)[-1] == a.REPLY_EMPTY
+    assert tg.sent_texts(bot)[-1] == ar.REPLY_EMPTY
 
 
 async def test_disallowed_groups_get_silence() -> None:

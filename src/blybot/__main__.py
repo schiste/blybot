@@ -50,6 +50,7 @@ from blybot.domain.ports import StorageError
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters, configure_logging, log_event
+from blybot.services.analysis_run import AnalysisService
 from blybot.services.analyze import (
     ArchiveWindowSource,
     ChatReplySink,
@@ -334,11 +335,13 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
 
     if store is not None and archive is not None:
         analysis_handlers = AnalysisHandlers(
-            engine=engine,
+            analysis=AnalysisService(
+                engine=engine,
+                limiter=SlidingWindowLimiter(clock=clock, limit=6, window=timedelta(hours=1)),
+                clock=clock,
+                counters=counters,
+            ),
             groups=group_policy,
-            limiter=SlidingWindowLimiter(clock=clock, limit=6, window=timedelta(hours=1)),
-            clock=clock,
-            counters=counters,
         )
 
     commands = CommandService(

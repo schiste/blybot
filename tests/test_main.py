@@ -184,7 +184,7 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
     assert entry.main() == 0
     handlers = seen["analysis_handlers"]
     assert handlers is not None
-    engine = handlers.engine
+    engine = handlers.analysis.engine
     # One engine serves every pipeline this deployment enables.
     assert set(engine.sources) == {"archive_window", "repo_events"}
     assert set(engine.transforms) == {"prompt", "stats", "log_publish", "rule_match"}
@@ -216,7 +216,7 @@ async def test_capture_wiring_schedules_actions_on_the_tick(
     assert entry.main() == 0
     lifecycle = seen["lifecycle"]
     assert lifecycle.scheduler is not None
-    assert lifecycle.scheduler.engine is seen["analysis_handlers"].engine
+    assert lifecycle.scheduler.engine is seen["analysis_handlers"].analysis.engine
     assert seen["admin_handlers"].actions is not None
     assert seen["admin_handlers"].clock is not None
     await lifecycle.release()

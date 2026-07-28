@@ -56,7 +56,22 @@ start_instance() {
     local env_file="${TOOL_HOME}/${name}.env"
     local wrapper="${TOOL_HOME}/run-${name}.sh"
     [ -f "${env_file}" ] || die "${env_file} not found; run: $0 init ${name}"
-    grep -qE '^TELEGRAM_BOT_TOKEN=.+' "${env_file}" || die "${env_file} has no TELEGRAM_BOT_TOKEN yet"
+    # Require the bot token for the instance's platform (default telegram).
+    local platform
+    platform="$(grep -E '^PLATFORM=' "${env_file}" | tail -1 | cut -d= -f2- | tr -d '[:space:]')"
+    case "${platform:-telegram}" in
+    telegram)
+        grep -qE '^TELEGRAM_BOT_TOKEN=.+' "${env_file}" ||
+            die "${env_file} has no TELEGRAM_BOT_TOKEN yet"
+        ;;
+    discord)
+        grep -qE '^DISCORD_BOT_TOKEN=.+' "${env_file}" ||
+            die "${env_file} has PLATFORM=discord but no DISCORD_BOT_TOKEN yet"
+        ;;
+    *)
+        die "${env_file}: unknown PLATFORM='${platform}' (expected telegram or discord)"
+        ;;
+    esac
     chmod 600 "${env_file}"
     printf '#!/bin/bash\nexport BLYBOT_CONFIG=%s\nexec %s/run.sh\n' "${env_file}" "${REPO_DIR}" >"${wrapper}"
     chmod +x "${wrapper}"

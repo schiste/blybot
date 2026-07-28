@@ -32,10 +32,6 @@ from blybot.domain.models import CapturedMessage
 from blybot.domain.ports import StorageError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
-from blybot.services.directory import (
-    PageNotAllowedError,
-    SelfServiceUnavailableError,
-)
 from blybot.services.subscriptions import (
     SubscriptionParseError,
     mint_sub_id,
@@ -50,31 +46,16 @@ if TYPE_CHECKING:
     from blybot.domain.models import Scope
     from blybot.domain.ports import SubscriptionStore
     from blybot.services.capture import CaptureService
+    from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory
     from blybot.services.policy import GroupPolicy
 
     from .author_mask import DiscordAuthorMasker
 
-REPLY_NOT_ADMIN: Final = "Only this server's admins can run that command."
-REPLY_NOT_ALLOWED: Final = "I'm not configured to serve this channel."
+# Capture and setpage now render whatever the neutral CommandService returns;
+# their wording lives in blybot.services.commands. The strings that remain here
+# belong to commands this adapter still owns end to end (the DM digest flow).
 REPLY_STORAGE_DOWN: Final = "That's temporarily unavailable — please try again later."
-REPLY_CAPTURE_OFF_DEPLOY: Final = (
-    "Message capture isn't enabled on this deployment; ask the operator."
-)
-REPLY_CAPTURE_ENABLED: Final = (
-    "📢 Message capture is now ON here: messages will be archived for on-wiki summaries "
-    "and statistics, with authors recorded only as anonymous labels. An admin can stop "
-    "this with /capture off."
-)
-REPLY_CAPTURE_DISABLED: Final = "Message capture is OFF here. The existing archive is kept."
-REPLY_SELF_SERVICE_OFF: Final = (
-    "Self-service configuration isn't enabled on this deployment; ask the operator."
-)
-REPLY_PAGE_REFUSED: Final = (
-    "That page path isn't valid — give a plain project or user page, e.g. /setpage WikiProject Foo."
-)
-REPLY_SETPAGE_USAGE: Final = "Usage: /setpage <page path>"
-REPLY_PAGE_SET: Final = "Done. Analyses for this channel now publish to {page}."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
 REPLY_SUBSCRIBED: Final = (
     "Subscribed [{sub_id}]: {schedule} {recipe} ({lang}) — digests arrive in your DMs. "
@@ -98,6 +79,7 @@ class DiscordGateway:
 
     directory: ChannelDirectory
     groups: GroupPolicy
+    commands: CommandService
     capture: CaptureService | None = None
     masker: DiscordAuthorMasker | None = None
     subscriptions: SubscriptionStore | None = None
@@ -140,47 +122,24 @@ class DiscordGateway:
     async def capture_command(
         self, channel_id: int, thread_id: int | None, *, enabled: bool, is_admin: bool
     ) -> str:
-        """Turn this channel's message capture on or off (server admins only)."""
-        if not is_admin:
-            return REPLY_NOT_ADMIN
-        capture = self.capture
-        if capture is None:
-            return REPLY_CAPTURE_OFF_DEPLOY
-        scope = scope_of(channel_id, thread_id)
-        if not self.groups.is_allowed(scope):
-            return REPLY_NOT_ALLOWED
-        try:
-            await self.directory.set_capture(scope, enabled=enabled)
-            capture.forget_scope(scope)
-        except StorageError:
-            if not enabled:
-                # The durable disable never landed: tombstone the scope so
-                # the maintenance tick converges the revocation instead of
-                # resuming off the stale row (mirrors the Telegram path).
-                capture.deny_scope(scope)
-            return REPLY_STORAGE_DOWN
-        return REPLY_CAPTURE_ENABLED if enabled else REPLY_CAPTURE_DISABLED
+        """Turn this channel's message capture on or off (server admins only).
+
+        A thin map to the neutral :class:`CommandService`: pull the scope off
+        the Discord ids, delegate, and render the reply.
+        """
+        result = await self.commands.capture(
+            scope_of(channel_id, thread_id), is_admin=is_admin, enabled=enabled
+        )
+        return result.text
 
     async def setpage_command(
         self, channel_id: int, thread_id: int | None, page: str, *, is_admin: bool
     ) -> str:
         """Point this channel's analyses at a wiki page (server admins only)."""
-        if not is_admin:
-            return REPLY_NOT_ADMIN
-        title = page.strip()
-        if not title:
-            return REPLY_SETPAGE_USAGE
-        scope = scope_of(channel_id, thread_id)
-        try:
-            normalized = await self.directory.set_log_page(scope, title)
-        except PageNotAllowedError:
-            return REPLY_PAGE_REFUSED
-        except SelfServiceUnavailableError:
-            return REPLY_SELF_SERVICE_OFF
-        except StorageError:
-            return REPLY_STORAGE_DOWN
-        log_event("profile_update", "ok")
-        return REPLY_PAGE_SET.format(page=normalized)
+        result = await self.commands.set_page(
+            scope_of(channel_id, thread_id), is_admin=is_admin, page=page
+        )
+        return result.text
 
     async def subscribe_command(
         self, channel_id: int, thread_id: int | None, dm_channel_id: int, options: str

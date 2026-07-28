@@ -22,9 +22,11 @@ from blybot.domain.models import (
     Scope,
 )
 from blybot.observability import Counters
+from blybot.services import commands as cmd
 from blybot.services.actions import MAX_ACTIONS, parse_action
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureService
+from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.rules import MAX_RULES
@@ -39,24 +41,38 @@ def gscope(chat_id: int = tg.GROUP.id, thread_id: int = 0) -> Scope:
     return Scope("telegram", str(chat_id), str(thread_id) if thread_id else "")
 
 
+def _page_url(title: str) -> str:
+    return f"https://meta.wikimedia.org/wiki/{title.replace(' ', '_')}"
+
+
 def make_handlers(
     store: InMemoryProfiles | None = None,
     page_suffix: str = "Telegram logs",
 ) -> a.AdminHandlers:
     store = store if store is not None else InMemoryProfiles()
+    groups = GroupPolicy(allowed=set())
+    directory = ChannelDirectory(
+        store=store,
+        default_log_page="Next 25/Telegram logs",
+        default_consent=ConsentMode.IMMEDIATE,
+        default_repo="",
+        page_suffix=page_suffix,
+    )
+    counters = Counters()
     return a.AdminHandlers(
-        groups=GroupPolicy(allowed=set()),
-        directory=ChannelDirectory(
-            store=store,
-            default_log_page="Next 25/Telegram logs",
-            default_consent=ConsentMode.IMMEDIATE,
-            default_repo="",
-            page_suffix=page_suffix,
-        ),
-        counters=Counters(),
-        page_url_for=lambda title: f"https://meta.wikimedia.org/wiki/{title.replace(' ', '_')}",
+        groups=groups,
+        directory=directory,
+        counters=counters,
+        page_url_for=_page_url,
         binding=TokenBinding(clock=FakeClock()),
         vault=store,
+        commands=CommandService(
+            directory=directory,
+            groups=groups,
+            page_url_for=_page_url,
+            counters=counters,
+            capture_service=None,
+        ),
     )
 
 
@@ -114,19 +130,29 @@ async def test_admin_commands_outside_groups_are_ignored() -> None:
 
 
 async def test_v1_deployments_stay_silent_and_skip_the_api_call() -> None:
+    groups = GroupPolicy(allowed=set())
+    directory = ChannelDirectory(
+        store=None,
+        default_log_page="P",
+        default_consent=ConsentMode.IMMEDIATE,
+        default_repo="",
+        page_suffix="",
+    )
+    counters = Counters()
     handlers = a.AdminHandlers(
-        groups=GroupPolicy(allowed=set()),
-        directory=ChannelDirectory(
-            store=None,
-            default_log_page="P",
-            default_consent=ConsentMode.IMMEDIATE,
-            default_repo="",
-            page_suffix="",
-        ),
-        counters=Counters(),
+        groups=groups,
+        directory=directory,
+        counters=counters,
         page_url_for=str,
         binding=TokenBinding(clock=FakeClock()),
         vault=None,
+        commands=CommandService(
+            directory=directory,
+            groups=groups,
+            page_url_for=str,
+            counters=counters,
+            capture_service=None,
+        ),
     )
     context, bot = admin_context()
     await handlers.on_setup(command("/setup"), context)
@@ -160,9 +186,9 @@ async def test_setpage_stores_and_links_the_page() -> None:
 
     assert store.profiles[gscope()].log_page == "WikiProject Ours/Telegram logs"
     (sent,) = tg.sent_texts(bot)
-    assert sent == a.REPLY_PAGE_SET.format(
+    # Wording now comes from the neutral CommandService (no /log or scope label).
+    assert sent == cmd.REPLY_PAGE_SET.format(
         url="https://meta.wikimedia.org/wiki/WikiProject_Ours/Telegram_logs",
-        scope="the group default",
     )
 
 
@@ -170,14 +196,14 @@ async def test_setpage_without_arguments_shows_usage() -> None:
     handlers = make_handlers()
     context, bot = admin_context()
     await handlers.on_setpage(command("/setpage"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_SETPAGE_USAGE.format(suffix="Telegram logs")]
+    assert tg.sent_texts(bot) == [cmd.REPLY_SETPAGE_USAGE.format(suffix="Telegram logs")]
 
 
 async def test_setpage_refuses_invalid_base_paths() -> None:
     handlers = make_handlers()
     context, bot = admin_context(args=["bad", "{{title}}"])
     await handlers.on_setpage(command("/setpage bad {{title}}"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_PAGE_REFUSED.format(suffix="Telegram logs")]
+    assert tg.sent_texts(bot) == [cmd.REPLY_PAGE_REFUSED.format(suffix="Telegram logs")]
 
 
 async def test_setpage_reports_disabled_page_targeting() -> None:
@@ -391,7 +417,7 @@ async def test_commands_configure_the_topic_they_are_run_in() -> None:
     assert store.profiles[gscope(tg.GROUP.id, 42)].log_page == "WikiProject Foo/Telegram logs"
     (sent, thread) = tg.sent_calls(bot)[0]
     assert thread == 42  # confirmation routed back into the topic
-    assert "this topic" in sent
+    assert "WikiProject_Foo/Telegram_logs" in sent  # neutral confirmation links the page
 
 
 async def test_setconsent_says_group_wide_even_from_a_topic() -> None:
@@ -545,7 +571,7 @@ def make_capture_handlers(
     handlers = make_handlers(store)
     clock = FakeClock()
     handlers.archive = archive
-    handlers.capture_service = CaptureService(
+    service = CaptureService(
         store=store,
         archive=archive,
         limiter=SlidingWindowLimiter(clock=clock, limit=100, window=timedelta(minutes=1)),
@@ -553,6 +579,10 @@ def make_capture_handlers(
         counters=Counters(),
         max_chars=4096,
     )
+    handlers.capture_service = service
+    # The shared CommandService owns the /capture on|off logic, so it must see
+    # the same capture service the handler's purge branch uses.
+    handlers.commands.capture_service = service
     return handlers, store, archive
 
 
@@ -593,7 +623,8 @@ async def test_capture_off_keeps_the_archive() -> None:
 
     assert not store.profiles[gscope()].capture_enabled
     assert len(archive.messages) == 1  # kept until an explicit purge
-    assert "purge" in tg.sent_texts(bot)[0]
+    # Neutral shared text, with Telegram re-appending its own /capture purge hint.
+    assert tg.sent_texts(bot)[0] == f"{cmd.REPLY_CAPTURE_DISABLED} {a.REPLY_CAPTURE_PURGE_HINT}"
 
 
 async def test_capture_purge_erases_the_scope_archive() -> None:
@@ -607,6 +638,20 @@ async def test_capture_purge_erases_the_scope_archive() -> None:
 
     assert archive.messages == []
     assert "1 message(s) deleted" in tg.sent_texts(bot)[0]
+
+
+async def test_capture_purge_without_deployment_support_says_so() -> None:
+    handlers = make_handlers()  # archive/capture_service left unset
+    context, bot = admin_context(args=["purge"])
+    await handlers.on_capture(command("/capture purge"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_CAPTURE_OFF_DEPLOY]
+
+
+async def test_capture_purge_reports_storage_outage() -> None:
+    handlers, _store, _archive = make_capture_handlers(archive=InMemoryArchive(fail=True))
+    context, bot = admin_context(args=["purge"])
+    await handlers.on_capture(command("/capture purge"), context)
+    assert tg.sent_texts(bot) == [a.REPLY_STORAGE_DOWN]
 
 
 async def test_capture_reports_storage_outage() -> None:

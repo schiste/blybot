@@ -167,6 +167,32 @@ class PlatformCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandResult:
+    """The platform-neutral outcome of a shared admin command.
+
+    A frozen value each transport adapter renders into its native reply:
+    the command's business logic lives once in a neutral service, and the
+    adapter only maps its trigger to a call and sends ``text`` back. A
+    later increment adds structured ``choices`` for platforms whose
+    :class:`PlatformCapabilities` advertise ``rich_choices``; for now the
+    ready-to-send message is the whole result.
+
+    ``ok`` marks whether the command actually did its thing (vs. a refusal,
+    usage hint, or transient failure) so an adapter may decorate a *success*
+    with a platform-specific affordance — e.g. Telegram appending its
+    ``/capture purge`` hint — without re-implementing the outcome logic.
+    """
+
+    text: str
+    ok: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.text:
+            msg = "CommandResult text must be non-empty"
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class LogMedia:
     """One anonymous media attachment selected for wiki publication.
 

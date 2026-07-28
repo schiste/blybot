@@ -27,7 +27,9 @@ from blybot.adapters.discord.gateway import (
 from blybot.domain.models import ConsentMode, GroupProfile, Schedule, Scope
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
+from blybot.services import commands as cmd
 from blybot.services.capture import CaptureService
+from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles, InMemorySubscriptions
@@ -51,6 +53,34 @@ def _directory(
     )
 
 
+def _make_gateway(
+    directory: ChannelDirectory,
+    groups: GroupPolicy,
+    *,
+    capture: CaptureService | None = None,
+    masker: DiscordAuthorMasker | None = None,
+    subscriptions: InMemorySubscriptions | None = None,
+    default_lang: str = "en",
+) -> DiscordGateway:
+    """A gateway wired to a matching CommandService (identity page_url_for)."""
+    commands = CommandService(
+        directory=directory,
+        groups=groups,
+        page_url_for=str,
+        counters=Counters(),
+        capture_service=capture,
+    )
+    return DiscordGateway(
+        directory=directory,
+        groups=groups,
+        commands=commands,
+        capture=capture,
+        masker=masker,
+        subscriptions=subscriptions,
+        default_lang=default_lang,
+    )
+
+
 def _capture_service(
     store: ProfileStore, archive: InMemoryArchive, *, max_chars: int = 2000
 ) -> CaptureService:
@@ -71,9 +101,9 @@ def _capture_gateway(
     store = store if store is not None else InMemoryProfiles()
     archive = InMemoryArchive()
     capture = _capture_service(store, archive)
-    gateway = DiscordGateway(
-        directory=_directory(store),
-        groups=GroupPolicy(allowed=allowed if allowed is not None else set()),
+    gateway = _make_gateway(
+        _directory(store),
+        GroupPolicy(allowed=allowed if allowed is not None else set()),
         capture=capture,
         masker=DiscordAuthorMasker(key="operator-key"),
     )
@@ -85,7 +115,7 @@ def _capture_gateway(
 
 async def test_ingest_is_a_noop_without_capture_wiring() -> None:
     archive = InMemoryArchive()
-    gateway = DiscordGateway(directory=_directory(None), groups=GroupPolicy(allowed=set()))
+    gateway = _make_gateway(_directory(None), GroupPolicy(allowed=set()))
     await gateway.ingest_message(
         channel_id=_CHANNEL,
         thread_id=None,
@@ -159,28 +189,28 @@ async def test_ingest_records_media_and_reply_metadata_in_a_thread() -> None:
 async def test_capture_command_rejects_non_admins() -> None:
     gateway, _store, _archive, _capture = _capture_gateway()
     reply = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=False)
-    assert reply == gw.REPLY_NOT_ADMIN
+    assert reply == cmd.REPLY_NOT_ADMIN
 
 
 async def test_capture_command_reports_when_capture_is_off_on_the_deployment() -> None:
-    gateway = DiscordGateway(directory=_directory(None), groups=GroupPolicy(allowed=set()))
+    gateway = _make_gateway(_directory(None), GroupPolicy(allowed=set()))
     reply = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)
-    assert reply == gw.REPLY_CAPTURE_OFF_DEPLOY
+    assert reply == cmd.REPLY_CAPTURE_OFF_DEPLOY
 
 
 async def test_capture_command_refuses_a_channel_outside_the_allowlist() -> None:
     gateway, _store, _archive, _capture = _capture_gateway(allowed={999})
     reply = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)
-    assert reply == gw.REPLY_NOT_ALLOWED
+    assert reply == cmd.REPLY_NOT_ALLOWED
 
 
 async def test_capture_command_enables_and_disables() -> None:
     gateway, store, _archive, _capture = _capture_gateway()
     on = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)
-    assert on == gw.REPLY_CAPTURE_ENABLED
+    assert on == cmd.REPLY_CAPTURE_ENABLED
     assert store.profiles[_SCOPE].capture_enabled is True
     off = await gateway.capture_command(_CHANNEL, None, enabled=False, is_admin=True)
-    assert off == gw.REPLY_CAPTURE_DISABLED
+    assert off == cmd.REPLY_CAPTURE_DISABLED
     assert store.profiles[_SCOPE].capture_enabled is False
 
 
@@ -188,7 +218,7 @@ async def test_capture_command_tombstones_on_a_failed_disable() -> None:
     store = InMemoryProfiles(fail=True)
     gateway, _store, _archive, capture = _capture_gateway(store=store)
     reply = await gateway.capture_command(_CHANNEL, None, enabled=False, is_admin=True)
-    assert reply == gw.REPLY_STORAGE_DOWN
+    assert reply == cmd.REPLY_STORAGE_DOWN
     assert _SCOPE in capture._denied  # fail-closed until the disable lands
 
 
@@ -196,7 +226,7 @@ async def test_capture_command_does_not_tombstone_a_failed_enable() -> None:
     store = InMemoryProfiles(fail=True)
     gateway, _store, _archive, capture = _capture_gateway(store=store)
     reply = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)
-    assert reply == gw.REPLY_STORAGE_DOWN
+    assert reply == cmd.REPLY_STORAGE_DOWN
     assert _SCOPE not in capture._denied  # a failed enable already fails safe (stays off)
 
 
@@ -204,52 +234,43 @@ async def test_capture_command_does_not_tombstone_a_failed_enable() -> None:
 
 
 async def test_setpage_command_rejects_non_admins() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles()), groups=GroupPolicy(allowed=set())
-    )
-    assert await gateway.setpage_command(_CHANNEL, None, "P", is_admin=False) == gw.REPLY_NOT_ADMIN
+    gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
+    assert await gateway.setpage_command(_CHANNEL, None, "P", is_admin=False) == cmd.REPLY_NOT_ADMIN
 
 
 async def test_setpage_command_shows_usage_for_a_blank_page() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles()), groups=GroupPolicy(allowed=set())
-    )
-    assert (
-        await gateway.setpage_command(_CHANNEL, None, "   ", is_admin=True)
-        == gw.REPLY_SETPAGE_USAGE
-    )
+    gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
+    assert await gateway.setpage_command(
+        _CHANNEL, None, "   ", is_admin=True
+    ) == cmd.REPLY_SETPAGE_USAGE.format(suffix="Discord logs")
 
 
 async def test_setpage_command_stores_the_composed_page() -> None:
     store = InMemoryProfiles()
-    gateway = DiscordGateway(directory=_directory(store), groups=GroupPolicy(allowed=set()))
+    gateway = _make_gateway(_directory(store), GroupPolicy(allowed=set()))
     reply = await gateway.setpage_command(_CHANNEL, None, "WikiProject Foo", is_admin=True)
     assert "WikiProject Foo/Discord logs" in reply
     assert store.profiles[_SCOPE].log_page == "WikiProject Foo/Discord logs"
 
 
 async def test_setpage_command_refuses_an_invalid_page() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles()), groups=GroupPolicy(allowed=set())
-    )
+    gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
     reply = await gateway.setpage_command(_CHANNEL, None, "bad|title", is_admin=True)
-    assert reply == gw.REPLY_PAGE_REFUSED
+    assert reply == cmd.REPLY_PAGE_REFUSED.format(suffix="Discord logs")
 
 
 async def test_setpage_command_reports_when_self_service_is_off() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles(), page_suffix=""), groups=GroupPolicy(allowed=set())
+    gateway = _make_gateway(
+        _directory(InMemoryProfiles(), page_suffix=""), GroupPolicy(allowed=set())
     )
     reply = await gateway.setpage_command(_CHANNEL, None, "WikiProject Foo", is_admin=True)
-    assert reply == gw.REPLY_SELF_SERVICE_OFF
+    assert reply == cmd.REPLY_SELF_SERVICE_OFF
 
 
 async def test_setpage_command_reports_storage_down() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles(fail=True)), groups=GroupPolicy(allowed=set())
-    )
+    gateway = _make_gateway(_directory(InMemoryProfiles(fail=True)), GroupPolicy(allowed=set()))
     reply = await gateway.setpage_command(_CHANNEL, None, "WikiProject Foo", is_admin=True)
-    assert reply == gw.REPLY_STORAGE_DOWN
+    assert reply == cmd.REPLY_STORAGE_DOWN
 
 
 # --- DiscordGateway subscription commands ------------------------------------
@@ -260,9 +281,9 @@ def _subs_gateway(
 ) -> tuple[DiscordGateway, InMemoryProfiles, InMemorySubscriptions]:
     store = store if store is not None else InMemoryProfiles()
     subs = subs if subs is not None else InMemorySubscriptions()
-    gateway = DiscordGateway(
-        directory=_directory(store),
-        groups=GroupPolicy(allowed=set()),
+    gateway = _make_gateway(
+        _directory(store),
+        GroupPolicy(allowed=set()),
         subscriptions=subs,
         default_lang="en",
     )
@@ -270,9 +291,7 @@ def _subs_gateway(
 
 
 async def test_subscribe_reports_when_unavailable() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles()), groups=GroupPolicy(allowed=set())
-    )
+    gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
     assert await gateway.subscribe_command(_CHANNEL, None, 321, "") == gw.REPLY_SUBS_UNAVAILABLE
 
 
@@ -308,9 +327,7 @@ async def test_subscribe_reports_storage_down() -> None:
 
 
 async def test_mysubs_reports_when_unavailable() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles()), groups=GroupPolicy(allowed=set())
-    )
+    gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
     assert await gateway.mysubs_command(321) == gw.REPLY_SUBS_UNAVAILABLE
 
 
@@ -342,9 +359,7 @@ async def test_mysubs_lists_the_callers_subscriptions() -> None:
 
 
 async def test_unsubscribe_reports_when_unavailable() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles()), groups=GroupPolicy(allowed=set())
-    )
+    gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
     assert await gateway.unsubscribe_command(321, "abcd") == gw.REPLY_SUBS_UNAVAILABLE
 
 
@@ -538,7 +553,7 @@ async def test_capture_slash_command_answers_ephemerally() -> None:
     client = build_gateway_client(gateway)
     interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
     await _command(client, "capture").callback(interaction, "on")
-    assert interaction.response.sent == [(gw.REPLY_CAPTURE_ENABLED, True)]
+    assert interaction.response.sent == [(cmd.REPLY_CAPTURE_ENABLED, True)]
 
 
 async def test_setpage_slash_command_answers_ephemerally() -> None:
@@ -553,9 +568,7 @@ async def test_setpage_slash_command_answers_ephemerally() -> None:
 async def test_subscribe_slash_command_uses_the_callers_dm_channel() -> None:
     store = InMemoryProfiles()
     subs = InMemorySubscriptions()
-    gateway = DiscordGateway(
-        directory=_directory(store), groups=GroupPolicy(allowed=set()), subscriptions=subs
-    )
+    gateway = _make_gateway(_directory(store), GroupPolicy(allowed=set()), subscriptions=subs)
     client = build_gateway_client(gateway)
     interaction = _dm_interaction(SimpleNamespace(id=_CHANNEL), dm_id=321)
     await _command(client, "subscribe").callback(interaction, "daily@08:00 summarize")
@@ -565,9 +578,9 @@ async def test_subscribe_slash_command_uses_the_callers_dm_channel() -> None:
 
 
 async def test_mysubs_slash_command_reports_no_subscriptions() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles()),
-        groups=GroupPolicy(allowed=set()),
+    gateway = _make_gateway(
+        _directory(InMemoryProfiles()),
+        GroupPolicy(allowed=set()),
         subscriptions=InMemorySubscriptions(),
     )
     client = build_gateway_client(gateway)
@@ -577,9 +590,9 @@ async def test_mysubs_slash_command_reports_no_subscriptions() -> None:
 
 
 async def test_unsubscribe_slash_command_reports_unknown_id() -> None:
-    gateway = DiscordGateway(
-        directory=_directory(InMemoryProfiles()),
-        groups=GroupPolicy(allowed=set()),
+    gateway = _make_gateway(
+        _directory(InMemoryProfiles()),
+        GroupPolicy(allowed=set()),
         subscriptions=InMemorySubscriptions(),
     )
     client = build_gateway_client(gateway)

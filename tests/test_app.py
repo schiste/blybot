@@ -36,6 +36,7 @@ from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureReminder, CaptureService
+from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.engine import ActionEngine
 from blybot.services.notify import RepoNotifier
@@ -79,13 +80,22 @@ def make_lifecycle(
 
 def make_admin_handlers() -> AdminHandlers:
     group_handlers, _, _ = make_group_handlers()
+    groups = GroupPolicy(allowed=set())
+    counters = Counters()
     return AdminHandlers(
         directory=group_handlers.directory,
-        groups=GroupPolicy(allowed=set()),
-        counters=Counters(),
+        groups=groups,
+        counters=counters,
         page_url_for=group_handlers.page_url_for,
         binding=TokenBinding(clock=FakeClock()),
         vault=None,
+        commands=CommandService(
+            directory=group_handlers.directory,
+            groups=groups,
+            page_url_for=group_handlers.page_url_for,
+            counters=counters,
+            capture_service=None,
+        ),
     )
 
 

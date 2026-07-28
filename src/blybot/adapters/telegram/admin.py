@@ -32,11 +32,7 @@ from blybot.services.actions import (
     describe_action,
     parse_action,
 )
-from blybot.services.directory import (
-    PageNotAllowedError,
-    SelfServiceUnavailableError,
-    TooManyRulesError,
-)
+from blybot.services.directory import TooManyRulesError
 from blybot.services.llmconf import LlmParseError, describe_llm, parse_llm_args
 from blybot.services.rules import MAX_RULES, RuleParseError, describe_rule, parse_rule
 from blybot.services.subscriptions import mint_subscribe_code
@@ -50,6 +46,7 @@ if TYPE_CHECKING:
     from blybot.domain.ports import ActionStore, Clock, MessageArchive, TokenVault
     from blybot.services.binding import TokenBinding
     from blybot.services.capture import CaptureService
+    from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory
     from blybot.services.policy import GroupPolicy
 
@@ -58,14 +55,8 @@ REPLY_SELF_SERVICE_OFF: Final = (
     "Self-service configuration isn't enabled on this deployment; ask the operator."
 )
 REPLY_STORAGE_DOWN: Final = "Configuration is temporarily unavailable — please try again later."
-REPLY_PAGE_SET: Final = "Done. /log for {scope} now publishes to {url}"
-REPLY_PAGE_REFUSED: Final = (
-    "That page path isn't valid — give a plain project or user page, "
-    'e.g. /setpage WikiProject Foo (I add the "/{suffix}" leaf myself).'
-)
-REPLY_SETPAGE_USAGE: Final = (
-    "Usage: /setpage <page path> — I publish under <path>/{suffix}, e.g. /setpage WikiProject Foo"
-)
+# /setpage's wording now lives in the neutral CommandService (both platforms
+# share it); on_setpage renders whatever CommandResult it returns.
 REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode} (group-wide)."
 REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
 REPLY_RESET: Final = "Forgotten. {scope} is back on the inherited defaults."
@@ -151,19 +142,14 @@ REPLY_ACTIONS_FULL: Final = (
     "You already have the maximum of {max} actions at {scope}; remove one with /action remove <id>."
 )
 REPLY_CAPTURE_USAGE: Final = "Usage: /capture on | off | purge [before:YYYY-MM-DD]"
+# Telegram-only affordance appended to a successful /capture toggle — Discord
+# has no purge, so the shared CommandService text stays neutral (issue #32).
+REPLY_CAPTURE_PURGE_HINT: Final = "Erase the archive with /capture purge."
 REPLY_CAPTURE_OFF_DEPLOY: Final = (
     "Message capture isn't enabled on this deployment; ask the operator."
 )
-CAPTURE_ANNOUNCEMENT: Final = (
-    "📢 Message capture is now ON for {scope}: messages here will be "
-    "archived for on-wiki summaries and statistics, with authors recorded "
-    "only as anonymous labels. An admin can stop this with /capture off "
-    "and erase the archive with /capture purge."
-)
-REPLY_CAPTURE_DISABLED: Final = (
-    "Message capture is OFF for {scope}. The existing archive is kept; "
-    "erase it with /capture purge."
-)
+# /capture on|off wording now lives in the neutral CommandService; only the
+# purge branch, which is Telegram-only in this increment, keeps its reply here.
 REPLY_CAPTURE_PURGED: Final = "Archive erased for {scope}: {count} message(s) deleted."
 SETUP_TEXT: Final = (
     "I'm configurable by this group's admins, right here:\n\n"
@@ -242,6 +228,9 @@ class AdminHandlers:
     page_url_for: Callable[[str], str]
     binding: TokenBinding
     vault: TokenVault | None
+    # The neutral service behind the two shared commands (/setpage, /capture
+    # on|off). Its capture_service mirrors this handler's own.
+    commands: CommandService
     # Capture-enabled deployments only: the archive behind /capture purge
     # and the ingest service whose policy cache /capture must invalidate.
     archive: MessageArchive | None = None
@@ -262,32 +251,19 @@ class AdminHandlers:
             await self._reply(context, chat_id, thread_id, text)
 
     async def on_setpage(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Point this group's /log at a page under the allowed prefix."""
+        """Point this group's /log at a page under the allowed prefix.
+
+        The admin gate stays here (it produces silence for unlisted/v1 chats
+        that the neutral service can't); once it confirms an admin, the
+        page-resolution logic and wording are the shared CommandService's.
+        """
         scope = await self._admin_chat(update, context)
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        title = " ".join(context.args or ()).strip()
-        if not title:
-            usage = REPLY_SETPAGE_USAGE.format(suffix=self.directory.page_suffix)
-            await self._reply(context, chat_id, thread_id, usage)
-            return
-        try:
-            normalized = await self.directory.set_log_page(scope, title)
-        except PageNotAllowedError:
-            refused = REPLY_PAGE_REFUSED.format(suffix=self.directory.page_suffix)
-            await self._reply(context, chat_id, thread_id, refused)
-            return
-        except SelfServiceUnavailableError:
-            await self._reply(context, chat_id, thread_id, REPLY_SELF_SERVICE_OFF)
-            return
-        except StorageError:
-            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
-            return
-        self.counters.increment("profiles_configured")
-        log_event("profile_update", "ok")
-        confirmation = REPLY_PAGE_SET.format(url=self.page_url_for(normalized), scope=_scope(scope))
-        await self._reply(context, chat_id, thread_id, confirmation)
+        page = " ".join(context.args or ())
+        result = await self.commands.set_page(scope, is_admin=True, page=page)
+        await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_setconsent(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Set this group's consent policy for /log."""
@@ -414,7 +390,11 @@ class AdminHandlers:
         return REPLY_EVENTS_SEEDED if seeded else REPLY_EVENTS_SET.format(state="on")
 
     async def on_capture(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Switch this scope's message capture on/off, or erase its archive."""
+        """Switch this scope's message capture on/off, or erase its archive.
+
+        ``on``/``off`` are the shared CommandService's; ``purge`` stays here —
+        it is Telegram-only in this increment (Discord exposes no purge).
+        """
         scope = await self._admin_chat(update, context)
         if scope is None:
             return
@@ -425,46 +405,26 @@ class AdminHandlers:
         if argument not in {"on", "off", "purge"} or before is _BAD_DATE:
             await self._reply(context, chat_id, thread_id, REPLY_CAPTURE_USAGE)
             return
-        archive, service = self.archive, self.capture_service
-        if archive is None or service is None:
-            await self._reply(context, chat_id, thread_id, REPLY_CAPTURE_OFF_DEPLOY)
-            return
-        try:
-            reply = await self._apply_capture(scope, argument, archive, service, before)
-        except StorageError:
-            if argument == "off":
-                # The durable disable never landed. Tombstone the scope so
-                # the maintenance tick converges the revocation instead of
-                # resuming capture off the stale `True` row when storage
-                # recovers — mirroring the channel-demotion path. `on`
-                # already fails safe (stays off) and `purge` touches no
-                # consent, so only `off` needs this.
-                service.deny_scope(scope)
-            reply = REPLY_STORAGE_DOWN
+        if argument == "purge":
+            reply = await self._purge_capture(scope, before)
+        else:
+            result = await self.commands.capture(scope, is_admin=True, enabled=argument == "on")
+            # Re-append Telegram's own erase hint on a successful toggle; the
+            # shared service text is neutral because Discord has no purge.
+            reply = f"{result.text} {REPLY_CAPTURE_PURGE_HINT}" if result.ok else result.text
         await self._reply(context, chat_id, thread_id, reply)
 
-    async def _apply_capture(
-        self,
-        scope: Scope,
-        argument: str,
-        archive: MessageArchive,
-        service: CaptureService,
-        before: datetime | None,
-    ) -> str:
-        label = _scope(scope)
-        if argument == "purge":
+    async def _purge_capture(self, scope: Scope, before: datetime | None) -> str:
+        """Erase this scope's archive (older than ``before`` if given)."""
+        archive, service = self.archive, self.capture_service
+        if archive is None or service is None:
+            return REPLY_CAPTURE_OFF_DEPLOY
+        try:
             count = await archive.purge(scope, before)
-            log_event("capture_purge", "ok")
-            return REPLY_CAPTURE_PURGED.format(scope=label, count=count)
-        enabled = argument == "on"
-        await self.directory.set_capture(scope, enabled=enabled)
-        service.forget_scope(scope)
-        self.counters.increment("profiles_configured")
-        log_event("profile_update", "ok")
-        if enabled:
-            # The confirmation *is* the permanent in-chat announcement.
-            return CAPTURE_ANNOUNCEMENT.format(scope=label)
-        return REPLY_CAPTURE_DISABLED.format(scope=label)
+        except StorageError:
+            return REPLY_STORAGE_DOWN
+        log_event("capture_purge", "ok")
+        return REPLY_CAPTURE_PURGED.format(scope=_scope(scope), count=count)
 
     async def on_action(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or list this scope's scheduled actions (v3 phase 4)."""

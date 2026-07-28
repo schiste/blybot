@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from blybot.domain.models import (
+    CommandResult,
     LogContent,
     LogMedia,
     PlatformCapabilities,
@@ -39,6 +40,12 @@ def test_platform_capabilities_construct_and_default_off() -> None:
 def test_platform_capabilities_rejects_nonpositive_cap() -> None:
     with pytest.raises(ValueError, match="max_message_chars"):
         PlatformCapabilities(max_message_chars=0)
+
+
+def test_command_result_carries_text_and_rejects_empty() -> None:
+    assert CommandResult(text="done").text == "done"
+    with pytest.raises(ValueError, match="non-empty"):
+        CommandResult(text="")
 
 
 def test_rate_limited_carries_its_retry_after() -> None:

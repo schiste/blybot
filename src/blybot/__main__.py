@@ -60,6 +60,7 @@ from blybot.services.analyze import (
 )
 from blybot.services.binding import TokenBinding
 from blybot.services.capture import CaptureReminder, CaptureService
+from blybot.services.commands import CommandService
 from blybot.services.delivery import message_loop
 from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
@@ -340,6 +341,13 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
             counters=counters,
         )
 
+    commands = CommandService(
+        directory=directory,
+        groups=group_policy,
+        page_url_for=config.page_url,
+        counters=counters,
+        capture_service=capture_service,
+    )
     admin_handlers = AdminHandlers(
         directory=directory,
         groups=group_policy,
@@ -347,6 +355,7 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         page_url_for=config.page_url,
         binding=binding,
         vault=store,
+        commands=commands,
         archive=archive,
         capture_service=capture_service,
         llm_defaults=llm_defaults,
@@ -593,9 +602,17 @@ def run_discord(config: Config) -> int:
             )
         )
 
+    commands = CommandService(
+        directory=directory,
+        groups=group_policy,
+        page_url_for=config.page_url,
+        counters=counters,
+        capture_service=capture_service,
+    )
     gateway = DiscordGateway(
         directory=directory,
         groups=group_policy,
+        commands=commands,
         capture=capture_service,
         masker=masker,
         subscriptions=subscriptions_store,

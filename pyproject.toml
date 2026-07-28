@@ -123,7 +123,14 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 # No warning may pass silently: anything a dependency or our own code
 # warns about fails the suite (and therefore pre-push and CI).
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # discord.py imports the stdlib `audioop` module (voice support we do not
+    # use), which is deprecated on Python 3.11/3.12 and removed in 3.13. Its
+    # import-time DeprecationWarning would otherwise trip warnings-as-errors on
+    # 3.11/3.12 at collection. We never touch voice, so silencing it is safe.
+    "ignore:'audioop' is deprecated:DeprecationWarning",
+]
 
 [tool.coverage.run]
 branch = true

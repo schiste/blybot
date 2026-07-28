@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pymysql
 
-from blybot.adapters.toolsdb.store import _target
+from blybot.adapters.toolsdb.store import _legacy_dm_id, _target
 from blybot.domain.models import Scope
 from blybot.domain.ports import StorageError
 from blybot.domain.subscriptions import Subscription
@@ -182,7 +182,7 @@ class ToolsDbSubscriptions:
                 subscription.scope.platform,
                 subscription.scope.channel,
                 subscription.scope.thread,
-                int(subscription.dm.channel),
+                _legacy_dm_id(subscription.dm),
                 chat_id,
                 thread_id,
                 subscription.schedule.token,

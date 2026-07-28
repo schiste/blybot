@@ -69,6 +69,21 @@ async def test_store_dual_writes_both_identities() -> None:
     assert (row["chat_id"], row["thread_id"]) == (-1, 7)  # ints dual-written for rollback
 
 
+async def test_store_a_discord_message_leaves_int_columns_null() -> None:
+    """Capture ingestion for a non-telegram scope leaves the legacy ints NULL."""
+    archive, db = make_archive()
+    await archive.store(
+        CapturedMessage(scope=Scope("discord", "123"), message_id=1, posted_at=NOW, author="x")
+    )
+    (row,) = db.rows
+    assert (row["platform"], row["channel"]) == ("discord", "123")
+    assert (row["chat_id"], row["thread_id"]) == (None, None)
+    (loaded,) = await archive.window(
+        Scope("discord", "123"), NOW - timedelta(hours=1), NOW + timedelta(hours=1)
+    )
+    assert loaded.scope == Scope("discord", "123")
+
+
 async def test_messages_round_trip_with_utc_restored() -> None:
     archive, _db = make_archive()
     stored = msg(1, text="hello", reply_to=7)

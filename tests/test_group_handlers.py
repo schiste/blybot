@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -13,10 +14,12 @@ from telegram.error import TelegramError
 
 from blybot.adapters.telegram import handlers as h
 from blybot.adapters.telegram._common import thread_of
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
 from blybot.domain.models import (
     CapturedMessage,
     ConsentMode,
     GroupProfile,
+    PlatformCapabilities,
     Schedule,
     Scope,
     TimestampGranularity,
@@ -70,6 +73,7 @@ def make_handlers(
     with_repo_service: bool = True,
     configure_page: bool = True,
     archive: InMemoryArchive | None = None,
+    capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
 ) -> tuple[h.GroupHandlers, FakePublisher | FailingPublisher, GroupPolicy]:
     publisher = publisher if publisher is not None else FakePublisher()
     policy = GroupPolicy(allowed=allowed if allowed is not None else set())
@@ -119,6 +123,7 @@ def make_handlers(
             if with_repo_service
             else None
         ),
+        capabilities=capabilities,
         archive=archive,
         cleanup_delay_seconds=cleanup_delay_seconds,
         reply_cleanup_delay_seconds=reply_cleanup_delay_seconds,
@@ -566,6 +571,28 @@ async def test_cleanup_can_be_disabled_entirely() -> None:
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
     bot.delete_message.assert_not_awaited()
+
+
+async def test_cleanup_is_skipped_when_the_platform_cannot_delete() -> None:
+    """A platform without message deletion never schedules cleanup."""
+    handlers, publisher, _ = make_handlers(
+        capabilities=replace(TELEGRAM_CAPABILITIES, message_delete=False)
+    )
+    context, bot = tg.make_context()
+    await handlers.on_log(log_command(tg.message(text="x")), context)
+
+    bot.delete_message.assert_not_awaited()  # gated off
+    assert isinstance(publisher, FakePublisher)
+    assert len(publisher.started) == 1  # publication itself is unaffected
+
+
+async def test_newcomer_welcome_needs_deep_links() -> None:
+    """Without deep links there is no start=welcome onboarding to mint."""
+    handlers, _, _ = make_handlers(capabilities=replace(TELEGRAM_CAPABILITIES, deep_links=False))
+    context, bot = tg.make_context()
+    join = tg.membership_update(tg.GROUP, user=tg.ALICE, joined=True, mine=False)
+    await handlers.on_newcomer(join, context)
+    assert tg.sent_texts(bot) == []  # no welcome prompt sent
 
 
 async def test_consent_policy_is_resolved_per_group() -> None:

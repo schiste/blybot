@@ -30,7 +30,7 @@ from blybot.services.llmconf import valid_lang
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from blybot.domain.models import OutboundMessage, Scope
+    from blybot.domain.models import OutboundMessage, PlatformCapabilities, Scope
     from blybot.domain.ports import Clock, ProfileStore, SubscriptionStore
     from blybot.domain.subscriptions import Subscription
     from blybot.observability import Counters
@@ -149,7 +149,7 @@ def _digest_spec(sub: Subscription) -> ActionSpec:
         trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="subscription"),
         source=StepSpec(name="archive_window", params=(("window", "since_last_run"),)),
         transforms=_recipe_transforms(sub.recipe, sub.lang),
-        sink=StepSpec(name="telegram_reply"),
+        sink=StepSpec(name="reply"),
         last_run=sub.last_run,
     )
 
@@ -158,7 +158,7 @@ def _digest_spec(sub: Subscription) -> ActionSpec:
 class SubscriptionScheduler:
     """Runs due digest subscriptions each tick, delivering privately.
 
-    A :class:`~blybot.adapters.telegram.app.MessageCollector`. Mirrors
+    A :class:`~blybot.services.delivery.MessageCollector`. Mirrors
     :class:`~blybot.services.schedule.ActionScheduler`: baseline unstamped
     rows, select due, **stamp the watermark durably before delivering**
     (a crash-after-send reads as "already ran", never a duplicate DM), and
@@ -172,10 +172,15 @@ class SubscriptionScheduler:
     engine: ActionEngine
     clock: Clock
     counters: Counters
+    # Digest delivery needs durable direct messages; a platform without
+    # them (capabilities.durable_dm False) has no subscriptions to run.
+    capabilities: PlatformCapabilities
     max_per_tick: int = 200
 
     async def collect(self) -> list[OutboundMessage]:
         """Return the DM digests for every due subscription this tick."""
+        if not self.capabilities.durable_dm:
+            return []
         try:
             subs = await self.subscriptions.list_all()
         except StorageError:

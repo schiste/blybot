@@ -25,18 +25,23 @@ if TYPE_CHECKING:
     from blybot.observability import Counters
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 
-MAX_TEXT_CHARS: Final = 4096  # Telegram's own message cap; nothing longer is stored
-
 
 @dataclass(eq=False)
 class CaptureService:
-    """Ingests one captured message per call, policy first."""
+    """Ingests one captured message per call, policy first.
+
+    ``max_chars`` is the platform's per-message character cap, injected
+    from its :class:`~blybot.domain.models.PlatformCapabilities`; text
+    longer than it is truncated (nothing longer is stored) rather than the
+    service hard-coding one platform's limit.
+    """
 
     store: ProfileStore
     archive: MessageArchive
     limiter: SlidingWindowLimiter
     clock: Clock
     counters: Counters
+    max_chars: int
     cache_ttl: timedelta = timedelta(seconds=60)
     # Age past which archived messages are purged on the maintenance tick.
     # 0 keeps the archive forever (the historical behavior).
@@ -72,8 +77,8 @@ class CaptureService:
         if not self.limiter.allow(f"capture:{scope.thread}", int(scope.channel)):
             self.counters.increment("captures_throttled")
             return
-        if len(message.text) > MAX_TEXT_CHARS:
-            message = replace(message, text=message.text[:MAX_TEXT_CHARS])
+        if len(message.text) > self.max_chars:
+            message = replace(message, text=message.text[: self.max_chars])
         try:
             await self.archive.store(message)
         except StorageError:
@@ -217,7 +222,7 @@ REMINDER_TEXT: Final = (
 class CaptureReminder:
     """Periodic re-announcement for capture-enabled scopes (v3 §1).
 
-    A :class:`~blybot.adapters.telegram.app.MessageCollector` on the
+    A :class:`~blybot.services.delivery.MessageCollector` on the
     shared tick. Cadence state is memory-only on purpose: a restart
     resets every scope's timer, so the worst failure mode is a *late*
     reminder — never a spammed one.

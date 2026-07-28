@@ -52,6 +52,37 @@ def test_blank_required_value_counts_as_missing() -> None:
         load_config(env)
 
 
+def test_platform_defaults_to_telegram() -> None:
+    config = load_config(dict(REQUIRED))
+    assert config.platform == "telegram"
+    assert config.telegram_bot_token == REQUIRED["TELEGRAM_BOT_TOKEN"]
+    assert config.discord_bot_token == ""
+
+
+def test_discord_platform_requires_only_the_discord_token() -> None:
+    env = dict(REQUIRED)
+    del env["TELEGRAM_BOT_TOKEN"]  # a Discord deployment needs no Telegram token
+    env |= {"PLATFORM": "discord", "DISCORD_BOT_TOKEN": "discord-secret"}
+    config = load_config(env)
+    assert config.platform == "discord"
+    assert config.discord_bot_token == "discord-secret"  # noqa: S105 -- test fixture, not a secret
+    assert config.telegram_bot_token == ""
+
+
+def test_discord_platform_missing_token_is_reported() -> None:
+    env = dict(REQUIRED)
+    del env["TELEGRAM_BOT_TOKEN"]
+    env["PLATFORM"] = "discord"
+    with pytest.raises(ConfigurationError, match="DISCORD_BOT_TOKEN"):
+        load_config(env)
+
+
+def test_unknown_platform_is_rejected() -> None:
+    env = dict(REQUIRED) | {"PLATFORM": "slack"}
+    with pytest.raises(ConfigurationError, match="PLATFORM must be one of"):
+        load_config(env)
+
+
 def test_group_allowlist_is_parsed() -> None:
     env = dict(REQUIRED) | {"ALLOWED_GROUP_IDS": "-100123, -100456"}
     config = load_config(env)

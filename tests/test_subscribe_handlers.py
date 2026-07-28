@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from telegram import Update
 
 from blybot.adapters.telegram import subscribe as sub
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
-from blybot.domain.models import GroupProfile, Schedule, Scope
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
+from blybot.domain.models import GroupProfile, PlatformCapabilities, Schedule, Scope
 from blybot.domain.subscriptions import Subscription
 from blybot.services.subscriptions import SubscriptionBinding
 from tests import tg
@@ -22,16 +25,31 @@ def dmscope(chat_id: int) -> Scope:
     return Scope("telegram", str(chat_id))
 
 
-def make() -> (
-    tuple[SubscriptionHandlers, InMemoryProfiles, InMemorySubscriptions, SubscriptionBinding]
-):
+def make(
+    capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
+) -> tuple[SubscriptionHandlers, InMemoryProfiles, InMemorySubscriptions, SubscriptionBinding]:
     profiles = InMemoryProfiles()
     subs = InMemorySubscriptions()
     binding = SubscriptionBinding(clock=FakeClock())
     handlers = SubscriptionHandlers(
-        profiles=profiles, subscriptions=subs, binding=binding, default_lang="en"
+        profiles=profiles,
+        subscriptions=subs,
+        binding=binding,
+        default_lang="en",
+        capabilities=capabilities,
     )
     return handlers, profiles, subs, binding
+
+
+async def test_subscribe_refused_without_durable_dm() -> None:
+    handlers, _profiles, subs, binding = make(
+        capabilities=replace(TELEGRAM_CAPABILITIES, durable_dm=False)
+    )
+    binding.open_entry(dmscope(777), gscope(-100))
+    context, bot = tg.make_context()
+    await handlers.on_subscribe(dm(), context)
+    assert tg.sent_texts(bot) == [sub.REPLY_SUBS_UNAVAILABLE]
+    assert subs.subs == {}  # admission gated: nothing created
 
 
 def dm(text: str = "/x") -> Update:

@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import GroupProfile, OutboundMessage, Schedule, Scope
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
+from blybot.domain.models import (
+    GroupProfile,
+    OutboundMessage,
+    PlatformCapabilities,
+    Schedule,
+    Scope,
+)
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
 from blybot.services.engine import ActionEngine
@@ -23,14 +31,16 @@ DIGEST = OutboundMessage(scope=Scope("telegram", "-100"), text="digest")
 
 
 def make(
-    subs: InMemorySubscriptions, profiles: InMemoryProfiles | None = None
+    subs: InMemorySubscriptions,
+    profiles: InMemoryProfiles | None = None,
+    capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
 ) -> tuple[SubscriptionScheduler, Counters]:
     clock = FakeClock(current=NOW)
     counters = Counters()
     engine = ActionEngine(
         sources={"archive_window": FakeSource(payload="hello")},
         transforms={"prompt": SuffixTransform(), "stats": SuffixTransform()},
-        sinks={"telegram_reply": FakeSink(messages=(DIGEST,))},
+        sinks={"reply": FakeSink(messages=(DIGEST,))},
         counters=counters,
         clock=clock,
     )
@@ -40,6 +50,7 @@ def make(
         engine=engine,
         clock=clock,
         counters=counters,
+        capabilities=capabilities,
     )
     return scheduler, counters
 
@@ -83,6 +94,14 @@ async def test_not_due_subscription_is_left_alone() -> None:
     await subs.add(a_sub(last_run=NOW - timedelta(hours=1)))  # today's 08:00 slot already ran
     scheduler, _ = make(subs)
     assert await scheduler.collect() == []
+
+
+async def test_scheduler_skips_when_platform_lacks_durable_dm() -> None:
+    subs = InMemorySubscriptions()
+    await subs.add(a_sub(dm=500, last_run=NOW - timedelta(days=1)))  # otherwise due
+    scheduler, _ = make(subs, capabilities=replace(TELEGRAM_CAPABILITIES, durable_dm=False))
+    assert await scheduler.collect() == []
+    assert subs.subs["s1"].last_run == NOW - timedelta(days=1)  # untouched, not even stamped
 
 
 async def test_due_subscription_delivers_a_dm_digest() -> None:

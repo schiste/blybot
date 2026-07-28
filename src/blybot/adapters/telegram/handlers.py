@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
     from blybot.adapters.telegram.subscribe import SubscriptionHandlers
     from blybot.adapters.telegram.token_entry import TokenEntryHandler
-    from blybot.domain.models import Session
+    from blybot.domain.models import PlatformCapabilities, Session
     from blybot.domain.ports import MessageArchive, SubscriptionStore
     from blybot.services.directory import ChannelDirectory, ChannelSettings
     from blybot.services.dm_routing import DmRouteRegistry
@@ -284,6 +284,10 @@ class GroupHandlers:
     maintainer: str
     newcomer_welcome_enabled: bool
     repo_service: GroupRepoService | None
+    # Gates the platform-shaped niceties: command-message cleanup needs
+    # message_delete, and the newcomer welcome mints a deep link
+    # (deep_links). Telegram has both, so neither gate changes its behavior.
+    capabilities: PlatformCapabilities
     # Capture-enabled deployments only: the archive follows the group
     # across supergroup migrations, alongside its profiles.
     archive: MessageArchive | None = None
@@ -531,6 +535,8 @@ class GroupHandlers:
     async def _schedule_cleanup(
         self, bot: Bot, chat_id: int, message_id: int, delay_seconds: float
     ) -> None:
+        if not self.capabilities.message_delete:  # platform can't delete messages
+            return
         if delay_seconds < 0:  # cleanup disabled by configuration
             return
         if delay_seconds == 0:
@@ -569,6 +575,8 @@ class GroupHandlers:
         if not _just_joined(change) or not self.groups.is_allowed(group_scope(change.chat.id)):
             return
         if change.new_chat_member.user.is_bot:
+            return
+        if not self.capabilities.deep_links:  # can't mint a start=welcome link
             return
         deep_link = f"https://t.me/{context.bot.username}?start=welcome"
         button = InlineKeyboardButton(text=NEWCOMER_BUTTON, url=deep_link)

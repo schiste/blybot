@@ -33,6 +33,9 @@ dependencies = [
     "pymysql>=1.1",
     # Fernet encryption for group-supplied GitHub tokens at rest.
     "cryptography>=43.0",
+    # Discord gateway + slash commands for the second platform adapter
+    # (PR-5). Ships py.typed, so mypy --strict sees its real types.
+    "discord-py>=2.4",
 ]
 
 [project.urls]
@@ -120,7 +123,14 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 # No warning may pass silently: anything a dependency or our own code
 # warns about fails the suite (and therefore pre-push and CI).
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # discord.py imports the stdlib `audioop` module (voice support we do not
+    # use), which is deprecated on Python 3.11/3.12 and removed in 3.13. Its
+    # import-time DeprecationWarning would otherwise trip warnings-as-errors on
+    # 3.11/3.12 at collection. We never touch voice, so silencing it is safe.
+    "ignore:'audioop' is deprecated:DeprecationWarning",
+]
 
 [tool.coverage.run]
 branch = true

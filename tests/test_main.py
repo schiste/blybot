@@ -190,9 +190,9 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
     assert set(engine.transforms) == {"prompt", "stats", "log_publish", "rule_match"}
     assert set(engine.sinks) == {
         "wiki_section",
-        "telegram_reply",
+        "reply",
         "chat_confirm",
-        "telegram_message",
+        "chat_message",
     }
     # The wiki sink refuses to publish for a scope that never ran
     # /setpage — same policy as /log on self-service deployments.

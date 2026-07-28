@@ -1,12 +1,12 @@
 # Product Spec: Blybot
 
-**A privacy-first Telegram bot that publishes explicitly selected messages to a Meta-wiki page, anonymously.**
+**A privacy-first chat bot — Telegram or Discord — that publishes explicitly selected messages to a Meta-wiki page, anonymously.**
 
 | | |
 |---|---|
 | Status | Draft for review |
 | Name | Blybot |
-| Platform | Telegram Bot API + MediaWiki API (Meta-wiki) |
+| Platforms | Telegram Bot API or Discord gateway (one per instance, see §22) + MediaWiki API (Meta-wiki) |
 | Runtime | Wikimedia Toolforge (continuous job) |
 | Version | v1 scope defined below; later phases parked |
 
@@ -461,6 +461,155 @@ it. A per-tick cap (`max_per_tick`, default 200) bounds fan-out.
 **Deferred:** a per-user subscription cap (abuse guard) and making a
 broadcast channel's `subscribe_code` command-configurable (channels have no
 config commands today — the same limitation as `/action`).
+
+---
+
+## 22. Platform contract & capabilities
+
+The bot ran Telegram-only through v3.1. A later refactor factored every
+Telegram assumption out of the core so a second chat platform (Discord,
+shipped) plugs in behind the same ports, and a third (Slack, IRC, …) needs
+only an adapter — no service or domain change. The core (`domain/` +
+`services/`) now speaks one neutral vocabulary; each platform adapter is
+the sole place that vocabulary meets an SDK.
+
+**Scope: opaque, platform-tagged identity.** The old Telegram-specific
+`(chat_id: int, thread_id: int)` pair is replaced by
+`Scope(platform, channel, thread)` (`domain/models.py`), three **opaque
+strings** the owning adapter mints and interprets — the core never parses
+them, only compares and stores them. `thread` is `""` for a platform
+without threads, or the channel default (what Telegram encoded as
+`thread_id == 0`). A DM target is just a `Scope` whose `channel` is the DM
+handle: on Telegram that handle equals the user id (the R6 subscription
+carve-out, §21.1), on Discord it is the DM channel id — distinct from the
+user id — so one addressing type covers group and DM delivery on both.
+`Scope.key` (`"<platform>:<channel>/<thread>"`) is the collision-free
+dict/registry/log key; the reserved separators `:` and `/` are forbidden
+in the opaque parts so the key never needs escaping.
+
+The **R6 privacy boundary is unchanged**: identity is now platform-tagged,
+but still nothing user-identifying crosses inward. The ToolsDB `profiles`,
+`messages`, and `subscriptions` tables are keyed by the string
+`(platform, channel, thread)`; the legacy integer `chat_id`/`thread_id`
+columns are kept **nullable and dual-written** on the Telegram path so the
+prior release still reads every row after a rollback (a non-Telegram
+platform leaves them `NULL`). Author labels remain HMAC-derived and scoped
+(R-v3.2), unchanged by the retagging.
+
+**Transport port + error taxonomy.** Outbound delivery goes through the
+`Transport` port (`domain/ports.py`): one method `send(OutboundMessage)`
+plus a `capabilities` descriptor. Each adapter maps its SDK's send
+exceptions onto an **abstract, platform-neutral taxonomy** the core reasons
+about:
+
+- **`RateLimited(retry_after)`** — the platform is throttling; wait the
+  stated interval and retry.
+- **`TransientTransportError`** — a retryable blip (timeout, 5xx).
+- **`PermanentTransportError`** — non-retryable (kicked, muted, channel
+  gone); drop this message.
+
+The platform-neutral retry loop lives in `services/delivery.py`
+(`message_loop` / `_deliver`): it retries `RateLimited`/`Transient` up to a
+bounded budget, drops `Permanent` at once, and — importing nothing but
+`domain` + `ports` — drives **every** platform's transport unchanged. The
+Telegram adapter maps python-telegram-bot's `RetryAfter`/`TimedOut`/other
+`TelegramError`; the Discord adapter maps discord.py's
+`RateLimited`/leaked HTTP 429, `DiscordServerError`/`TimeoutError`, and
+other `HTTPException` — the loop never sees either SDK's classes.
+
+**PlatformCapabilities: features gate on the platform, not vice versa.**
+Each transport exposes a frozen `PlatformCapabilities` (`domain/models.py`)
+so services and handlers gate Telegram-shaped features without importing
+any adapter:
+
+- `durable_dm` — the platform can durably DM a user who opted in →
+  opt-in digest **subscriptions** (§21.1) are offered.
+- `message_delete` — the bot can delete a message → `/log` and capture
+  **cleanup** delete the command/reply.
+- `deep_links` — deep-link Start (R5) → newcomer/subscription
+  **onboarding** via a share link (Discord has none; onboarding is slash
+  commands).
+- `chat_picker` — a native "choose a chat" picker (Telegram) vs none.
+- `id_can_change` — ids migrate (Telegram's group→supergroup upgrade) →
+  the `migrate` re-key path (R-v3.2) is exercised.
+- `threads` — the platform has threads/topics at all.
+- `rich_choices` — rich inline choices are available.
+- `max_message_chars` — the platform's hard per-message cap, **injected**
+  wherever outbound text is bounded so no service hard-codes one platform's
+  limit (the chunker and reply sink read it; the Discord transport chunks
+  sends at it).
+
+### 22.1 Capability matrix
+
+Telegram and Discord values are the shipped `TELEGRAM_CAPABILITIES` /
+`DISCORD_CAPABILITIES` constants; Slack and IRC are aspirational targets
+for a future adapter, **not built** — their cells describe the expected
+shape, nothing works yet.
+
+| Capability | Telegram | Discord | Slack (future) | IRC (future) |
+|---|---|---|---|---|
+| `max_message_chars` | 4096 | 2000 | unbuilt | unbuilt |
+| `threads` | yes | yes | unbuilt | unbuilt |
+| `durable_dm` | yes | yes | unbuilt | unbuilt |
+| `deep_links` | yes | no | unbuilt | unbuilt |
+| `chat_picker` | yes | no | unbuilt | unbuilt |
+| `message_delete` | yes | yes | unbuilt | unbuilt |
+| `id_can_change` | yes | no | unbuilt | unbuilt |
+| `rich_choices` | yes | yes | unbuilt | unbuilt |
+
+Telegram supports every gate the core knows about, so on Telegram the
+gates never change behavior — they exist for the platforms (Discord, and
+later ones) that do not.
+
+### 22.2 The two edges
+
+Each adapter has exactly **two edges** where an SDK/int identity meets a
+`Scope`, and the conversion lives only there:
+
+- **Inbound:** an SDK `(channel, thread)` becomes a `Scope`
+  (`telegram/_common.py`; `discord/scope.py` `scope_of` / `dm_scope`),
+  and the author is pseudonymized (R6) — before anything crosses into a
+  neutral service.
+- **Outbound:** the transport turns a `Scope` back into the SDK target
+  (`telegram_target`; `discord_target`) to send.
+
+Everything between compares and stores opaque `Scope`s only. Discord ids
+are int64 snowflakes stored as their decimal strings; a thread is itself a
+channel, so an in-thread `Scope` carries the thread snowflake in `thread`
+and the parent in `channel`.
+
+### 22.3 Drift detection
+
+Two mechanisms make an adapter that drifts from the contract fail CI, so a
+third platform cannot half-implement the seam unnoticed:
+
+**Shared conformance suite (`tests/conformance/`).** Every `Transport`
+implementation (real Telegram driven by a fake bot, real Discord driven by
+a fake client, and the in-repo `FakeTransport`) runs the *same* transport
+contract; every store port's contract runs against *both* the in-memory
+fake and the real ToolsDB adapter over its SQL-level fake runner. One
+registry line per implementation fans the whole contract over it — a new
+transport or store proves itself by being added, and any impl whose
+behavior diverges from the port fails the build. (The SDK-error → taxonomy
+mapping is platform-specific, so those cases are asserted per adapter.)
+
+**Architecture guards (`tests/test_architecture.py`).** Fitness tests
+enforce the layering and neutrality, generalized over a discovered set of
+platforms (so a new adapter package is covered the moment it lands):
+
+- the core imports **no** platform SDK; each adapter imports **only its
+  own** platform's SDK, never another's;
+- every platform package's `transport` module exports a `Transport`
+  implementation **and** a `*_CAPABILITIES` descriptor (registry
+  conformance);
+- **no platform-branded string literal or identifier** appears in the
+  domain data model (prose docstrings that explain the boundary are
+  exempt);
+- **no hard-coded per-message size literal** (`4096`, `3500`) appears in
+  services — caps live only in `PlatformCapabilities`;
+- a platform's user-identity attribute (Telegram's `from_user`) never
+  appears outside its own adapter — the pseudonymization boundary, keyed
+  per platform.
 
 ---
 

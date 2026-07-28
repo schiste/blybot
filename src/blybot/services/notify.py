@@ -2,7 +2,7 @@
 
 Re-homed onto the action framework (v3 phase 5): the poll is a
 ``repo_events`` source, matching + formatting is a ``rule_match``
-transform, and delivery is the generic ``telegram_message`` sink. The
+transform, and delivery is the generic ``chat_message`` sink. The
 :class:`RepoNotifier` shell keeps what the framework does not own — the
 events-enabled scope listing, the operator allowlist, the per-tick cap,
 and per-scope error isolation — and drives one constant spec through the
@@ -45,7 +45,7 @@ REPO_DIGEST_ACTION: Final = ActionSpec(
     trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="repo_poll"),
     source=StepSpec(name="repo_events"),
     transforms=(StepSpec(name="rule_match"),),
-    sink=StepSpec(name="telegram_message"),
+    sink=StepSpec(name="chat_message"),
 )
 
 
@@ -136,7 +136,7 @@ class RuleMatchTransform:
 
 @dataclass(eq=False)
 class ChatMessagesSink:
-    """The generic ``telegram_message`` sink: one message per payload line."""
+    """The generic ``chat_message`` sink: one message per payload line."""
 
     async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
         """Wrap each line in an :class:`OutboundMessage` for the run's scope."""

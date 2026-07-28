@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from telegram import Update
     from telegram.ext import ContextTypes
 
-    from blybot.domain.models import Scope
+    from blybot.domain.models import PlatformCapabilities, Scope
     from blybot.domain.ports import ProfileStore, SubscriptionStore
     from blybot.services.subscriptions import SubscriptionBinding
 
@@ -49,6 +49,7 @@ REPLY_UNSUBSCRIBED: Final = "Unsubscribed."
 REPLY_NO_SUCH_SUB: Final = "No subscription with that id is yours."
 REPLY_NO_SUBS: Final = "You have no digest subscriptions. Tap a subscribe link to start one."
 REPLY_SUBS_HEADER: Final = "Your digest subscriptions:"
+REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this platform."
 
 
 @dataclass(eq=False)
@@ -59,6 +60,9 @@ class SubscriptionHandlers:
     subscriptions: SubscriptionStore
     binding: SubscriptionBinding
     default_lang: str
+    # Subscriptions deliver via durable DMs; admission is gated on the
+    # platform advertising that capability.
+    capabilities: PlatformCapabilities
 
     async def redeem_link(self, context: ContextTypes.DEFAULT_TYPE, dm: Scope, code: str) -> None:
         """Resolve a tapped ``sub_<code>`` link and arm the /subscribe prompt."""
@@ -79,6 +83,9 @@ class SubscriptionHandlers:
         if chat is None:
             return
         dm = dm_scope(chat.id)
+        if not self.capabilities.durable_dm:
+            await _reply(context, dm, REPLY_SUBS_UNAVAILABLE)
+            return
         source = self.binding.pending_target(dm)
         if source is None:
             await _reply(context, dm, REPLY_NO_PENDING)

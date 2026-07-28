@@ -1,10 +1,11 @@
 # Operations runbook
 
 How to run one or many Blybot instances on Wikimedia Toolforge. An
-**instance** = one Telegram bot identity + one config file + one
-continuous job, publishing to its own wiki pages. All instances on a
-tool share the repository checkout, the virtualenv, and the on-wiki
-account.
+**instance** = one config file `~/<name>.env` publishing to its own wiki
+pages; it runs **one continuous job per platform it has a token for**
+(`<name>-telegram`, `<name>-discord`, …) — see "Choosing a platform"
+below. All instances on a tool share the repository checkout, the
+virtualenv, and the on-wiki account.
 
 Everything below runs on a Toolforge bastion **as the tool user**:
 
@@ -24,6 +25,96 @@ nano ~/<name>.env                           # fill it in — see below
 
 The helper names everything after the instance: config `~/<name>.env`,
 wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
+
+## Choosing a platform
+
+One instance runs **every platform it has a token for**, each as its own
+isolated continuous job. Put whichever bot tokens you have in the single
+base env `~/<name>.env`, and `deploy-instance.sh` starts one job per
+platform whose token is present: `TELEGRAM_BOT_TOKEN` → job
+`<name>-telegram`, `DISCORD_BOT_TOKEN` → job `<name>-discord`. Deploying an
+instance always (re)deploys all of them; removing a token retires that
+platform's job on the next deploy. You never hand-create per-platform
+instances, and a crash in one platform's job cannot touch the other's
+(separate process, memory, and `<name>-<platform>.out`/`.err` logs).
+
+Every non-chat feature (wiki publishing, ToolsDB, capture, LLM analyses,
+subscriptions) is shared: the platforms run against the **same** ToolsDB,
+whose rows are platform-tagged (`platform, channel, thread`), so Telegram
+and Discord state coexist without collision.
+
+**Shared env vars (all platforms).** `WIKI_USERNAME`, `WIKI_BOTPASSWORD`,
+`WIKI_API_URL`, `LOG_TARGET_PAGE`, `DM_TARGET_BASE`, `USER_AGENT`,
+`PROFILE_ENCRYPTION_KEY`, `TOOLSDB_HOST` / `TOOLSDB_NAME` / `TOOLSDB_CNF`,
+`ARCHIVE_PSEUDONYM_KEY`, and the `LIFTWING_*` / `LLM_*` analysis keys mean
+the same thing for every platform.
+
+**Per-platform tokens:** `TELEGRAM_BOT_TOKEN` (Telegram prerequisites
+below), `DISCORD_BOT_TOKEN` (Discord runbook below). Set as many as you
+want to run; an instance with none fails fast with
+`deploy-instance: … has no bot token yet`.
+
+(`PLATFORM` in the env file is only consulted for a direct
+single-platform run — `python -m blybot`; the Toolforge deploy overrides it
+per job from the tokens present, so you normally leave it unset.)
+
+### Discord setup runbook
+
+1. **Create the application + bot.** At
+   [discord.com/developers/applications](https://discord.com/developers/applications)
+   → **New Application**. Open **Bot**, then **Reset Token** and copy the
+   value into `DISCORD_BOT_TOKEN` in the instance env file (over SSH,
+   never into a chat or commit).
+2. **Enable the privileged intents.** On the same **Bot** page, turn on
+   **Message Content Intent** (capture cannot read message text without
+   it) and **Server Members Intent**. Both are privileged and off by
+   default.
+3. **Invite the bot.** **OAuth2 → URL Generator**: scopes `bot` and
+   `applications.commands`; bot permissions **View Channels**, **Send
+   Messages**, **Send Messages in Threads**, **Read Message History**.
+   Open the generated URL and add the bot to the server.
+4. **Configure the instance.** Add `DISCORD_BOT_TOKEN=…` to `~/<name>.env`
+   (alongside any `TELEGRAM_BOT_TOKEN` — both run side by side), then
+   `~/blybot/deploy-instance.sh start <name>`. That starts (or restarts) a
+   `<name>-discord` job automatically; no `PLATFORM` line is needed.
+
+Slash commands are published on startup (`CommandTree.sync`) and can take
+**several minutes** to appear in the client the first time — this is
+Discord-side propagation, not a bot fault. Onboarding is slash commands,
+not deep links (`deep_links=False`): a channel becomes subscribable the
+first time anyone runs `/subscribe` in it, rather than via an
+admin-shared link.
+
+Admin config and the digest flow are the slash commands the gateway
+registers: `/capture on|off` and `/setpage <path>` (server admins), and
+`/subscribe [schedule] [recipe] [lang:xx]`, `/mysubs`, `/unsubscribe <id>`
+for the durable-DM digests. Server-admin checks are live
+(`guild_permissions.administrator`), never stored. Capture ingestion,
+pseudonymization, the archive, LLM analyses, and subscription delivery
+reuse the same neutral services as Telegram.
+
+### What Discord does NOT do yet
+
+The Discord adapter ships capture + analyses + subscriptions only. These
+Telegram surfaces are **deferred / not yet built** on Discord, so an
+operator should not expect parity:
+
+- **Repository notifications** — `/setrepo`, `/events`, `/rule`,
+  `/rules`, and the background repo poller are Telegram-only; the Discord
+  admin surface does not configure them.
+- **Scheduled wiki analyses** — the action scheduler (`/action`) does not
+  run on Discord; only the subscription digest tick and the capture
+  reminder run in the background.
+- **Full admin parity** — `/setrepo`, `/events`, `/rule`, `/llm`,
+  `/action`, `/settings` (and the rest of the Telegram self-service menu)
+  have no Discord slash-command equivalent yet. Discord admins have only
+  `/capture` and `/setpage`.
+- **DM `/log` + the chat picker** — the private `/log` flow and the
+  "choose a shared group" picker depend on `deep_links` / `chat_picker`,
+  which Discord lacks.
+
+Everything above is intentionally absent, not broken — it lands when the
+Discord admin surface grows the corresponding commands.
 
 ## Per-instance prerequisites
 

@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from blybot.domain.models import CapturedMessage, GroupProfile, Scope
 from blybot.observability import Counters
-from blybot.services.capture import MAX_TEXT_CHARS, CaptureReminder, CaptureService
+from blybot.services.capture import CaptureReminder, CaptureService
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
 
@@ -16,11 +16,15 @@ def sc(chat_id: int, thread: int = 0) -> Scope:
     return Scope("telegram", str(chat_id), str(thread) if thread else "")
 
 
+MAX_TEXT_CHARS = 4096  # Telegram's cap, injected here just as the composition root does
+
+
 def make_service(
     store: InMemoryProfiles,
     archive: InMemoryArchive,
     clock: FakeClock,
     per_minute: int = 100,
+    max_chars: int = MAX_TEXT_CHARS,
 ) -> tuple[CaptureService, Counters]:
     counters = Counters()
     service = CaptureService(
@@ -29,6 +33,7 @@ def make_service(
         limiter=SlidingWindowLimiter(clock=clock, limit=per_minute, window=timedelta(minutes=1)),
         clock=clock,
         counters=counters,
+        max_chars=max_chars,
     )
     return service, counters
 

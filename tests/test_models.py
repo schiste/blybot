@@ -2,11 +2,48 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from blybot.domain.models import LogContent, LogMedia, Pseudonym, Session
+from blybot.domain.models import (
+    LogContent,
+    LogMedia,
+    PlatformCapabilities,
+    Pseudonym,
+    Session,
+)
+from blybot.domain.ports import RateLimited
+
+
+def test_platform_capabilities_construct_and_default_off() -> None:
+    caps = PlatformCapabilities(max_message_chars=4096)
+    assert caps.max_message_chars == 4096
+    # Every optional capability defaults to off; a bare cap grants nothing.
+    assert not any(
+        (
+            caps.threads,
+            caps.durable_dm,
+            caps.deep_links,
+            caps.chat_picker,
+            caps.message_delete,
+            caps.id_can_change,
+            caps.rich_choices,
+        )
+    )
+    rich = PlatformCapabilities(max_message_chars=2000, threads=True, durable_dm=True)
+    assert rich.threads is True
+    assert rich.durable_dm is True
+
+
+def test_platform_capabilities_rejects_nonpositive_cap() -> None:
+    with pytest.raises(ValueError, match="max_message_chars"):
+        PlatformCapabilities(max_message_chars=0)
+
+
+def test_rate_limited_carries_its_retry_after() -> None:
+    error = RateLimited(timedelta(seconds=5))
+    assert error.retry_after == timedelta(seconds=5)
 
 
 def test_pseudonym_rejects_empty_value() -> None:

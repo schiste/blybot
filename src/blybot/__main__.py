@@ -350,6 +350,9 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         page_url_for=config.page_url,
         counters=counters,
         capture_service=capture_service,
+        vault=store,
+        llm_defaults=llm_defaults,
+        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
     )
     admin_handlers = AdminHandlers(
         directory=directory,
@@ -361,8 +364,6 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         commands=commands,
         archive=archive,
         capture_service=capture_service,
-        llm_defaults=llm_defaults,
-        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
         actions=store if analysis_handlers is not None else None,
         clock=clock,
     )
@@ -546,8 +547,10 @@ def run_discord(config: Config) -> int:
     capture_service: CaptureService | None = None
     masker: DiscordAuthorMasker | None = None
     analysis_service: AnalysisService | None = None
+    llm_defaults: LlmSettings | None = None
     collectors: list[tuple[MessageCollector, str]] = []
     if store is not None and archive is not None and subscriptions_store is not None:
+        llm_defaults = LlmSettings(lang=config.llm_default_lang)
         llm_client = LiftWingClient(
             api_base=config.liftwing_api_base,
             user_agent=config.user_agent,
@@ -564,7 +567,7 @@ def run_discord(config: Config) -> int:
                 "prompt": PromptTransform(
                     runners={"liftwing": llm_client},
                     store=store,
-                    defaults=LlmSettings(lang=config.llm_default_lang),
+                    defaults=llm_defaults,
                     max_tokens_ceiling=config.llm_max_tokens_ceiling,
                     max_chunks=config.llm_max_chunks_per_run,
                     counters=counters,
@@ -639,6 +642,9 @@ def run_discord(config: Config) -> int:
         page_url_for=config.page_url,
         counters=counters,
         capture_service=capture_service,
+        vault=store,
+        llm_defaults=llm_defaults,
+        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
     )
     gateway = DiscordGateway(
         directory=directory,

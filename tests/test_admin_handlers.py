@@ -72,6 +72,7 @@ def make_handlers(
             page_url_for=_page_url,
             counters=counters,
             capture_service=None,
+            vault=store,
         ),
     )
 
@@ -265,7 +266,7 @@ async def test_reset_returns_the_group_to_defaults() -> None:
     await handlers.directory.set_log_page(gscope(), "WikiProject Ours")
     await handlers.on_reset(command("/reset"), context)
     assert store.profiles == {}
-    assert tg.sent_texts(bot)[-1] == a.REPLY_RESET.format(scope="the group default")
+    assert tg.sent_texts(bot)[-1] == cmd.REPLY_RESET
 
 
 async def test_reset_reports_storage_outage() -> None:
@@ -309,7 +310,7 @@ async def test_revoke_discards_the_token() -> None:
     context, bot = admin_context()
     await handlers.on_revoke(command("/revoke"), context)
     assert store.tokens == {}
-    assert tg.sent_texts(bot) == [a.REPLY_PAT_REVOKED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_REVOKED]
 
 
 async def test_revoke_reports_storage_outage() -> None:
@@ -321,10 +322,10 @@ async def test_revoke_reports_storage_outage() -> None:
 
 async def test_revoke_without_a_vault_reports_self_service_off() -> None:
     handlers = make_handlers()
-    handlers.vault = None  # store present but no vault: defensive wiring
+    handlers.commands.vault = None  # store present but no vault: defensive wiring
     context, bot = admin_context()
     await handlers.on_revoke(command("/revoke"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_SELF_SERVICE_OFF]
+    assert tg.sent_texts(bot) == [cmd.REPLY_SELF_SERVICE_OFF]
 
 
 async def test_events_on_requires_a_repo_at_this_scope() -> None:
@@ -752,8 +753,10 @@ async def test_subscribable_reports_storage_outage() -> None:
 
 def make_llm_handlers(store: InMemoryProfiles | None = None) -> a.AdminHandlers:
     handlers = make_handlers(store)
-    handlers.llm_defaults = LlmSettings()
-    handlers.llm_max_tokens_ceiling = 4096
+    # /llm's defaults + ceiling now live on the shared CommandService the
+    # handler delegates to.
+    handlers.commands.llm_defaults = LlmSettings()
+    handlers.commands.llm_max_tokens_ceiling = 4096
     return handlers
 
 
@@ -761,7 +764,7 @@ async def test_llm_without_deployment_support_says_so() -> None:
     handlers = make_handlers()  # llm_defaults left unset
     context, bot = admin_context(args=["show"])
     await handlers.on_llm(command("/llm show"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_LLM_OFF_DEPLOY]
+    assert tg.sent_texts(bot) == [cmd.REPLY_LLM_OFF_DEPLOY]
 
 
 async def test_llm_usage_on_bad_subcommands() -> None:
@@ -769,7 +772,7 @@ async def test_llm_usage_on_bad_subcommands() -> None:
     for args in ([], ["set"], ["frobnicate"]):
         context, bot = admin_context(args=args)
         await handlers.on_llm(command("/llm"), context)
-        assert tg.sent_texts(bot) == [a.REPLY_LLM_USAGE]
+        assert tg.sent_texts(bot) == [cmd.REPLY_LLM_USAGE]
 
 
 async def test_llm_show_reports_defaults_then_scope_settings() -> None:
@@ -798,7 +801,7 @@ async def test_llm_in_a_topic_builds_on_the_inherited_group_settings() -> None:
 
     context, bot = admin_context(args=["show"])
     await handlers.on_llm(command_in_topic("/llm show", 7), context)
-    assert "inherited from the group" in tg.sent_texts(bot)[0]
+    assert "inherited from the parent scope" in tg.sent_texts(bot)[0]
     assert "model:large" in tg.sent_texts(bot)[0]
 
     # A partial edit in the topic keeps the inherited model/lang instead

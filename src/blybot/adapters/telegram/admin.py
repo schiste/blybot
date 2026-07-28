@@ -9,7 +9,7 @@ only the ``/log`` flow's transient messages self-delete.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
@@ -23,7 +23,7 @@ from blybot.adapters.telegram._common import (
     send_threaded,
     thread_of,
 )
-from blybot.domain.models import ConsentMode, LlmSettings, Scope
+from blybot.domain.models import ConsentMode, Scope
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
 from blybot.services.actions import (
@@ -33,7 +33,6 @@ from blybot.services.actions import (
     parse_action,
 )
 from blybot.services.directory import TooManyRulesError
-from blybot.services.llmconf import LlmParseError, describe_llm, parse_llm_args
 from blybot.services.rules import MAX_RULES, RuleParseError, describe_rule, parse_rule
 from blybot.services.subscriptions import mint_subscribe_code
 
@@ -59,7 +58,8 @@ REPLY_STORAGE_DOWN: Final = "Configuration is temporarily unavailable — please
 # share it); on_setpage renders whatever CommandResult it returns.
 REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode} (group-wide)."
 REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
-REPLY_RESET: Final = "Forgotten. {scope} is back on the inherited defaults."
+# /reset's wording now lives in the neutral CommandService (both platforms
+# share it); on_reset renders whatever CommandResult it returns.
 REPLY_SETREPO_USAGE: Final = "Usage: /setrepo owner/repository"
 REPLY_REPO_BOUND: Final = (
     "Repo bound for {scope}: {repo} (any previously stored token was "
@@ -67,7 +67,8 @@ REPLY_REPO_BOUND: Final = (
     "GitHub token privately — tap {link} (valid 10 minutes). Use a "
     "fine-grained PAT restricted to {repo} with Issues read/write only."
 )
-REPLY_PAT_REVOKED: Final = "Token discarded. /issue and /repo are disabled for this group."
+# /revoke's wording now lives in the neutral CommandService (both platforms
+# share it); on_revoke renders whatever CommandResult it returns.
 REPLY_EVENTS_NEED_REPO: Final = (
     "Bind a repository at this scope first: /setrepo owner/repo here in the "
     "topic (or in General for the group), then /events on."
@@ -109,15 +110,8 @@ REPLY_RULES_LIST: Final = "Rules for {scope}:\n{lines}"
 REPLY_RULES_FULL: Final = (
     "You already have the maximum of {max} rules at {scope}; remove one with /rule remove <id>."
 )
-REPLY_LLM_USAGE: Final = (
-    "Usage: /llm show · /llm set key:value … · /llm reset\n"
-    "Keys: platform, model (default|large), lang (output language), "
-    "temp (0..1), max_tokens"
-)
-REPLY_LLM_OFF_DEPLOY: Final = "LLM analyses aren't enabled on this deployment; ask the operator."
-REPLY_LLM_SHOW: Final = "LLM settings for {scope} ({origin}):\n{line}"
-REPLY_LLM_SET: Final = "LLM settings updated for {scope}: {line}"
-REPLY_LLM_RESET: Final = "LLM settings for {scope} back to deployment defaults."
+# /llm show|set|reset wording now lives in the neutral CommandService (both
+# platforms share it); on_llm renders whatever CommandResult it returns.
 REPLY_ACTION_USAGE: Final = (
     "Usage:\n"
     "/action add <schedule> <recipe> [key=value …]\n"
@@ -170,15 +164,8 @@ SETUP_TEXT: Final = (
     "Everything I publish is public and permanent; see /settings for "
     "where it currently lands."
 )
-SETTINGS_TEMPLATE: Final = (
-    "Configuration for {scope}{customized}:\n"
-    "- /log publishes to: {log_page}\n"
-    "- consent policy: {consent}\n"
-    "- GitHub repo: {repo}\n"
-    "- repo token stored: {token}\n"
-    "- repo notifications: {events}\n"
-    "- message capture: {capture}"
-)
+# /settings' wording now lives in the neutral CommandService (both platforms
+# share it); on_settings renders whatever CommandResult it returns.
 
 _ADMIN_STATUSES: Final = frozenset({ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER})
 
@@ -235,10 +222,9 @@ class AdminHandlers:
     # and the ingest service whose policy cache /capture must invalidate.
     archive: MessageArchive | None = None
     capture_service: CaptureService | None = None
-    # Analysis-enabled deployments only: the /llm defaults and hard cap,
-    # plus the action store and clock behind /action scheduling.
-    llm_defaults: LlmSettings | None = None
-    llm_max_tokens_ceiling: int = 4096
+    # Analysis-enabled deployments only: the action store and clock behind
+    # /action scheduling. (/llm's defaults and hard cap now live on the
+    # shared CommandService this handler delegates to.)
     actions: ActionStore | None = None
     clock: Clock | None = None
 
@@ -337,21 +323,13 @@ class AdminHandlers:
         await self._reply(context, chat_id, thread_id, reply)
 
     async def on_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Discard this group's stored API token."""
+        """Discard this group's stored API token (delegates to the shared service)."""
         scope = await self._admin_chat(update, context)
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        if self.vault is None:
-            await self._reply(context, chat_id, thread_id, REPLY_SELF_SERVICE_OFF)
-            return
-        try:
-            await self.vault.delete_token(scope)
-        except StorageError:
-            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
-            return
-        log_event("token_revoked", "ok")
-        await self._reply(context, chat_id, thread_id, REPLY_PAT_REVOKED)
+        result = await self.commands.revoke_token(scope, is_admin=True)
+        await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch this (group, topic)'s rule-driven notifications on or off.
@@ -483,62 +461,17 @@ class AdminHandlers:
         return REPLY_ACTIONS_LIST.format(scope=_scope(scope), lines=lines)
 
     async def on_llm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show, set, or reset this scope's LLM settings (v3 §2.4)."""
+        """Show, set, or reset this scope's LLM settings (v3 §2.4).
+
+        The admin gate stays here; the grammar, validation, and wording are
+        the shared CommandService's — this only maps the trigger.
+        """
         scope = await self._admin_chat(update, context)
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        defaults = self.llm_defaults
-        if defaults is None:
-            await self._reply(context, chat_id, thread_id, REPLY_LLM_OFF_DEPLOY)
-            return
-        args = list(context.args or ())
-        sub = args[0].lower() if args else ""
-        try:
-            if sub == "show":
-                reply = await self._llm_show(scope, defaults)
-            elif sub == "set" and len(args) > 1:
-                reply = await self._llm_set(scope, args[1:], defaults)
-            elif sub == "reset":
-                await self.directory.set_llm(scope, None)
-                log_event("profile_update", "ok")
-                reply = REPLY_LLM_RESET.format(scope=_scope(scope))
-            else:
-                reply = REPLY_LLM_USAGE
-        except StorageError:
-            reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat_id, thread_id, reply)
-
-    async def _effective_llm(self, scope: Scope, defaults: LlmSettings) -> tuple[LlmSettings, str]:
-        """Resolve topic override → group default → deployment defaults."""
-        own = await self.directory.profile_of(scope)
-        if own.llm:
-            return own.llm, "set for this scope"
-        if scope.thread:
-            group = await self.directory.profile_of(replace(scope, thread=""))
-            if group.llm:
-                return group.llm, "inherited from the group"
-        return defaults, "deployment defaults"
-
-    async def _llm_show(self, scope: Scope, defaults: LlmSettings) -> str:
-        settings, origin = await self._effective_llm(scope, defaults)
-        return REPLY_LLM_SHOW.format(
-            scope=_scope(scope), origin=origin, line=describe_llm(settings)
-        )
-
-    async def _llm_set(self, scope: Scope, tokens: list[str], defaults: LlmSettings) -> str:
-        # Partial edits build on what the scope actually runs with — for
-        # a topic that inherits, that's the group settings, not the
-        # deployment defaults (otherwise `set temp:0.4` would silently
-        # reset an inherited model/lang).
-        base, _ = await self._effective_llm(scope, defaults)
-        try:
-            settings = parse_llm_args(" ".join(tokens), base, self.llm_max_tokens_ceiling)
-        except LlmParseError as error:
-            return str(error)
-        await self.directory.set_llm(scope, settings)
-        log_event("profile_update", "ok")
-        return REPLY_LLM_SET.format(scope=_scope(scope), line=describe_llm(settings))
+        result = await self.commands.set_llm(scope, is_admin=True, tokens=list(context.args or ()))
+        await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or clear this (group, topic)'s composable event rules."""
@@ -603,38 +536,26 @@ class AdminHandlers:
         await self._reply(context, chat_id, thread_id, text)
 
     async def on_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Show this group's effective configuration."""
+        """Show this group's effective configuration.
+
+        The admin gate stays here; the resolution and formatting are the
+        shared CommandService's — this only maps the trigger.
+        """
         scope = await self._admin_chat(update, context)
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        settings = await self.directory.resolve(scope)
-        own = await self.directory.profile_of(scope)
-        text = SETTINGS_TEMPLATE.format(
-            scope=_scope(scope),
-            customized="" if settings.customized else " (all defaults)",
-            log_page=self.page_url_for(settings.log_page),
-            consent=settings.consent_mode.value,
-            repo=settings.repo or "none",
-            token="yes" if settings.has_token else "no",
-            events=(f"on ({len(own.rules)} rule(s))" if own.events_enabled else "off"),
-            capture="on" if own.capture_enabled else "off",
-        )
-        await self._reply(context, chat_id, thread_id, text)
+        result = await self.commands.show_settings(scope, is_admin=True)
+        await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Forget this group's profile entirely."""
+        """Forget this group's profile entirely (delegates to the shared service)."""
         scope = await self._admin_chat(update, context)
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        try:
-            await self.directory.reset(scope)
-        except StorageError:
-            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
-            return
-        log_event("profile_reset", "ok")
-        await self._reply(context, chat_id, thread_id, REPLY_RESET.format(scope=_scope(scope)))
+        result = await self.commands.reset(scope, is_admin=True)
+        await self._reply(context, chat_id, thread_id, result.text)
 
     @staticmethod
     async def _reply(

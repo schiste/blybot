@@ -144,6 +144,38 @@ class DiscordGateway:
         )
         return result.text
 
+    async def settings_command(
+        self, channel_id: int, thread_id: int | None, *, is_admin: bool
+    ) -> str:
+        """Show this channel's effective configuration (server admins only)."""
+        result = await self.commands.show_settings(
+            scope_of(channel_id, thread_id), is_admin=is_admin
+        )
+        return result.text
+
+    async def reset_command(self, channel_id: int, thread_id: int | None, *, is_admin: bool) -> str:
+        """Forget this channel's profile, returning it to defaults (server admins only)."""
+        result = await self.commands.reset(scope_of(channel_id, thread_id), is_admin=is_admin)
+        return result.text
+
+    async def revoke_command(
+        self, channel_id: int, thread_id: int | None, *, is_admin: bool
+    ) -> str:
+        """Discard this channel's stored API token (server admins only)."""
+        result = await self.commands.revoke_token(
+            scope_of(channel_id, thread_id), is_admin=is_admin
+        )
+        return result.text
+
+    async def llm_command(
+        self, channel_id: int, thread_id: int | None, options: str, *, is_admin: bool
+    ) -> str:
+        """Show, set, or reset this channel's LLM settings (server admins only)."""
+        result = await self.commands.set_llm(
+            scope_of(channel_id, thread_id), is_admin=is_admin, tokens=options.split()
+        )
+        return result.text
+
     async def analyze_command(
         self,
         channel_id: int,
@@ -347,6 +379,51 @@ class DiscordGatewayClient(discord.Client):
             channel_id, thread_id = _channel_ids(interaction.channel)
             reply = await gateway.setpage_command(
                 channel_id, thread_id, page, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="settings", description="Show this channel's configuration (admins)."
+        )
+        @app_commands.guild_only()
+        async def settings(interaction: discord.Interaction) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.settings_command(
+                channel_id, thread_id, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="reset", description="Forget this channel's configuration (admins)."
+        )
+        @app_commands.guild_only()
+        async def reset(interaction: discord.Interaction) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.reset_command(
+                channel_id, thread_id, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="revoke", description="Discard this channel's stored token (admins)."
+        )
+        @app_commands.guild_only()
+        async def revoke(interaction: discord.Interaction) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.revoke_command(
+                channel_id, thread_id, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="llm", description="Show/set/reset this channel's LLM settings (admins)."
+        )
+        @app_commands.guild_only()
+        @app_commands.describe(options="show · set key:value … · reset")
+        async def llm(interaction: discord.Interaction, options: str = "") -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.llm_command(
+                channel_id, thread_id, options, is_admin=_is_admin(interaction.user)
             )
             await _respond(interaction, reply)
 

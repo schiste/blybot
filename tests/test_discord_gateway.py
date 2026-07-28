@@ -24,7 +24,14 @@ from blybot.adapters.discord.gateway import (
     build_gateway_client,
     default_intents,
 )
-from blybot.domain.models import ConsentMode, GroupProfile, OutboundMessage, Schedule, Scope
+from blybot.domain.models import (
+    ConsentMode,
+    GroupProfile,
+    LlmSettings,
+    OutboundMessage,
+    Schedule,
+    Scope,
+)
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
 from blybot.services import analysis_run as ar
@@ -73,6 +80,8 @@ def _make_gateway(
     subscriptions: InMemorySubscriptions | None = None,
     analysis: AnalysisService | None = None,
     default_lang: str = "en",
+    vault: InMemoryProfiles | None = None,
+    llm_defaults: LlmSettings | None = None,
 ) -> DiscordGateway:
     """A gateway wired to a matching CommandService (identity page_url_for)."""
     commands = CommandService(
@@ -81,6 +90,9 @@ def _make_gateway(
         page_url_for=str,
         counters=Counters(),
         capture_service=capture,
+        vault=vault,
+        llm_defaults=llm_defaults,
+        llm_max_tokens_ceiling=4096,
     )
     return DiscordGateway(
         directory=directory,
@@ -313,6 +325,89 @@ async def test_setpage_command_reports_storage_down() -> None:
     assert reply == cmd.REPLY_STORAGE_DOWN
 
 
+# --- DiscordGateway config commands (settings/reset/revoke/llm) --------------
+
+
+def _admin_gateway(
+    *, store: InMemoryProfiles | None = None, with_llm: bool = True
+) -> tuple[DiscordGateway, InMemoryProfiles]:
+    """A gateway whose CommandService carries the vault + (optional) LLM defaults."""
+    store = store if store is not None else InMemoryProfiles()
+    gateway = _make_gateway(
+        _directory(store),
+        GroupPolicy(allowed=set()),
+        vault=store,
+        llm_defaults=LlmSettings() if with_llm else None,
+    )
+    return gateway, store
+
+
+async def test_settings_command_rejects_non_admins() -> None:
+    gateway, _store = _admin_gateway()
+    assert await gateway.settings_command(_CHANNEL, None, is_admin=False) == cmd.REPLY_NOT_ADMIN
+
+
+async def test_settings_command_reports_the_configuration() -> None:
+    gateway, _store = _admin_gateway()
+    reply = await gateway.settings_command(_CHANNEL, None, is_admin=True)
+    assert "(all defaults)" in reply
+    assert "message capture: off" in reply
+
+
+async def test_reset_command_rejects_non_admins() -> None:
+    gateway, _store = _admin_gateway()
+    assert await gateway.reset_command(_CHANNEL, None, is_admin=False) == cmd.REPLY_NOT_ADMIN
+
+
+async def test_reset_command_forgets_the_profile() -> None:
+    gateway, store = _admin_gateway()
+    await gateway.setpage_command(_CHANNEL, None, "WikiProject Foo", is_admin=True)
+    reply = await gateway.reset_command(_CHANNEL, None, is_admin=True)
+    assert reply == cmd.REPLY_RESET
+    assert store.profiles == {}
+
+
+async def test_revoke_command_rejects_non_admins() -> None:
+    gateway, _store = _admin_gateway()
+    assert await gateway.revoke_command(_CHANNEL, None, is_admin=False) == cmd.REPLY_NOT_ADMIN
+
+
+async def test_revoke_command_discards_the_token() -> None:
+    gateway, store = _admin_gateway()
+    await store.store_token(_SCOPE, "ghp_x")
+    reply = await gateway.revoke_command(_CHANNEL, None, is_admin=True)
+    assert reply == cmd.REPLY_REVOKED
+    assert store.tokens == {}
+
+
+async def test_llm_command_rejects_non_admins() -> None:
+    gateway, _store = _admin_gateway()
+    assert await gateway.llm_command(_CHANNEL, None, "show", is_admin=False) == cmd.REPLY_NOT_ADMIN
+
+
+async def test_llm_command_reports_when_off_on_the_deployment() -> None:
+    gateway, _store = _admin_gateway(with_llm=False)
+    assert (
+        await gateway.llm_command(_CHANNEL, None, "show", is_admin=True) == cmd.REPLY_LLM_OFF_DEPLOY
+    )
+
+
+async def test_llm_command_sets_and_shows() -> None:
+    gateway, store = _admin_gateway()
+    confirmation = await gateway.llm_command(
+        _CHANNEL, None, "set model:large lang:fr", is_admin=True
+    )
+    assert "model:large" in confirmation
+    assert store.profiles[_SCOPE].llm == LlmSettings(model="large", lang="fr")
+    shown = await gateway.llm_command(_CHANNEL, None, "show", is_admin=True)
+    assert cmd._LLM_ORIGIN_OWN in shown
+
+
+async def test_llm_command_shows_usage_for_no_arguments() -> None:
+    gateway, _store = _admin_gateway()
+    assert await gateway.llm_command(_CHANNEL, None, "", is_admin=True) == cmd.REPLY_LLM_USAGE
+
+
 # --- DiscordGateway.analyze_command ------------------------------------------
 
 
@@ -519,8 +614,12 @@ def test_build_registers_every_slash_command() -> None:
     names = sorted(command.name for command in client.tree.get_commands())
     assert names == [
         "capture",
+        "llm",
         "mysubs",
+        "reset",
+        "revoke",
         "setpage",
+        "settings",
         "stats",
         "subscribe",
         "summarize",
@@ -639,6 +738,53 @@ async def test_setpage_slash_command_answers_ephemerally() -> None:
     await _command(client, "setpage").callback(interaction, "WikiProject Foo")
     assert interaction.response.sent[0][1] is True
     assert store.profiles[_SCOPE].log_page == "WikiProject Foo/Discord logs"
+
+
+async def test_settings_slash_command_answers_ephemerally() -> None:
+    gateway, _store = _admin_gateway()
+    client = build_gateway_client(gateway)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await _command(client, "settings").callback(interaction)
+    (content, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is True
+    assert "(all defaults)" in content
+
+
+async def test_reset_slash_command_answers_ephemerally() -> None:
+    gateway, store = _admin_gateway()
+    client = build_gateway_client(gateway)
+    await gateway.setpage_command(_CHANNEL, None, "WikiProject Foo", is_admin=True)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await _command(client, "reset").callback(interaction)
+    assert interaction.response.sent == [(cmd.REPLY_RESET, True)]
+    assert store.profiles == {}
+
+
+async def test_revoke_slash_command_answers_ephemerally() -> None:
+    gateway, store = _admin_gateway()
+    await store.store_token(_SCOPE, "ghp_x")
+    client = build_gateway_client(gateway)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await _command(client, "revoke").callback(interaction)
+    assert interaction.response.sent == [(cmd.REPLY_REVOKED, True)]
+    assert store.tokens == {}
+
+
+async def test_llm_slash_command_sets_and_answers_ephemerally() -> None:
+    gateway, store = _admin_gateway()
+    client = build_gateway_client(gateway)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await _command(client, "llm").callback(interaction, "set model:large")
+    assert interaction.response.sent[0][1] is True
+    assert store.profiles[_SCOPE].llm == LlmSettings(model="large")
+
+
+async def test_llm_slash_command_defaults_to_usage_without_arguments() -> None:
+    gateway, _store = _admin_gateway()
+    client = build_gateway_client(gateway)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await _command(client, "llm").callback(interaction)
+    assert interaction.response.sent == [(cmd.REPLY_LLM_USAGE, True)]
 
 
 class _DeferInteraction:

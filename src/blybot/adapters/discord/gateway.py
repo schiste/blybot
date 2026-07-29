@@ -46,7 +46,10 @@ from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
 from blybot.services import commands as cmd
 from blybot.services.subscriptions import (
+    MAX_SUBS_PER_USER,
+    SubscriptionCapReachedError,
     SubscriptionParseError,
+    admit_subscription,
     mint_sub_id,
     mint_subscribe_code,
     parse_subscription,
@@ -109,6 +112,8 @@ class DiscordGateway:
     subscriptions: SubscriptionStore | None = None
     analysis: AnalysisService | None = None
     default_lang: str = "en"
+    # Per-subscriber ceiling enforced at /subscribe admission (#23).
+    max_subs_per_user: int = MAX_SUBS_PER_USER
 
     async def ingest_message(  # noqa: PLR0913 -- the flattened message facts
         self,
@@ -336,7 +341,9 @@ class DiscordGateway:
         )
         try:
             await self._ensure_subscribable(scope)
-            await subscriptions.add(subscription)
+            await admit_subscription(subscriptions, subscription, self.max_subs_per_user)
+        except SubscriptionCapReachedError as error:
+            return str(error)
         except StorageError:
             return REPLY_STORAGE_DOWN
         log_event("subscription_add", "ok")

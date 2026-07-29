@@ -24,6 +24,7 @@ from blybot.adapters.discord.gateway import (
     build_gateway_client,
     default_intents,
 )
+from blybot.adapters.discord.scope import dm_scope
 from blybot.domain.models import (
     ConsentMode,
     GroupProfile,
@@ -1179,3 +1180,23 @@ async def test_issue_and_repo_slash_commands_stay_ephemeral() -> None:
     (summary, ephemeral) = interaction.response.sent[0]
     assert ephemeral is True
     assert "org/repo" in summary
+
+
+async def test_subscribe_refuses_past_the_per_user_cap() -> None:
+    """Issue #23: one subscriber cannot create unbounded rows."""
+    store = InMemoryProfiles()
+    subs = InMemorySubscriptions()
+    directory = _directory(store)
+    groups = GroupPolicy(allowed=set())
+    gateway = _make_gateway(directory, groups, subscriptions=subs)
+    gateway.max_subs_per_user = 2
+
+    for _ in range(2):
+        assert "Subscribed" in await gateway.subscribe_command(_CHANNEL, None, 321, "")
+    refused = await gateway.subscribe_command(_CHANNEL, None, 321, "")
+    assert "maximum of 2" in refused
+    assert len(subs.subs) == 2  # nothing extra was written
+
+    # A different subscriber is unaffected, and the existing rows survive.
+    assert "Subscribed" in await gateway.subscribe_command(_CHANNEL, None, 999, "")
+    assert len(await subs.list_for_user(dm_scope(321))) == 2

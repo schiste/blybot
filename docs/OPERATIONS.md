@@ -421,6 +421,24 @@ a `~/<name>.env`.
   | `event=wiki_edit outcome=retry` | maxlag/transient API backoff in progress |
   | `event=wiki_login outcome=error` | BotPassword rejected — check credentials |
 
+### Subscription limits
+
+Two independent ceilings bound the digest feature, and they answer different
+questions:
+
+| Limit | Default | Bounds | Enforced at |
+|---|---|---|---|
+| `max_subs_per_user` | 10 | one **subscriber** | `/subscribe` admission, both platforms |
+| `SubscriptionScheduler.max_per_tick` | 200 | the whole **deployment** per cycle | the digest tick |
+
+The per-tick cap alone is not an abuse guard: without a per-user cap one
+subscriber could fill the entire 200-row budget and starve everyone else,
+since each row costs an engine run and a DM every cycle. The per-user cap
+stops that; the per-tick cap still bounds total work when many *legitimate*
+subscribers are due at once. A refused `/subscribe` names the cap and points
+at `/unsubscribe`, and leaves the pending target armed so freeing a slot and
+retrying needs no fresh link.
+
 ## Secrets and key rotation
 
 Where every secret lives at rest, and how to change it. All of it is file

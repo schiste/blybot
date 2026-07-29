@@ -17,7 +17,14 @@ from blybot.adapters.telegram._common import dm_scope
 from blybot.domain.ports import StorageError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
-from blybot.services.subscriptions import SubscriptionParseError, mint_sub_id, parse_subscription
+from blybot.services.subscriptions import (
+    MAX_SUBS_PER_USER,
+    SubscriptionCapReachedError,
+    SubscriptionParseError,
+    admit_subscription,
+    mint_sub_id,
+    parse_subscription,
+)
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -63,6 +70,8 @@ class SubscriptionHandlers:
     # Subscriptions deliver via durable DMs; admission is gated on the
     # platform advertising that capability.
     capabilities: PlatformCapabilities
+    # Per-subscriber ceiling enforced at /subscribe admission (#23).
+    max_subs_per_user: int = MAX_SUBS_PER_USER
 
     async def redeem_link(self, context: ContextTypes.DEFAULT_TYPE, dm: Scope, code: str) -> None:
         """Resolve a tapped ``sub_<code>`` link and arm the /subscribe prompt."""
@@ -106,7 +115,10 @@ class SubscriptionHandlers:
             lang=lang,
         )
         try:
-            await self.subscriptions.add(subscription)
+            await admit_subscription(self.subscriptions, subscription, self.max_subs_per_user)
+        except SubscriptionCapReachedError as error:
+            await _reply(context, dm, str(error))
+            return
         except StorageError:
             await _reply(context, dm, REPLY_STORAGE_DOWN)
             return

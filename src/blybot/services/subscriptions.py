@@ -38,6 +38,14 @@ if TYPE_CHECKING:
 
 RECIPES: Final = frozenset({"summarize", "talking_points", "stats"})
 _DEFAULT_HOUR: Final = 8
+# Per-subscriber ceiling. Each row costs an engine run and a DM every
+# tick, so this bounds one user; SubscriptionScheduler.max_per_tick
+# bounds the whole deployment per cycle (#23).
+MAX_SUBS_PER_USER: Final = 10
+REPLY_SUBS_CAP_REACHED: Final = (
+    "You already have the maximum of {max} digest subscriptions. "
+    "Remove one with /unsubscribe <id> — see them with /mysubs."
+)
 
 
 class SubscriptionParseError(Exception):
@@ -79,6 +87,34 @@ def _parse_schedule_token(token: str) -> Schedule:
             f"weekly@mon.09:00), a recipe ({recipes}), and/or lang:xx."
         )
         raise SubscriptionParseError(msg) from error
+
+
+class SubscriptionCapReachedError(Exception):
+    """The subscriber already holds the maximum subscriptions (user-facing)."""
+
+    def __init__(self, max_per_user: int) -> None:
+        super().__init__(REPLY_SUBS_CAP_REACHED.format(max=max_per_user))
+
+
+async def admit_subscription(
+    store: SubscriptionStore, subscription: Subscription, max_per_user: int = MAX_SUBS_PER_USER
+) -> None:
+    """Persist ``subscription`` iff its owner is under their per-user cap.
+
+    The admission gate for every platform: without it one subscriber could
+    create unbounded rows, and each one costs an engine run plus a DM on
+    every tick. Pairs with :attr:`SubscriptionScheduler.max_per_tick`, which
+    bounds the *deployment* per cycle — this bounds a single **user**, so a
+    lone abuser cannot crowd out everyone else within that per-tick budget.
+
+    Raises :class:`SubscriptionCapReachedError` (message is user-facing) and
+    propagates :class:`~blybot.domain.ports.StorageError` unchanged.
+    """
+    existing = await store.list_for_user(subscription.dm)
+    if len(existing) >= max_per_user:
+        log_event("subscription_add", "declined")
+        raise SubscriptionCapReachedError(max_per_user)
+    await store.add(subscription)
 
 
 def mint_subscribe_code() -> str:

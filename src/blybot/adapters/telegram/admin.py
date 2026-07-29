@@ -8,7 +8,6 @@ only the ``/log`` flow's transient messages self-delete.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
@@ -40,7 +39,7 @@ if TYPE_CHECKING:
     from telegram import Bot, Update
     from telegram.ext import ContextTypes
 
-    from blybot.domain.ports import ActionStore, Clock, MessageArchive, TokenVault
+    from blybot.domain.ports import ActionStore, Clock, MessageArchive
     from blybot.services.binding import TokenBinding
     from blybot.services.capture import CaptureService
     from blybot.services.commands import CommandService
@@ -58,12 +57,13 @@ REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode} (group-wide).
 REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
 # /reset's wording now lives in the neutral CommandService (both platforms
 # share it); on_reset renders whatever CommandResult it returns.
-REPLY_SETREPO_USAGE: Final = "Usage: /setrepo owner/repository"
-REPLY_REPO_BOUND: Final = (
-    "Repo bound for {scope}: {repo} (any previously stored token was "
-    "discarded). To enable /issue and /repo here, an admin must give me a "
-    "GitHub token privately — tap {link} (valid 10 minutes). Use a "
-    "fine-grained PAT restricted to {repo} with Issues read/write only."
+# /setrepo's binding half now lives in the neutral CommandService; only the
+# deep link — Telegram's own way of collecting the secret privately — is
+# appended here (Discord pops a modal instead, see issue #43).
+REPLY_PAT_LINK: Final = (
+    "To enable /issue and /repo here, an admin must give me a GitHub token "
+    "privately — tap {link} (valid 10 minutes). Use a fine-grained PAT "
+    "restricted to {repo} with Issues read/write only."
 )
 # /revoke's wording now lives in the neutral CommandService (both platforms
 # share it); on_revoke renders whatever CommandResult it returns.
@@ -185,9 +185,9 @@ class AdminHandlers:
     counters: Counters
     page_url_for: Callable[[str], str]
     binding: TokenBinding
-    vault: TokenVault | None
-    # The neutral service behind the two shared commands (/setpage, /capture
-    # on|off). Its capture_service mirrors this handler's own.
+    # The neutral service behind every shared command. It also carries the
+    # vault and repo gateway the /setrepo flow needs, so this handler holds
+    # neither itself.
     commands: CommandService
     # Capture-enabled deployments only: the archive behind /capture purge
     # and the ingest service whose policy cache /capture must invalidate.
@@ -247,26 +247,20 @@ class AdminHandlers:
             return
         chat_id, thread_id = _target(scope)
         repo = ((context.args or [""])[0]).strip()
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) or ".." in repo:
-            await self._reply(context, chat_id, thread_id, REPLY_SETREPO_USAGE)
+        result = await self.commands.set_repo(scope, is_admin=True, repo=repo)
+        if not result.ok:
+            await self._reply(context, chat_id, thread_id, result.text)
             return
-        try:
-            await self.directory.set_repo(scope, repo)
-            if self.vault is not None:
-                # A token consented for the previous repo must never be
-                # replayed against the new one.
-                await self.vault.delete_token(scope)
-        except StorageError:
-            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
-            return
-        log_event("profile_update", "ok")
+        # Telegram collects the token over a deep link into DM; the link is
+        # this platform's affordance, so it is appended to the neutral
+        # confirmation rather than living in the shared service.
         nonce = self.binding.mint_link(scope)
         link = f"https://t.me/{context.bot.username}?start=cfg_{nonce}"
         await self._reply(
             context,
             chat_id,
             thread_id,
-            REPLY_REPO_BOUND.format(repo=repo, link=link, scope=_scope(scope)),
+            f"{result.text} {REPLY_PAT_LINK.format(repo=repo, link=link)}",
         )
 
     async def on_subscribable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

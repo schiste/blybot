@@ -16,7 +16,9 @@ from blybot.adapters.telegram.token_entry import TokenEntryHandler
 from blybot.domain.models import ConsentMode, Scope
 from blybot.domain.ports import IssueTrackerError
 from blybot.observability import Counters
+from blybot.services import commands as cmd
 from blybot.services.binding import TokenBinding
+from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.engine import ActionEngine
@@ -103,9 +105,9 @@ def make_handlers(
         token_entry=TokenEntryHandler(
             binding=TokenBinding(clock=clock),
             directory=directory,
-            gateway=gateway if gateway is not None else FakeRepoGateway(),
-            vault=store,
-            counters=Counters(),
+            commands=_commands(
+                directory, store, gateway if gateway is not None else FakeRepoGateway()
+            ),
         ),
     )
     if with_route:
@@ -113,6 +115,18 @@ def make_handlers(
             dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id), "Meta talk:Community/Discussions"
         )
     return handlers, publisher
+
+
+def _commands(directory: ChannelDirectory, store: object, gateway: object) -> CommandService:
+    """A CommandService carrying just what the token-entry flow consults."""
+    return CommandService(
+        directory=directory,
+        groups=GroupPolicy(allowed=set()),
+        page_url_for=str,
+        counters=Counters(),
+        vault=cast("Any", store),
+        repo_actions=cast("Any", gateway),
+    )
 
 
 def dm(text: str | None) -> Update:
@@ -453,9 +467,7 @@ async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() ->
         token_entry=TokenEntryHandler(
             binding=TokenBinding(clock=clock),
             directory=directory,
-            gateway=FakeRepoGateway(),
-            vault=store,
-            counters=Counters(),
+            commands=_commands(directory, store, FakeRepoGateway()),
         ),
     )
     handlers.routes.save_route(
@@ -594,7 +606,7 @@ async def test_pasted_token_is_stored_encrypted_and_never_transcribed() -> None:
     assert publisher.wrote_nothing  # the token never reached the wiki
     assert store.tokens[gscope(tg.GROUP.id)] == "ghp_good"
     assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) is None
-    assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_SAVED]
+    assert tg.sent_texts(bot) == [f"{cmd.REPLY_PAT_SAVED} {token_entry.REPLY_PAT_DELETED}"]
     # The bot removed the pasted secret from the chat itself.
     delete = bot.delete_message.await_args
     assert delete is not None
@@ -610,7 +622,7 @@ async def test_rejected_token_can_be_retried() -> None:
     context, bot = tg.make_context()
 
     await handlers.on_dm(dm("ghp_wrong"), context)
-    assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_INVALID]
+    assert tg.sent_texts(bot) == [cmd.REPLY_PAT_INVALID]
     assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) == gscope(
         tg.GROUP.id
     )  # still armed
@@ -641,20 +653,26 @@ async def test_token_store_failure_keeps_the_entry_armed() -> None:
     store.fail_token_writes = True
     context, bot = tg.make_context()
     await handlers.on_dm(dm("ghp_good"), context)
-    assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_STORE_FAILED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_PAT_STORE_FAILED]
     assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) == gscope(
         tg.GROUP.id
     )
 
 
-async def test_token_entry_without_gateway_aborts_defensively() -> None:
-    handlers, publisher = make_handlers()
-    handlers.token_entry.gateway = None  # self-service wiring mismatch: fail closed
+async def test_token_entry_without_a_repo_gateway_fails_closed() -> None:
+    """A wiring mismatch refuses the secret instead of storing it unvalidated."""
+    store = InMemoryProfiles()
+    handlers, publisher = make_handlers(store=store)
+    await handlers.token_entry.directory.set_repo(gscope(tg.GROUP.id), "x/y")
+    handlers.token_entry.commands.repo_actions = None
     handlers.token_entry.binding.open_entry(dmscope(tg.PRIVATE.id), gscope(tg.GROUP.id))
     context, bot = tg.make_context()
     await handlers.on_dm(dm("ghp_x"), context)
-    assert tg.sent_texts(bot) == [token_entry.REPLY_PAT_NO_REPO]
-    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) is None
+    assert tg.sent_texts(bot) == [cmd.REPLY_PAT_OFF_DEPLOY]
+    assert store.tokens == {}  # nothing was stored
+    # Left armed: the entry simply expires; a retry fails the same way until
+    # the operator fixes the deployment.
+    assert handlers.token_entry.binding.pending_target(dmscope(tg.PRIVATE.id)) is not None
     assert publisher.wrote_nothing
 
 

@@ -19,7 +19,7 @@ from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.rules import MAX_RULES, parse_rule
-from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
+from tests.fakes import FakeClock, FakeRepoGateway, InMemoryArchive, InMemoryProfiles
 
 _CHANNEL = 555000111
 _SCOPE = Scope("neutral", str(_CHANNEL))
@@ -525,3 +525,110 @@ async def test_events_and_rules_report_self_service_off() -> None:
     ]
     assert [r.text for r in results] == [c.REPLY_SELF_SERVICE_OFF] * len(results)
     assert not any(r.ok for r in results)
+
+
+# --- setrepo / token storage (issue #43, increment 2) -------------------------
+
+# Fixture values, not secrets: FakeRepoGateway accepts _GOOD_PAT and nothing else.
+_GOOD_PAT = "ghp_good"
+_WRONG_PAT = "ghp_wrong"
+
+
+def _repo_service(
+    *, store: InMemoryProfiles | None = None, with_actions: bool = True
+) -> tuple[CommandService, InMemoryProfiles, FakeRepoGateway]:
+    store = store if store is not None else InMemoryProfiles()
+    gateway = FakeRepoGateway(valid_tokens={_GOOD_PAT})
+    service = CommandService(
+        directory=_directory(store),
+        groups=GroupPolicy(allowed=set()),
+        page_url_for=str,
+        counters=Counters(),
+        vault=store,
+        repo_actions=gateway if with_actions else None,
+    )
+    return service, store, gateway
+
+
+async def test_setrepo_and_store_token_reject_non_admins() -> None:
+    service, store, _gateway = _repo_service()
+    bind = await service.set_repo(_SCOPE, is_admin=False, repo="org/repo")
+    stored = await service.store_token(_SCOPE, is_admin=False, token=_GOOD_PAT)
+    assert [bind.text, stored.text] == [c.REPLY_NOT_ADMIN] * 2
+    assert store.profiles == {}
+    assert store.tokens == {}
+
+
+async def test_setrepo_binds_and_discards_any_previous_token() -> None:
+    service, store, _gateway = _repo_service()
+    await store.store_token(_SCOPE, "pat-for-the-old-repo")
+    result = await service.set_repo(_SCOPE, is_admin=True, repo="  org/repo  ")
+    assert result.text == c.REPLY_REPO_BOUND.format(repo="org/repo")
+    assert store.profiles[_SCOPE].repo == "org/repo"
+    assert store.tokens == {}  # a token consented for repo A never survives
+
+
+async def test_setrepo_refuses_malformed_repositories() -> None:
+    service, store, _gateway = _repo_service()
+    for bad in ("", "not-a-repo", "a/b/c", "owner/", "owner/..", "../x"):
+        result = await service.set_repo(_SCOPE, is_admin=True, repo=bad)
+        assert result.text == c.REPLY_SETREPO_USAGE
+        assert result.ok is False
+    assert store.profiles == {}
+
+
+async def test_setrepo_reports_both_failure_modes() -> None:
+    service, _store, _gateway = _repo_service(store=InMemoryProfiles(fail=True))
+    down = await service.set_repo(_SCOPE, is_admin=True, repo="org/repo")
+    assert down.text == c.REPLY_STORAGE_DOWN
+
+    storeless = CommandService(
+        directory=_directory(None),
+        groups=GroupPolicy(allowed=set()),
+        page_url_for=str,
+        counters=Counters(),
+    )
+    off = await storeless.set_repo(_SCOPE, is_admin=True, repo="org/repo")
+    assert off.text == c.REPLY_SELF_SERVICE_OFF
+
+
+async def test_store_token_validates_against_the_bound_repo_then_encrypts() -> None:
+    service, store, _gateway = _repo_service()
+    await service.set_repo(_SCOPE, is_admin=True, repo="org/repo")
+
+    rejected = await service.store_token(_SCOPE, is_admin=True, token=_WRONG_PAT)
+    assert rejected.text == c.REPLY_PAT_INVALID
+    assert rejected.ok is False
+    assert store.tokens == {}  # an unvalidated secret is never persisted
+
+    saved = await service.store_token(_SCOPE, is_admin=True, token=f"  {_GOOD_PAT}  ")
+    assert saved.text == c.REPLY_PAT_SAVED
+    assert saved.ok is True
+    assert store.tokens[_SCOPE] == _GOOD_PAT
+
+
+async def test_store_token_needs_a_repo_a_secret_and_the_wiring() -> None:
+    service, store, _gateway = _repo_service()
+    unbound = await service.store_token(_SCOPE, is_admin=True, token=_GOOD_PAT)
+    assert unbound.text == c.REPLY_PAT_NO_REPO
+
+    await service.set_repo(_SCOPE, is_admin=True, repo="org/repo")
+    for blank in ("", "   "):
+        empty = await service.store_token(_SCOPE, is_admin=True, token=blank)
+        assert empty.text == c.REPLY_PAT_MISSING
+
+    off, _store, _gw = _repo_service(with_actions=False)
+    assert (
+        await off.store_token(_SCOPE, is_admin=True, token=_GOOD_PAT)
+    ).text == c.REPLY_PAT_OFF_DEPLOY
+    assert store.tokens == {}
+
+
+async def test_store_token_reports_a_vault_outage() -> None:
+    store = InMemoryProfiles()
+    service, _store, _gateway = _repo_service(store=store)
+    await service.set_repo(_SCOPE, is_admin=True, repo="org/repo")
+    store.fail_token_writes = True
+    result = await service.store_token(_SCOPE, is_admin=True, token=_GOOD_PAT)
+    assert result.text == c.REPLY_PAT_STORE_FAILED
+    assert result.ok is False

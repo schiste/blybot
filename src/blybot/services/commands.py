@@ -27,6 +27,7 @@ page suffix.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
@@ -51,7 +52,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from blybot.domain.models import LlmSettings, Scope
-    from blybot.domain.ports import TokenVault
+    from blybot.domain.ports import RepoActions, TokenVault
     from blybot.observability import Counters
     from blybot.services.capture import CaptureService
     from blybot.services.directory import ChannelDirectory
@@ -95,6 +96,26 @@ REPLY_LLM_RESET: Final = "LLM settings back to deployment defaults."
 _LLM_ORIGIN_OWN: Final = "set for this scope"
 _LLM_ORIGIN_INHERITED: Final = "inherited from the parent scope"
 _LLM_ORIGIN_DEFAULT: Final = "deployment defaults"
+# GitHub owner/name, deliberately strict: no path traversal, no nesting.
+_REPO_PATTERN: Final = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+REPLY_SETREPO_USAGE: Final = "Usage: /setrepo owner/repository"
+REPLY_REPO_BOUND: Final = (
+    "Repo bound for this scope: {repo}. Any previously stored token was discarded."
+)
+REPLY_PAT_OFF_DEPLOY: Final = "Repo tokens aren't enabled on this deployment; ask the operator."
+REPLY_PAT_NO_REPO: Final = "No repository is bound at this scope; run /setrepo here first."
+REPLY_PAT_MISSING: Final = "No token supplied."
+REPLY_PAT_INVALID: Final = (
+    "GitHub rejected that token for the bound repository — check the repository "
+    "access and the Issues permission, then try again."
+)
+REPLY_PAT_STORE_FAILED: Final = (
+    "Storing the token failed on my side — please try again in a moment."
+)
+REPLY_PAT_SAVED: Final = (
+    "Token validated, encrypted and stored. /issue and /repo are live for this "
+    "scope; /revoke discards the token."
+)
 REPLY_EVENTS_USAGE: Final = "Usage: /events on | off — rules decide what's delivered (see /rules)"
 REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
 REPLY_EVENTS_NEED_REPO: Final = (
@@ -153,9 +174,12 @@ class CommandService:
     page_url_for: Callable[[str], str]
     counters: Counters
     capture_service: CaptureService | None = None
-    # Only /revoke needs the vault; None on a deployment without one, in
-    # which case /revoke fails closed to the self-service-off result.
+    # /revoke and the token flow need the vault; None on a deployment
+    # without one, in which case both fail closed.
     vault: TokenVault | None = None
+    # Only the token flow needs this: it validates a pasted token against
+    # the bound repo before storing it. None disables /setrepo's token half.
+    repo_actions: RepoActions | None = None
     # Analysis-enabled deployments only: the /llm defaults and hard cap.
     # ``llm_defaults`` is None when LLM analyses are off, in which case
     # /llm fails closed to the off-deployment result. The ceiling default
@@ -262,6 +286,71 @@ class CommandService:
             return CommandResult(REPLY_STORAGE_DOWN, ok=False)
         log_event("token_revoked", "ok")
         return CommandResult(REPLY_REVOKED)
+
+    async def set_repo(self, scope: Scope, *, is_admin: bool, repo: str) -> CommandResult:
+        """Bind this scope to a GitHub repository (admins only).
+
+        Binding always discards any token stored for this scope: a token
+        an admin consented to for repository A must never be replayed
+        against repository B. Collecting the *new* token is the adapter's
+        job — the mechanism (deep link, modal, …) is platform-specific —
+        but :meth:`store_token` receives it back here.
+        """
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        candidate = repo.strip()
+        if not _REPO_PATTERN.fullmatch(candidate) or ".." in candidate:
+            return CommandResult(REPLY_SETREPO_USAGE, ok=False)
+        try:
+            await self.directory.set_repo(scope, candidate)
+            if self.vault is not None:
+                await self.vault.delete_token(scope)
+        except SelfServiceUnavailableError:
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        self.counters.increment("profiles_configured")
+        log_event("profile_update", "ok")
+        return CommandResult(REPLY_REPO_BOUND.format(repo=candidate))
+
+    async def store_token(self, scope: Scope, *, is_admin: bool, token: str) -> CommandResult:
+        """Validate a repo token against this scope's bound repo and store it.
+
+        The secret-handling half of the ``/setrepo`` flow, shared by every
+        platform: how the token was *collected* differs (Telegram's DM
+        paste, Discord's modal), but validating it against the bound repo
+        and encrypting it into the vault is identical everywhere — so no
+        adapter reimplements it.
+
+        ``ok`` is ``False`` for every failure; an adapter running a
+        multi-step entry flow may leave its prompt armed for a retry.
+        """
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        actions, vault = self.repo_actions, self.vault
+        if actions is None or vault is None:
+            return CommandResult(REPLY_PAT_OFF_DEPLOY, ok=False)
+        secret = token.strip()
+        if not secret:
+            return CommandResult(REPLY_PAT_MISSING, ok=False)
+        try:
+            return await self._validate_and_store(scope, secret, actions, vault)
+        except StorageError:
+            return CommandResult(REPLY_PAT_STORE_FAILED, ok=False)
+
+    async def _validate_and_store(
+        self, scope: Scope, secret: str, actions: RepoActions, vault: TokenVault
+    ) -> CommandResult:
+        """Check the secret against the bound repo, then encrypt it into the vault."""
+        settings = await self.directory.resolve(scope)
+        if not settings.repo:
+            return CommandResult(REPLY_PAT_NO_REPO, ok=False)
+        if not await actions.validate_token(settings.repo, secret):
+            return CommandResult(REPLY_PAT_INVALID, ok=False)
+        await vault.store_token(scope, secret)
+        self.counters.increment("tokens_bound")
+        log_event("token_bound", "ok")
+        return CommandResult(REPLY_PAT_SAVED)
 
     async def events(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
         """Toggle notifications from a flat ``/events`` token list (admins only).

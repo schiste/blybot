@@ -44,6 +44,7 @@ from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from tests.fakes import (
     FakeClock,
+    FakeRepoGateway,
     FakeSink,
     FakeSource,
     InMemoryArchive,
@@ -581,13 +582,17 @@ def test_is_admin_reads_live_guild_permissions() -> None:
 
 
 class _Response:
-    """A discord InteractionResponse stand-in recording ephemeral replies."""
+    """A discord InteractionResponse stand-in recording replies and modals."""
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, bool]] = []
+        self.modals: list[Any] = []
 
     async def send_message(self, content: str, *, ephemeral: bool = False) -> None:
         self.sent.append((content, ephemeral))
+
+    async def send_modal(self, modal: Any) -> None:
+        self.modals.append(modal)
 
 
 def _admin_interaction(channel: object) -> Any:
@@ -622,7 +627,9 @@ def test_build_registers_every_slash_command() -> None:
         "rule",
         "rules",
         "setpage",
+        "setrepo",
         "settings",
+        "settoken",
         "stats",
         "subscribe",
         "summarize",
@@ -999,3 +1006,118 @@ async def test_events_and_rule_slash_commands_answer_ephemerally() -> None:
     await leaves["clear"].callback(interaction)
     assert interaction.response.sent == [(cmd.REPLY_RULES_CLEARED.format(count=2), True)]
     assert store.profiles[_SCOPE].rules == ()
+
+
+# --- /setrepo + the /settoken modal (issue #43, increment 2) ------------------
+
+# A fixture value, not a secret: FakeRepoGateway accepts only this one.
+_GOOD_PAT = "ghp_good"
+
+
+def _repo_gateway() -> tuple[DiscordGateway, InMemoryProfiles, FakeRepoGateway]:
+    store = InMemoryProfiles()
+    actions = FakeRepoGateway(valid_tokens={_GOOD_PAT})
+    directory = _directory(store)
+    groups = GroupPolicy(allowed=set())
+    commands = CommandService(
+        directory=directory,
+        groups=groups,
+        page_url_for=str,
+        counters=Counters(),
+        vault=store,
+        repo_actions=actions,
+    )
+    gateway = DiscordGateway(directory=directory, groups=groups, commands=commands)
+    return gateway, store, actions
+
+
+async def test_setrepo_command_binds_and_points_at_the_modal() -> None:
+    gateway, store, _actions = _repo_gateway()
+    assert (
+        await gateway.setrepo_command(_CHANNEL, None, "org/repo", is_admin=False)
+        == cmd.REPLY_NOT_ADMIN
+    )
+    refused = await gateway.setrepo_command(_CHANNEL, None, "not-a-repo", is_admin=True)
+    assert refused == cmd.REPLY_SETREPO_USAGE  # no next-step hint on a refusal
+
+    bound = await gateway.setrepo_command(_CHANNEL, None, "org/repo", is_admin=True)
+    assert bound.startswith(cmd.REPLY_REPO_BOUND.format(repo="org/repo"))
+    assert gw.REPLY_PAT_NEXT_STEP in bound  # Discord's own way to hand over the secret
+    assert store.profiles[_SCOPE].repo == "org/repo"
+
+
+async def test_settoken_command_delegates_validation_and_storage() -> None:
+    gateway, store, _actions = _repo_gateway()
+    await gateway.setrepo_command(_CHANNEL, None, "org/repo", is_admin=True)
+    assert (
+        await gateway.settoken_command(_CHANNEL, None, _GOOD_PAT, is_admin=False)
+        == cmd.REPLY_NOT_ADMIN
+    )
+    assert store.tokens == {}
+    assert (
+        await gateway.settoken_command(_CHANNEL, None, _GOOD_PAT, is_admin=True)
+        == cmd.REPLY_PAT_SAVED
+    )
+    assert store.tokens[_SCOPE] == _GOOD_PAT
+
+
+async def test_setrepo_slash_command_answers_ephemerally() -> None:
+    gateway, store, _actions = _repo_gateway()
+    client = build_gateway_client(gateway)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await _command(client, "setrepo").callback(interaction, "org/repo")
+    (content, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is True
+    assert gw.REPLY_PAT_NEXT_STEP in content
+    assert store.profiles[_SCOPE].repo == "org/repo"
+
+
+async def test_settoken_slash_command_opens_the_modal_for_admins_only() -> None:
+    gateway, _store, _actions = _repo_gateway()
+    client = build_gateway_client(gateway)
+    channel = SimpleNamespace(id=_CHANNEL)
+
+    outsider = SimpleNamespace(
+        channel=channel,
+        user=SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False)),
+        response=_Response(),
+    )
+    await _command(client, "settoken").callback(cast("Any", outsider))
+    # Refused before any form is shown; no modal was ever sent.
+    assert outsider.response.sent == [(cmd.REPLY_NOT_ADMIN, True)]
+    assert outsider.response.modals == []
+
+    interaction = _admin_interaction(channel)
+    await _command(client, "settoken").callback(interaction)
+    (modal,) = interaction.response.modals
+    assert isinstance(modal, gw.TokenModal)
+    assert modal.title == gw.PAT_MODAL_TITLE
+
+
+async def test_token_modal_submit_stores_the_secret_without_posting_it() -> None:
+    gateway, store, _actions = _repo_gateway()
+    await gateway.setrepo_command(_CHANNEL, None, "org/repo", is_admin=True)
+    modal = gw.TokenModal(gateway, _CHANNEL, None)
+    modal.token_input._value = _GOOD_PAT  # what Discord puts in the payload
+
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await modal.on_submit(interaction)
+    assert interaction.response.sent == [(cmd.REPLY_PAT_SAVED, True)]
+    assert store.tokens[_SCOPE] == _GOOD_PAT
+
+
+async def test_token_modal_rechecks_admin_at_submit_time() -> None:
+    """The form may have been opened before the caller lost their role."""
+    gateway, store, _actions = _repo_gateway()
+    await gateway.setrepo_command(_CHANNEL, None, "org/repo", is_admin=True)
+    modal = gw.TokenModal(gateway, _CHANNEL, None)
+    modal.token_input._value = _GOOD_PAT
+
+    demoted = SimpleNamespace(
+        channel=SimpleNamespace(id=_CHANNEL),
+        user=SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False)),
+        response=_Response(),
+    )
+    await modal.on_submit(cast("Any", demoted))
+    assert demoted.response.sent == [(cmd.REPLY_NOT_ADMIN, True)]
+    assert store.tokens == {}

@@ -14,9 +14,12 @@ connection:
 
 Onboarding is slash commands, not deep links (``deep_links=False``):
 ``/capture``, ``/setpage``, ``/settings``, ``/reset``, ``/revoke``,
-``/llm``, ``/events``, ``/rule`` and ``/rules`` are server-admin config;
+``/llm``, ``/setrepo``, ``/settoken``, ``/events``, ``/rule`` and
+``/rules`` are server-admin config;
 ``/subscribe``, ``/mysubs`` and ``/unsubscribe`` are the durable-DM digest
-flow. ``/rule`` is an :class:`~discord.app_commands.Group`, so Discord
+flow. ``/settoken`` opens a :class:`TokenModal` rather than taking the
+secret as a slash-command parameter — see that class for why. ``/rule`` is
+an :class:`~discord.app_commands.Group`, so Discord
 routes its subcommands natively and each leaf is one neutral call — the
 grammar itself still lives in the shared
 :class:`~blybot.services.commands.CommandService`. Outbound digests,
@@ -38,6 +41,7 @@ from blybot.domain.models import CapturedMessage
 from blybot.domain.ports import StorageError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
+from blybot.services import commands as cmd
 from blybot.services.subscriptions import (
     SubscriptionParseError,
     mint_sub_id,
@@ -63,6 +67,15 @@ if TYPE_CHECKING:
 # their wording lives in blybot.services.commands. The strings that remain here
 # belong to commands this adapter still owns end to end (the DM digest flow).
 REPLY_STORAGE_DOWN: Final = "That's temporarily unavailable — please try again later."
+# Appended to a successful /setrepo: Discord's own way of collecting the
+# secret. Telegram appends a deep link at the same point instead.
+REPLY_PAT_NEXT_STEP: Final = (
+    "Run /settoken here to supply the GitHub token — it opens a private form, "
+    "so the secret is never posted as a message. Use a fine-grained PAT "
+    "restricted to that repository with Issues read/write only."
+)
+PAT_MODAL_TITLE: Final = "GitHub token"
+PAT_MODAL_LABEL: Final = "Fine-grained PAT (Issues read/write)"
 REPLY_ANALYSES_UNAVAILABLE: Final = "On-demand analyses aren't available on this deployment."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
 REPLY_SUBSCRIBED: Final = (
@@ -179,6 +192,32 @@ class DiscordGateway:
         """Show, set, or reset this channel's LLM settings (server admins only)."""
         result = await self.commands.set_llm(
             scope_of(channel_id, thread_id), is_admin=is_admin, tokens=options.split()
+        )
+        return result.text
+
+    async def setrepo_command(
+        self, channel_id: int, thread_id: int | None, repo: str, *, is_admin: bool
+    ) -> str:
+        """Bind this channel to a GitHub repository (server admins only)."""
+        result = await self.commands.set_repo(
+            scope_of(channel_id, thread_id), is_admin=is_admin, repo=repo
+        )
+        # The token is collected separately, through the /settoken modal —
+        # Discord has no deep link, and a slash-command parameter would put
+        # the secret in the visible command bar and the client's history.
+        return f"{result.text} {REPLY_PAT_NEXT_STEP}" if result.ok else result.text
+
+    async def settoken_command(
+        self, channel_id: int, thread_id: int | None, token: str, *, is_admin: bool
+    ) -> str:
+        """Store the GitHub token submitted through the modal (server admins only).
+
+        The secret arrives in the interaction payload and is never posted as
+        a message anywhere, so — unlike Telegram — there is nothing to delete
+        afterwards. Validation and encryption are the neutral service's.
+        """
+        result = await self.commands.store_token(
+            scope_of(channel_id, thread_id), is_admin=is_admin, token=token
         )
         return result.text
 
@@ -344,6 +383,38 @@ async def _respond(interaction: discord.Interaction, text: str) -> None:
     await interaction.response.send_message(text, ephemeral=True)
 
 
+class TokenModal(discord.ui.Modal):
+    """The private form carrying a GitHub token to :meth:`DiscordGateway.settoken_command`.
+
+    Discord has no deep link, so this replaces Telegram's DM-paste flow. A
+    modal's field value travels in the interaction payload and is never
+    posted as a message — not to the channel, not to a DM — so unlike
+    Telegram there is no pasted secret to race to delete, and nothing lands
+    in any chat history. Admin-ship is re-checked here at *submit* time, not
+    only when the form was opened.
+    """
+
+    def __init__(self, gateway: DiscordGateway, channel_id: int, thread_id: int | None) -> None:
+        super().__init__(title=PAT_MODAL_TITLE)
+        self._gateway = gateway
+        self._channel_id = channel_id
+        self._thread_id = thread_id
+        self.token_input: discord.ui.TextInput[TokenModal] = discord.ui.TextInput(
+            label=PAT_MODAL_LABEL, required=True, max_length=255
+        )
+        self.add_item(self.token_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        """Hand the submitted secret to the neutral service and answer privately."""
+        reply = await self._gateway.settoken_command(
+            self._channel_id,
+            self._thread_id,
+            self.token_input.value,
+            is_admin=_is_admin(interaction.user),
+        )
+        await _respond(interaction, reply)
+
+
 def default_intents() -> discord.Intents:
     """The gateway intents: message content (the one privileged intent capture needs).
 
@@ -471,6 +542,31 @@ class DiscordGatewayClient(discord.Client):
                 channel_id, thread_id, options, is_admin=_is_admin(interaction.user)
             )
             await _respond(interaction, reply)
+
+        @self.tree.command(name="setrepo", description="Bind this channel to a GitHub repo.")
+        @app_commands.guild_only()
+        @app_commands.describe(repo="owner/repository")
+        async def setrepo(interaction: discord.Interaction, repo: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.setrepo_command(
+                channel_id, thread_id, repo, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="settoken", description="Supply this channel's GitHub token privately (admins)."
+        )
+        @app_commands.guild_only()
+        async def settoken(interaction: discord.Interaction) -> None:
+            # A modal MUST be the first response to the interaction — it can
+            # neither follow a defer nor be sent as a follow-up — so nothing
+            # awaitable may run before send_modal. Refuse non-admins here
+            # rather than showing them the form; TokenModal re-checks on submit.
+            if not _is_admin(interaction.user):
+                await _respond(interaction, cmd.REPLY_NOT_ADMIN)
+                return
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            await interaction.response.send_modal(TokenModal(gateway, channel_id, thread_id))
 
         @self.tree.command(
             name="events", description="Turn rule-driven repo notifications on/off (admins)."

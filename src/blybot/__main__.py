@@ -285,6 +285,17 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         if llm_client is not None:
             await llm_client.aclose()
 
+    commands = CommandService(
+        directory=directory,
+        groups=group_policy,
+        page_url_for=config.page_url,
+        counters=counters,
+        capture_service=capture_service,
+        vault=store,
+        repo_actions=gateway,
+        llm_defaults=llm_defaults,
+        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
+    )
     private_handlers = PrivateHandlers(
         transcription=transcription,
         sessions=sessions,
@@ -301,13 +312,7 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         bug_limiter=SlidingWindowLimiter(
             clock=clock, limit=config.bug_throttle_per_hour, window=timedelta(hours=1)
         ),
-        token_entry=TokenEntryHandler(
-            binding=binding,
-            directory=directory,
-            gateway=gateway,
-            vault=store,
-            counters=counters,
-        ),
+        token_entry=TokenEntryHandler(binding=binding, directory=directory, commands=commands),
         subscriptions=subscription_handlers,
     )
 
@@ -344,23 +349,12 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
             groups=group_policy,
         )
 
-    commands = CommandService(
-        directory=directory,
-        groups=group_policy,
-        page_url_for=config.page_url,
-        counters=counters,
-        capture_service=capture_service,
-        vault=store,
-        llm_defaults=llm_defaults,
-        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
-    )
     admin_handlers = AdminHandlers(
         directory=directory,
         groups=group_policy,
         counters=counters,
         page_url_for=config.page_url,
         binding=binding,
-        vault=store,
         commands=commands,
         archive=archive,
         capture_service=capture_service,
@@ -656,6 +650,7 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
         counters=counters,
         capture_service=capture_service,
         vault=store,
+        repo_actions=repo_gateway,
         llm_defaults=llm_defaults,
         llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
     )

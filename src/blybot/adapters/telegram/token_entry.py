@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Final
 from telegram.error import TelegramError
 
 from blybot.adapters.telegram.admin import is_group_admin
-from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
@@ -24,9 +23,8 @@ if TYPE_CHECKING:
     from telegram.ext import ContextTypes
 
     from blybot.domain.models import Scope
-    from blybot.domain.ports import RepoActions, TokenVault
-    from blybot.observability import Counters
     from blybot.services.binding import TokenBinding
+    from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory
 
 REPLY_LINK_EXPIRED: Final = (
@@ -41,17 +39,10 @@ REPLY_PAT_PROMPT: Final = (
     "it's active, nothing you send me is transcribed."
 )
 REPLY_PAT_NO_REPO: Final = "That group no longer has a repository bound; run /setrepo there first."
-REPLY_PAT_INVALID: Final = (
-    "GitHub rejected that token for the bound repository — check the repo "
-    "access and Issues permission, then paste it again."
-)
-REPLY_PAT_STORE_FAILED: Final = (
-    "Storing the token failed on my side — please paste it again in a moment."
-)
-REPLY_PAT_SAVED: Final = (
-    "Token validated, encrypted and stored; I've deleted your message. "
-    "/issue and /repo are live in the group; /revoke there discards the token."
-)
+# Validation/storage wording now lives in the neutral CommandService (Discord's
+# modal renders the same strings); only the deletion note — Telegram's own
+# affordance, since it can remove the pasted secret — is appended here.
+REPLY_PAT_DELETED: Final = "I've also deleted your message."
 
 
 @dataclass
@@ -60,9 +51,7 @@ class TokenEntryHandler:
 
     binding: TokenBinding
     directory: ChannelDirectory
-    gateway: RepoActions | None
-    vault: TokenVault | None
-    counters: Counters
+    commands: CommandService
 
     def claims_next_message(self, dm: Scope) -> Scope | None:
         """The group scope awaiting a token in this DM, if entry is armed."""
@@ -109,28 +98,22 @@ class TokenEntryHandler:
             await context.bot.delete_message(chat_id=int(dm.channel), message_id=message_id)
         except TelegramError:
             log_event("command_cleanup", "ignored")
-        if self.gateway is None or self.vault is None:
-            self.binding.close_entry(dm)
-            await self._reply(context, dm, REPLY_PAT_NO_REPO)
-            return
+        # A vanished repo binding closes the flow outright; every other
+        # failure leaves the prompt armed so the admin can paste again.
         settings = await self.directory.resolve(target)
         if not settings.repo:
             self.binding.close_entry(dm)
             await self._reply(context, dm, REPLY_PAT_NO_REPO)
             return
-        token = text.strip()
-        if not await self.gateway.validate_token(settings.repo, token):
-            await self._reply(context, dm, REPLY_PAT_INVALID)  # stays armed for a retry
-            return
-        try:
-            await self.vault.store_token(target, token)
-        except StorageError:
-            await self._reply(context, dm, REPLY_PAT_STORE_FAILED)  # stays armed
+        # Validating the secret against the bound repo and encrypting it into
+        # the vault is identical on every platform, so it lives in the neutral
+        # CommandService; admin-ship was proven when the link was redeemed.
+        result = await self.commands.store_token(target, is_admin=True, token=text)
+        if not result.ok:
+            await self._reply(context, dm, result.text)
             return
         self.binding.close_entry(dm)
-        self.counters.increment("tokens_bound")
-        log_event("token_bound", "ok")
-        await self._reply(context, dm, REPLY_PAT_SAVED)
+        await self._reply(context, dm, f"{result.text} {REPLY_PAT_DELETED}")
 
     @staticmethod
     async def _reply(context: ContextTypes.DEFAULT_TYPE, dm: Scope, text: str) -> None:

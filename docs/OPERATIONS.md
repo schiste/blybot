@@ -88,8 +88,8 @@ admin-shared link.
 The slash commands the gateway registers:
 
 - **server admins** — `/capture on|off`, `/setpage <path>`, `/settings`,
-  `/reset`, `/revoke`, `/llm show|set|reset`, `/events on|off`,
-  `/rule add|remove|clear`, `/rules`;
+  `/reset`, `/revoke`, `/llm show|set|reset`, `/setrepo owner/repo`,
+  `/settoken`, `/events on|off`, `/rule add|remove|clear`, `/rules`;
 - **on-demand analyses** — `/summarize`, `/stats`, `/talkingpoints`
   (deferred first: a chunked run outlives Discord's 3-second deadline);
 - **durable-DM digests** — `/subscribe [schedule] [recipe] [lang:xx]`,
@@ -104,23 +104,30 @@ stored. Capture ingestion, pseudonymization, the archive, LLM analyses,
 repo notifications, and subscription delivery all reuse the same neutral
 services as Telegram.
 
-Repo notifications need a repo bound **at the channel itself**. Binding is
-still Telegram-only (see below), so on Discord `/events on` currently
-answers "bind a repository at this scope first" unless the row was bound
-elsewhere; `/rule` and `/rules` work regardless, and the background
+Repo notifications need a repo bound **at the channel itself**: run
+`/setrepo owner/repo` there, then `/events on`. The background
 `repo_notify` poller runs on every Discord deployment that has a profile
 store.
+
+**Handing over the GitHub token.** Telegram uses a deep link into DM;
+Discord has none, so `/settoken` opens a **modal** — a private form whose
+value travels in the interaction payload and is never posted as a message,
+to the channel or to a DM. Nothing lands in any chat history, so unlike
+Telegram there is no pasted secret for the bot to delete. Deliberately
+*not* a slash-command parameter (`/settoken token:…`), which would be typed
+into the visible command bar and retained in the client's command history.
+The token is validated against the bound repo before it is encrypted and
+stored, and admin-ship is re-checked when the form is **submitted**, not
+only when it was opened.
 
 ### What Discord does NOT do yet
 
 These Telegram surfaces are **deferred / not yet built** on Discord, so an
 operator should not expect full parity:
 
-- **Repo binding** — `/setrepo` has no Discord equivalent: it hands over a
-  GitHub PAT, which needs a secret-entry path Discord's slash commands do
-  not yet provide (issue #43). Without it `/events on` cannot be completed
-  from Discord.
-- **Repo commands** — `/issue` and `/repo` are Telegram-only (issue #42).
+- **Repo commands** — `/issue` and `/repo` are Telegram-only (issue #42),
+  so a stored token currently powers notifications but no interactive
+  repo commands on Discord.
 - **Scheduled wiki analyses** — the action scheduler (`/action`) does not
   run on Discord; only the subscription digest tick, the repo poller, and
   the capture reminder run in the background.

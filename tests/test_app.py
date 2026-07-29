@@ -89,7 +89,6 @@ def make_admin_handlers() -> AdminHandlers:
         counters=counters,
         page_url_for=group_handlers.page_url_for,
         binding=TokenBinding(clock=FakeClock()),
-        vault=None,
         commands=CommandService(
             directory=group_handlers.directory,
             groups=groups,

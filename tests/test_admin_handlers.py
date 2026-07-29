@@ -65,7 +65,6 @@ def make_handlers(
         counters=counters,
         page_url_for=_page_url,
         binding=TokenBinding(clock=FakeClock()),
-        vault=store,
         commands=CommandService(
             directory=directory,
             groups=groups,
@@ -146,7 +145,6 @@ async def test_v1_deployments_stay_silent_and_skip_the_api_call() -> None:
         counters=counters,
         page_url_for=str,
         binding=TokenBinding(clock=FakeClock()),
-        vault=None,
         commands=CommandService(
             directory=directory,
             groups=groups,
@@ -293,7 +291,7 @@ async def test_setrepo_rejects_bad_formats() -> None:
     for bad in ([], ["not-a-repo"], ["a/b/c"], ["owner/"], ["owner/.."], ["../x"]):
         context, bot = admin_context(args=bad)
         await handlers.on_setrepo(command("/setrepo"), context)
-        assert tg.sent_texts(bot) == [a.REPLY_SETREPO_USAGE]
+        assert tg.sent_texts(bot) == [cmd.REPLY_SETREPO_USAGE]
 
 
 async def test_setrepo_reports_storage_outage() -> None:
@@ -401,7 +399,7 @@ async def test_setrepo_discards_any_previous_token() -> None:
 async def test_setrepo_without_a_vault_still_binds() -> None:
     store = InMemoryProfiles()
     handlers = make_handlers(store)
-    handlers.vault = None
+    handlers.commands.vault = None
     context, bot = admin_context(args=["x/y"])
     await handlers.on_setrepo(command("/setrepo x/y"), context)
     assert store.profiles[gscope()].repo == "x/y"

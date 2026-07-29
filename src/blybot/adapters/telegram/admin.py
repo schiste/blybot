@@ -32,8 +32,6 @@ from blybot.services.actions import (
     describe_action,
     parse_action,
 )
-from blybot.services.directory import TooManyRulesError
-from blybot.services.rules import MAX_RULES, RuleParseError, describe_rule, parse_rule
 from blybot.services.subscriptions import mint_subscribe_code
 
 if TYPE_CHECKING:
@@ -69,12 +67,8 @@ REPLY_REPO_BOUND: Final = (
 )
 # /revoke's wording now lives in the neutral CommandService (both platforms
 # share it); on_revoke renders whatever CommandResult it returns.
-REPLY_EVENTS_NEED_REPO: Final = (
-    "Bind a repository at this scope first: /setrepo owner/repo here in the "
-    "topic (or in General for the group), then /events on."
-)
-REPLY_EVENTS_USAGE: Final = "Usage: /events on | off — rules decide what's delivered (see /rules)"
-REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
+# /events on|off wording now lives in the neutral CommandService (both
+# platforms share it); on_events renders whatever CommandResult it returns.
 REPLY_SUBSCRIBABLE_USAGE: Final = (
     "Usage: /subscribable on | off — let members subscribe to this chat's digest in DM"
 )
@@ -85,31 +79,8 @@ REPLY_SUBSCRIBABLE_ON: Final = (
 REPLY_SUBSCRIBABLE_OFF: Final = (
     "Digest subscriptions are OFF for {scope}. The old share link no longer works."
 )
-REPLY_EVENTS_SEEDED: Final = (
-    "Repo notifications on. Seeded two starter rules — pr.merged and release, "
-    "both digest. Use /rules to see them, /rule to add more, /rule clear to start over."
-)
-# Sensible defaults so /events on works out of the box; admins refine them.
-DEFAULT_RULES: Final = ("pr.merged digest", "release digest")
-REPLY_RULE_USAGE: Final = (
-    "Usage:\n"
-    "/rule add <event> [filters] [live|digest]\n"
-    "/rule remove <id>\n"
-    "/rule clear\n"
-    "Events: issue.opened, pr.merged, release, comment, … · "
-    "filters: label:bug,urgent · author:x · base:main · "
-    "title:text or title:/regex/ · draft:false · milestone:v2 · assignee:y. "
-    "See /rules to list them."
-)
-REPLY_RULE_ADDED: Final = "Rule added for {scope}: {desc}"
-REPLY_RULE_REMOVED: Final = "Rule {id} removed from {scope}."
-REPLY_RULE_UNKNOWN: Final = "No rule {id} at {scope}. Use /rules to list them."
-REPLY_RULES_CLEARED: Final = "Cleared {count} rule(s) for {scope}."
-REPLY_RULES_NONE: Final = "No rules set for {scope}. Add one, e.g. /rule add pr.merged"
-REPLY_RULES_LIST: Final = "Rules for {scope}:\n{lines}"
-REPLY_RULES_FULL: Final = (
-    "You already have the maximum of {max} rules at {scope}; remove one with /rule remove <id>."
-)
+# /rule add|remove|clear and /rules wording now lives in the neutral
+# CommandService too, seeded from its shared DEFAULT_RULES starter set.
 # /llm show|set|reset wording now lives in the neutral CommandService (both
 # platforms share it); on_llm renders whatever CommandResult it returns.
 REPLY_ACTION_USAGE: Final = (
@@ -332,40 +303,13 @@ class AdminHandlers:
         await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_events(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Switch this (group, topic)'s rule-driven notifications on or off.
-
-        ``on`` requires a repo bound at this scope and seeds two starter
-        rules when none exist, so it works out of the box; the rules
-        themselves decide what is delivered.
-        """
+        """Switch this (group, topic)'s rule-driven notifications on or off."""
         scope = await self._admin_chat(update, context)
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        argument = (context.args or [""])[0].lower()
-        if argument not in {"on", "off"}:
-            await self._reply(context, chat_id, thread_id, REPLY_EVENTS_USAGE)
-            return
-        try:
-            reply = await self._toggle_events(scope, enabled=argument == "on")
-        except StorageError:
-            reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat_id, thread_id, reply)
-
-    async def _toggle_events(self, scope: Scope, *, enabled: bool) -> str:
-        if not enabled:
-            await self.directory.set_events(scope, enabled=False)
-            log_event("profile_update", "ok")
-            return REPLY_EVENTS_SET.format(state="off")
-        own = await self.directory.profile_of(scope)
-        if not own.repo:
-            # A topic that only inherits the group repo can't get its own
-            # notifications — the notifier polls per bound-repo row.
-            return REPLY_EVENTS_NEED_REPO
-        seed = tuple(parse_rule(spec) for spec in DEFAULT_RULES)
-        seeded = await self.directory.enable_events(scope, seed)
-        log_event("profile_update", "ok")
-        return REPLY_EVENTS_SEEDED if seeded else REPLY_EVENTS_SET.format(state="on")
+        result = await self.commands.events(scope, is_admin=True, tokens=list(context.args or ()))
+        await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_capture(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Switch this scope's message capture on/off, or erase its archive.
@@ -479,43 +423,8 @@ class AdminHandlers:
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        args = list(context.args or ())
-        sub = args[0].lower() if args else ""
-        try:
-            if sub == "add":
-                reply = await self._rule_add(scope, args[1:])
-            elif sub == "remove" and len(args) == 2:  # noqa: PLR2004 -- "remove <id>"
-                reply = await self._rule_remove(scope, args[1])
-            elif sub == "clear":
-                reply = await self._rule_clear(scope)
-            else:
-                reply = REPLY_RULE_USAGE
-        except StorageError:
-            reply = REPLY_STORAGE_DOWN
-        await self._reply(context, chat_id, thread_id, reply)
-
-    async def _rule_add(self, scope: Scope, tokens: list[str]) -> str:
-        try:
-            rule = parse_rule(" ".join(tokens))
-        except RuleParseError as error:
-            return str(error)
-        try:
-            await self.directory.add_rule(scope, rule)
-        except TooManyRulesError:
-            return REPLY_RULES_FULL.format(max=MAX_RULES, scope=_scope(scope))
-        log_event("profile_update", "ok")
-        return REPLY_RULE_ADDED.format(scope=_scope(scope), desc=describe_rule(rule))
-
-    async def _rule_remove(self, scope: Scope, rule_id: str) -> str:
-        if not await self.directory.remove_rule(scope, rule_id):
-            return REPLY_RULE_UNKNOWN.format(id=rule_id, scope=_scope(scope))
-        log_event("profile_update", "ok")
-        return REPLY_RULE_REMOVED.format(id=rule_id, scope=_scope(scope))
-
-    async def _rule_clear(self, scope: Scope) -> str:
-        count = await self.directory.clear_rules(scope)
-        log_event("profile_update", "ok")
-        return REPLY_RULES_CLEARED.format(count=count, scope=_scope(scope))
+        result = await self.commands.rule(scope, is_admin=True, tokens=list(context.args or ()))
+        await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_rules(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List this (group, topic)'s event rules with their ids."""
@@ -523,17 +432,8 @@ class AdminHandlers:
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        try:
-            rules = await self.directory.list_rules(scope)
-        except StorageError:
-            text = REPLY_STORAGE_DOWN
-        else:
-            if rules:
-                lines = "\n".join(describe_rule(rule) for rule in rules)
-                text = REPLY_RULES_LIST.format(scope=_scope(scope), lines=lines)
-            else:
-                text = REPLY_RULES_NONE.format(scope=_scope(scope))
-        await self._reply(context, chat_id, thread_id, text)
+        result = await self.commands.list_rules(scope, is_admin=True)
+        await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show this group's effective configuration.

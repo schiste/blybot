@@ -500,13 +500,13 @@ def discord_run(
         asyncio.run(release())
 
 
-def run_discord(config: Config) -> int:
+def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
     """Build the Discord object graph and start the gateway client.
 
     Reuses every neutral service (directory, capture, engine, subscription
-    scheduler, archive, store) — only the transport and the inbound event
-    shell are Discord-specific. Repo notifications and scheduled analyses
-    are deferred: the Discord admin surface does not yet configure them.
+    scheduler, repo notifier, archive, store) — only the transport and the
+    inbound event shell are Discord-specific. Scheduled analyses remain
+    deferred: the Discord admin surface does not yet configure them.
     """
     counters = Counters()
     clock = SystemClock()
@@ -543,12 +543,22 @@ def run_discord(config: Config) -> int:
         page_suffix=config.wiki_page_suffix,
     )
 
+    repo_gateway = GitHubRepoGateway(user_agent=config.user_agent)
     llm_client: LiftWingClient | None = None
     capture_service: CaptureService | None = None
     masker: DiscordAuthorMasker | None = None
     analysis_service: AnalysisService | None = None
     llm_defaults: LlmSettings | None = None
     collectors: list[tuple[MessageCollector, str]] = []
+    # One engine for every deployment tier, exactly as on Telegram: the
+    # registries grow with the features this deployment enables.
+    sources: dict[str, Source] = {}
+    transforms: dict[str, Transform] = {}
+    sinks: dict[str, Sink] = {}
+    if store is not None:
+        sources["repo_events"] = RepoEventsSource(store=store, vault=store, gateway=repo_gateway)
+        transforms["rule_match"] = RuleMatchTransform(counters=counters)
+        sinks["chat_message"] = ChatMessagesSink()
     if store is not None and archive is not None and subscriptions_store is not None:
         llm_defaults = LlmSettings(lang=config.llm_default_lang)
         llm_client = LiftWingClient(
@@ -561,36 +571,32 @@ def run_discord(config: Config) -> int:
             timeout_seconds=config.liftwing_timeout_seconds,
             counters=counters,
         )
-        engine = ActionEngine(
-            sources={"archive_window": ArchiveWindowSource(archive=archive)},
-            transforms={
-                "prompt": PromptTransform(
-                    runners={"liftwing": llm_client},
-                    store=store,
-                    defaults=llm_defaults,
-                    max_tokens_ceiling=config.llm_max_tokens_ceiling,
-                    max_chunks=config.llm_max_chunks_per_run,
-                    counters=counters,
-                    max_tokens_per_run=config.llm_max_tokens_per_run,
-                ),
-                "stats": StatsTransform(),
-            },
-            sinks={
-                # The on-demand analyses publish to the wiki (mirroring
-                # Telegram); the reply sink stays for scheduled digest DMs.
-                "wiki_section": WikiSectionSink(
-                    publisher=publisher,
-                    sanitizer=sanitizer,
-                    resolve_page=explicit_page_resolver(directory),
-                    page_url_for=config.page_url,
-                    edit_summary=config.edit_summary,
-                    bot_name=config.bot_name,
-                ),
-                "reply": ChatReplySink(max_chars=DISCORD_CAPABILITIES.max_message_chars),
-            },
+        sources["archive_window"] = ArchiveWindowSource(archive=archive)
+        transforms["prompt"] = PromptTransform(
+            runners={"liftwing": llm_client},
+            store=store,
+            defaults=llm_defaults,
+            max_tokens_ceiling=config.llm_max_tokens_ceiling,
+            max_chunks=config.llm_max_chunks_per_run,
             counters=counters,
-            clock=clock,
+            max_tokens_per_run=config.llm_max_tokens_per_run,
         )
+        transforms["stats"] = StatsTransform()
+        # The on-demand analyses publish to the wiki (mirroring Telegram);
+        # the reply sink stays for scheduled digest DMs.
+        sinks["wiki_section"] = WikiSectionSink(
+            publisher=publisher,
+            sanitizer=sanitizer,
+            resolve_page=explicit_page_resolver(directory),
+            page_url_for=config.page_url,
+            edit_summary=config.edit_summary,
+            bot_name=config.bot_name,
+        )
+        sinks["reply"] = ChatReplySink(max_chars=DISCORD_CAPABILITIES.max_message_chars)
+    engine = ActionEngine(
+        sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock
+    )
+    if store is not None and archive is not None and subscriptions_store is not None:
         analysis_service = AnalysisService(
             engine=engine,
             limiter=SlidingWindowLimiter(clock=clock, limit=6, window=timedelta(hours=1)),
@@ -621,6 +627,13 @@ def run_discord(config: Config) -> int:
                 ),
                 "sub_tick",
             )
+        )
+    if store is not None:
+        # Telegram drives the notifier through its bespoke Lifecycle hook;
+        # here it is just another MessageCollector on the shared delivery
+        # loop, because RepoNotifier was already collector-shaped.
+        collectors.append(
+            (RepoNotifier(store=store, groups=group_policy, engine=engine), "repo_notify")
         )
 
     if capture_service is not None and store is not None and config.capture_reannounce_days:
@@ -659,6 +672,7 @@ def run_discord(config: Config) -> int:
 
     async def release_clients() -> None:
         await publisher.aclose()
+        await repo_gateway.aclose()
         if llm_client is not None:
             await llm_client.aclose()
 

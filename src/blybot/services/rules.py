@@ -31,11 +31,21 @@ if TYPE_CHECKING:
 
 MAX_RULES: Final = 20
 
+# Sensible starters so enabling notifications works out of the box; admins
+# refine them afterwards. Neutral by construction — this is rule grammar,
+# not platform wording — so every adapter seeds the same ruleset.
+DEFAULT_RULES: Final = ("pr.merged digest", "release digest")
+
 _TRIGGERS: Final = ", ".join(member.token for member in EventType)
 
 
 class RuleParseError(Exception):
     """The rule text could not be parsed; the message is user-facing."""
+
+
+def default_rules() -> tuple[Rule, ...]:
+    """Parse :data:`DEFAULT_RULES` into the seed ruleset for a fresh scope."""
+    return tuple(parse_rule(spec) for spec in DEFAULT_RULES)
 
 
 def parse_rule(text: str) -> Rule:

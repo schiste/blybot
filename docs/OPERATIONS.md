@@ -85,30 +85,47 @@ not deep links (`deep_links=False`): a channel becomes subscribable the
 first time anyone runs `/subscribe` in it, rather than via an
 admin-shared link.
 
-Admin config and the digest flow are the slash commands the gateway
-registers: `/capture on|off` and `/setpage <path>` (server admins), and
-`/subscribe [schedule] [recipe] [lang:xx]`, `/mysubs`, `/unsubscribe <id>`
-for the durable-DM digests. Server-admin checks are live
-(`guild_permissions.administrator`), never stored. Capture ingestion,
-pseudonymization, the archive, LLM analyses, and subscription delivery
-reuse the same neutral services as Telegram.
+The slash commands the gateway registers:
+
+- **server admins** — `/capture on|off`, `/setpage <path>`, `/settings`,
+  `/reset`, `/revoke`, `/llm show|set|reset`, `/events on|off`,
+  `/rule add|remove|clear`, `/rules`;
+- **on-demand analyses** — `/summarize`, `/stats`, `/talkingpoints`
+  (deferred first: a chunked run outlives Discord's 3-second deadline);
+- **durable-DM digests** — `/subscribe [schedule] [recipe] [lang:xx]`,
+  `/mysubs`, `/unsubscribe <id>`.
+
+`/rule` uses Discord's native subcommand routing (`/rule add …`), where
+Telegram parses the same grammar out of its argument list; both call the
+identical neutral `CommandService`, so the rule syntax and every reply are
+shared. Admin replies are ephemeral (only the caller sees them) and
+server-admin checks are live (`guild_permissions.administrator`), never
+stored. Capture ingestion, pseudonymization, the archive, LLM analyses,
+repo notifications, and subscription delivery all reuse the same neutral
+services as Telegram.
+
+Repo notifications need a repo bound **at the channel itself**. Binding is
+still Telegram-only (see below), so on Discord `/events on` currently
+answers "bind a repository at this scope first" unless the row was bound
+elsewhere; `/rule` and `/rules` work regardless, and the background
+`repo_notify` poller runs on every Discord deployment that has a profile
+store.
 
 ### What Discord does NOT do yet
 
-The Discord adapter ships capture + analyses + subscriptions only. These
-Telegram surfaces are **deferred / not yet built** on Discord, so an
-operator should not expect parity:
+These Telegram surfaces are **deferred / not yet built** on Discord, so an
+operator should not expect full parity:
 
-- **Repository notifications** — `/setrepo`, `/events`, `/rule`,
-  `/rules`, and the background repo poller are Telegram-only; the Discord
-  admin surface does not configure them.
+- **Repo binding** — `/setrepo` has no Discord equivalent: it hands over a
+  GitHub PAT, which needs a secret-entry path Discord's slash commands do
+  not yet provide (issue #43). Without it `/events on` cannot be completed
+  from Discord.
+- **Repo commands** — `/issue` and `/repo` are Telegram-only (issue #42).
 - **Scheduled wiki analyses** — the action scheduler (`/action`) does not
-  run on Discord; only the subscription digest tick and the capture
-  reminder run in the background.
-- **Full admin parity** — `/setrepo`, `/events`, `/rule`, `/llm`,
-  `/action`, `/settings` (and the rest of the Telegram self-service menu)
-  have no Discord slash-command equivalent yet. Discord admins have only
-  `/capture` and `/setpage`.
+  run on Discord; only the subscription digest tick, the repo poller, and
+  the capture reminder run in the background.
+- **`/setconsent`, `/subscribable`, `/capture purge`** — no Discord
+  equivalent yet.
 - **DM `/log` + the chat picker** — the private `/log` flow and the
   "choose a shared group" picker depend on `deep_links` / `chat_picker`,
   which Discord lacks.

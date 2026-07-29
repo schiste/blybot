@@ -9,6 +9,12 @@ build/
 .venv/
 venv/
 
+# Real configuration never enters the repo — only the example does.
+# (Deployed envs live under $HOME on Toolforge, but a local blybot.env
+# in a working copy is one `git add -A` away from being committed.)
+*.env
+!.env.example
+
 # Tooling caches
 .mypy_cache/
 .pytest_cache/

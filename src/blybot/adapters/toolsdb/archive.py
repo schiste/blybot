@@ -105,8 +105,7 @@ WHERE table_schema = DATABASE() AND table_name = 'messages'
   AND index_name = 'PRIMARY' AND column_name = 'channel'
 """
 MESSAGES_REBUILD_PK: Final = (
-    "ALTER TABLE messages DROP PRIMARY KEY, "
-    "ADD PRIMARY KEY (platform, channel, thread, message_id)"
+    "ALTER TABLE messages DROP PRIMARY KEY, ADD PRIMARY KEY (platform, channel, thread, message_id)"
 )
 # Rebuild the by_time secondary index onto the string identity too, so the
 # window query keeps an index on the largest table. Guarded the same way.

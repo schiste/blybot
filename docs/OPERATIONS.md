@@ -421,6 +421,57 @@ a `~/<name>.env`.
   | `event=wiki_edit outcome=retry` | maxlag/transient API backoff in progress |
   | `event=wiki_login outcome=error` | BotPassword rejected — check credentials |
 
+## Secrets and key rotation
+
+Where every secret lives at rest, and how to change it. All of it is file
+permissions and env vars — there is no secret store to administer.
+
+| Secret | At rest in | Rotating it costs |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` | `~/<name>.env` and the derived `~/.blybot-jobs/<name>-<platform>.env`, both `0600` | nothing — restart and go |
+| `WIKI_BOTPASSWORD` | same env files | nothing |
+| `PROFILE_ENCRYPTION_KEY` (Fernet) | env only; encrypts `token_ciphertext` in ToolsDB | **every group re-supplies its GitHub token** |
+| `ARCHIVE_PSEUDONYM_KEY` (HMAC) | env only; derives author labels | **past and future author labels stop matching** |
+| Group GitHub tokens | Fernet ciphertext in ToolsDB, never on disk in clear | per-group `/revoke` + `/setrepo` |
+
+`run.sh` refuses to start unless its config file is `0600`, and because the
+per-platform wrapper points `BLYBOT_CONFIG` at the derived env, that check
+covers the derived files too. `~/.blybot-jobs/` is `0700`. Nothing secret
+lives in the repository: `*.env` is git-ignored (only `.env.example` is
+tracked), and the deployed env files are under `$HOME`, outside any working
+copy.
+
+**Bot token or BotPassword.** Issue the new credential (BotFather,
+Discord Developer Portal, or Special:BotPasswords), edit `~/<name>.env`,
+then `~/blybot/deploy-instance.sh start <name>` to rewrite the derived envs
+and restart. Revoke the old credential afterwards. No stored data is
+affected.
+
+**`PROFILE_ENCRYPTION_KEY` (Fernet).** Rotating it makes every stored
+GitHub token undecryptable. That is handled, not fatal: `fetch_token` catches
+`InvalidToken`, logs `event=token_vault outcome=error`, and returns "no
+token", so the bot keeps running and only the repo features go quiet. Each
+affected group re-runs `/setrepo` and supplies a token again. Everything
+else in a profile — pages, consent, rules, capture — is stored in clear and
+survives untouched. Rotate when the key may have been exposed; expect a
+burst of `token_vault outcome=error` and tell the affected groups. There is
+no re-encryption path, and adding one would mean holding both keys at once.
+
+**`ARCHIVE_PSEUDONYM_KEY` (HMAC).** Rotating severs the link between author
+labels written before and after: the same person appears as two unrelated
+pseudonyms, and already-published wiki pages keep the old ones. This is a
+privacy *feature* — it is the same unlinkability boundary `/flush` gives an
+individual — but it silently degrades statistics that span the rotation, so
+prefer to rotate at a natural boundary and say so. Never rotate it to "fix"
+a problem: the old labels are not recoverable afterwards.
+
+**Confirming nothing leaks.** Secrets are excluded from `repr(Config)`
+(`field(repr=False)`), so a stray `print(config)` or a traceback that dumps
+locals cannot spill them; a test pins this. Configuration errors name the
+missing *keys*, never their values. If you add a credential to `Config`,
+mark it `field(repr=False)` — `test_every_credential_field_is_marked_non_repr`
+fails otherwise.
+
 ## Troubleshooting
 
 - **Exit with `configuration error: missing required configuration

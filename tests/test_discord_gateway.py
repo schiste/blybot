@@ -614,10 +614,13 @@ def test_build_registers_every_slash_command() -> None:
     names = sorted(command.name for command in client.tree.get_commands())
     assert names == [
         "capture",
+        "events",
         "llm",
         "mysubs",
         "reset",
         "revoke",
+        "rule",
+        "rules",
         "setpage",
         "settings",
         "stats",
@@ -626,6 +629,9 @@ def test_build_registers_every_slash_command() -> None:
         "talkingpoints",
         "unsubscribe",
     ]
+    # /rule is a group: Discord routes its subcommands natively.
+    (group,) = [c for c in client.tree.get_commands() if c.name == "rule"]
+    assert sorted(sub.name for sub in cast("Any", group).commands) == ["add", "clear", "remove"]
     assert client.intents.message_content is True  # default privileged intents
 
 
@@ -910,3 +916,86 @@ def test_run_starts_the_client() -> None:
 
     gw.run(cast("discord.Client", _FakeClient()), "bot-token")
     assert started == ["bot-token"]
+
+
+# --- repo notifications: /events, /rule, /rules (issue #40) ------------------
+
+
+async def test_events_command_maps_the_scope_and_delegates() -> None:
+    gateway, store = _admin_gateway()
+    assert await gateway.events_command(_CHANNEL, None, "on", is_admin=False) == cmd.REPLY_NOT_ADMIN
+    # No repo bound at this channel yet, so the neutral guard answers.
+    assert (
+        await gateway.events_command(_CHANNEL, None, "on", is_admin=True)
+        == cmd.REPLY_EVENTS_NEED_REPO
+    )
+    await gateway.directory.set_repo(_SCOPE, "org/repo")
+    assert (
+        await gateway.events_command(_CHANNEL, None, "on", is_admin=True) == cmd.REPLY_EVENTS_SEEDED
+    )
+    assert store.profiles[_SCOPE].events_enabled is True
+    assert await gateway.events_command(_CHANNEL, None, "junk", is_admin=True) == (
+        cmd.REPLY_EVENTS_USAGE
+    )
+
+
+async def test_rule_commands_add_list_remove_and_clear() -> None:
+    gateway, store = _admin_gateway()
+    added = await gateway.rule_add_command(_CHANNEL, None, "pr.merged base:main", is_admin=True)
+    (rule,) = store.profiles[_SCOPE].rules
+    assert rule.rule_id in added
+
+    listing = await gateway.rules_command(_CHANNEL, None, is_admin=True)
+    assert listing.startswith("Rules for this scope:")
+
+    removed = await gateway.rule_remove_command(_CHANNEL, None, rule.rule_id, is_admin=True)
+    assert removed == cmd.REPLY_RULE_REMOVED.format(id=rule.rule_id)
+
+    await gateway.rule_add_command(_CHANNEL, None, "release", is_admin=True)
+    cleared = await gateway.rule_clear_command(_CHANNEL, None, is_admin=True)
+    assert cleared == cmd.REPLY_RULES_CLEARED.format(count=1)
+    assert store.profiles[_SCOPE].rules == ()
+
+
+async def test_rule_commands_are_admin_gated() -> None:
+    gateway, _store = _admin_gateway()
+    replies = [
+        await gateway.rule_add_command(_CHANNEL, None, "release", is_admin=False),
+        await gateway.rule_remove_command(_CHANNEL, None, "abcd", is_admin=False),
+        await gateway.rule_clear_command(_CHANNEL, None, is_admin=False),
+        await gateway.rules_command(_CHANNEL, None, is_admin=False),
+    ]
+    assert replies == [cmd.REPLY_NOT_ADMIN] * len(replies)
+
+
+async def test_events_and_rule_slash_commands_answer_ephemerally() -> None:
+    gateway, store = _admin_gateway()
+    await gateway.directory.set_repo(_SCOPE, "org/repo")
+    client = build_gateway_client(gateway)
+    channel = SimpleNamespace(id=_CHANNEL)
+    rule_group = cast("Any", _command(client, "rule"))
+    leaves = {sub.name: sub for sub in rule_group.commands}
+
+    interaction = _admin_interaction(channel)
+    await _command(client, "events").callback(interaction, "on")
+    assert interaction.response.sent == [(cmd.REPLY_EVENTS_SEEDED, True)]
+
+    interaction = _admin_interaction(channel)
+    await leaves["add"].callback(interaction, "issue.opened label:bug")
+    assert interaction.response.sent[0][1] is True
+
+    interaction = _admin_interaction(channel)
+    await _command(client, "rules").callback(interaction)
+    (listing, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is True
+    assert "issue.opened label:bug" in listing
+
+    added = store.profiles[_SCOPE].rules[-1]
+    interaction = _admin_interaction(channel)
+    await leaves["remove"].callback(interaction, added.rule_id)
+    assert interaction.response.sent == [(cmd.REPLY_RULE_REMOVED.format(id=added.rule_id), True)]
+
+    interaction = _admin_interaction(channel)
+    await leaves["clear"].callback(interaction)
+    assert interaction.response.sent == [(cmd.REPLY_RULES_CLEARED.format(count=2), True)]
+    assert store.profiles[_SCOPE].rules == ()

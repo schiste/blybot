@@ -1,12 +1,19 @@
-"""The platform-neutral command service (issue #32, increment 1).
+"""The platform-neutral command service (issue #32).
 
-Both the Telegram and Discord adapters already implement a handful of the
-same admin commands. This service holds that business logic once, so each
-adapter only maps its native trigger to a neutral call and renders the
-returned :class:`~blybot.domain.models.CommandResult`. This increment
-covers the two purely-delegating shared commands — ``capture on|off`` and
-``setpage`` — and establishes the contract the feature issues (#40-44)
-extend.
+Both the Telegram and Discord adapters implement the same admin commands.
+This service holds that business logic once, so each adapter only maps its
+native trigger to a neutral call and renders the returned
+:class:`~blybot.domain.models.CommandResult`. It now covers ``capture
+on|off``, ``setpage``, ``settings``, ``reset``, ``revoke``, ``llm`` (#43),
+and the repo-notification surface — ``events on|off``, ``rule
+add|remove|clear`` and ``rules`` (#40).
+
+The rule surface is offered in both shapes a platform router can want: a
+flat-token :meth:`CommandService.rule` dispatcher for adapters handed raw
+argv, and the individual :meth:`CommandService.add_rule` /
+:meth:`~CommandService.remove_rule` / :meth:`~CommandService.clear_rules`
+methods for adapters with native subcommands. The grammar is shared either
+way — no adapter re-implements the dispatch.
 
 The reply wording lives here as module constants: one neutral phrasing per
 outcome, consolidating what the two adapters used to word slightly
@@ -26,8 +33,19 @@ from typing import TYPE_CHECKING, Final
 from blybot.domain.models import CommandResult
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
-from blybot.services.directory import PageNotAllowedError, SelfServiceUnavailableError
+from blybot.services.directory import (
+    PageNotAllowedError,
+    SelfServiceUnavailableError,
+    TooManyRulesError,
+)
 from blybot.services.llmconf import LlmParseError, describe_llm, parse_llm_args
+from blybot.services.rules import (
+    MAX_RULES,
+    RuleParseError,
+    default_rules,
+    describe_rule,
+    parse_rule,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -77,6 +95,34 @@ REPLY_LLM_RESET: Final = "LLM settings back to deployment defaults."
 _LLM_ORIGIN_OWN: Final = "set for this scope"
 _LLM_ORIGIN_INHERITED: Final = "inherited from the parent scope"
 _LLM_ORIGIN_DEFAULT: Final = "deployment defaults"
+REPLY_EVENTS_USAGE: Final = "Usage: /events on | off — rules decide what's delivered (see /rules)"
+REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
+REPLY_EVENTS_NEED_REPO: Final = (
+    "Bind a repository at this scope first — /setrepo owner/repo — then /events on."
+)
+REPLY_EVENTS_SEEDED: Final = (
+    "Repo notifications on. Seeded two starter rules — pr.merged and release, "
+    "both digest. Use /rules to see them, /rule to add more, /rule clear to start over."
+)
+REPLY_RULE_USAGE: Final = (
+    "Usage:\n"
+    "/rule add <event> [filters] [live|digest]\n"
+    "/rule remove <id>\n"
+    "/rule clear\n"
+    "Events: issue.opened, pr.merged, release, comment, … · "
+    "filters: label:bug,urgent · author:x · base:main · "
+    "title:text or title:/regex/ · draft:false · milestone:v2 · assignee:y. "
+    "See /rules to list them."
+)
+REPLY_RULE_ADDED: Final = "Rule added for this scope: {desc}"
+REPLY_RULE_REMOVED: Final = "Rule {id} removed from this scope."
+REPLY_RULE_UNKNOWN: Final = "No rule {id} at this scope. Use /rules to list them."
+REPLY_RULES_CLEARED: Final = "Cleared {count} rule(s) for this scope."
+REPLY_RULES_NONE: Final = "No rules set for this scope. Add one, e.g. /rule add pr.merged"
+REPLY_RULES_LIST: Final = "Rules for this scope:\n{lines}"
+REPLY_RULES_FULL: Final = (
+    "You already have the maximum of {max} rules at this scope; remove one with /rule remove <id>."
+)
 REPLY_SETTINGS: Final = (
     "Configuration{customized}:\n"
     "- publishes to: {log_page}\n"
@@ -216,6 +262,132 @@ class CommandService:
             return CommandResult(REPLY_STORAGE_DOWN, ok=False)
         log_event("token_revoked", "ok")
         return CommandResult(REPLY_REVOKED)
+
+    async def events(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
+        """Toggle notifications from a flat ``/events`` token list (admins only).
+
+        The argv-shaped surface, mirroring :meth:`rule`: an adapter handed
+        raw arguments delegates the ``on``/``off`` grammar (and the usage
+        reply for anything else) instead of re-checking it itself.
+        """
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        argument = tokens[0].lower() if tokens else ""
+        if argument not in {"on", "off"}:
+            return CommandResult(REPLY_EVENTS_USAGE, ok=False)
+        return await self.set_events(scope, is_admin=True, enabled=argument == "on")
+
+    async def set_events(self, scope: Scope, *, is_admin: bool, enabled: bool) -> CommandResult:
+        """Switch this scope's rule-driven repo notifications on or off (admins only).
+
+        ``on`` requires a repo bound at this very scope and seeds the
+        starter ruleset when none exists, so it works out of the box; the
+        rules themselves decide what is delivered.
+        """
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        try:
+            return await self._toggle_events(scope, enabled=enabled)
+        except SelfServiceUnavailableError:
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+
+    async def _toggle_events(self, scope: Scope, *, enabled: bool) -> CommandResult:
+        if not enabled:
+            await self.directory.set_events(scope, enabled=False)
+            log_event("profile_update", "ok")
+            return CommandResult(REPLY_EVENTS_SET.format(state="off"))
+        own = await self.directory.profile_of(scope)
+        if not own.repo:
+            # A scope that merely inherits its parent's repo can't get its
+            # own notifications — the notifier polls per bound-repo row.
+            return CommandResult(REPLY_EVENTS_NEED_REPO, ok=False)
+        seeded = await self.directory.enable_events(scope, default_rules())
+        log_event("profile_update", "ok")
+        state = REPLY_EVENTS_SEEDED if seeded else REPLY_EVENTS_SET.format(state="on")
+        return CommandResult(state)
+
+    async def rule(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
+        """Add, remove, or clear rules from a flat ``/rule`` token list (admins only).
+
+        The argv-shaped surface, for platforms whose command router hands
+        over the raw arguments. Platforms with native subcommands call
+        :meth:`add_rule`, :meth:`remove_rule`, or :meth:`clear_rules`
+        directly — the dispatch grammar lives here so neither adapter owns it.
+        """
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        sub = tokens[0].lower() if tokens else ""
+        if sub == "add":
+            return await self.add_rule(scope, is_admin=True, spec=" ".join(tokens[1:]))
+        if sub == "remove" and len(tokens) == 2:  # noqa: PLR2004 -- "remove <id>"
+            return await self.remove_rule(scope, is_admin=True, rule_id=tokens[1])
+        if sub == "clear":
+            return await self.clear_rules(scope, is_admin=True)
+        return CommandResult(REPLY_RULE_USAGE, ok=False)
+
+    async def add_rule(self, scope: Scope, *, is_admin: bool, spec: str) -> CommandResult:
+        """Append one composable event rule to this scope (admins only)."""
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        try:
+            parsed = parse_rule(spec)
+        except RuleParseError as error:
+            return CommandResult(str(error), ok=False)
+        try:
+            await self.directory.add_rule(scope, parsed)
+        except TooManyRulesError:
+            return CommandResult(REPLY_RULES_FULL.format(max=MAX_RULES), ok=False)
+        except SelfServiceUnavailableError:
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        log_event("profile_update", "ok")
+        return CommandResult(REPLY_RULE_ADDED.format(desc=describe_rule(parsed)))
+
+    async def remove_rule(self, scope: Scope, *, is_admin: bool, rule_id: str) -> CommandResult:
+        """Drop one rule from this scope by id (admins only)."""
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        try:
+            removed = await self.directory.remove_rule(scope, rule_id)
+        except SelfServiceUnavailableError:
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        if not removed:
+            return CommandResult(REPLY_RULE_UNKNOWN.format(id=rule_id), ok=False)
+        log_event("profile_update", "ok")
+        return CommandResult(REPLY_RULE_REMOVED.format(id=rule_id))
+
+    async def clear_rules(self, scope: Scope, *, is_admin: bool) -> CommandResult:
+        """Remove every rule at this scope (admins only)."""
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        try:
+            count = await self.directory.clear_rules(scope)
+        except SelfServiceUnavailableError:
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        log_event("profile_update", "ok")
+        return CommandResult(REPLY_RULES_CLEARED.format(count=count))
+
+    async def list_rules(self, scope: Scope, *, is_admin: bool) -> CommandResult:
+        """List this scope's event rules with their ids (admins only, read-only)."""
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        try:
+            rules = await self.directory.list_rules(scope)
+        except SelfServiceUnavailableError:
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        if not rules:
+            return CommandResult(REPLY_RULES_NONE, ok=False)
+        lines = "\n".join(describe_rule(item) for item in rules)
+        return CommandResult(REPLY_RULES_LIST.format(lines=lines))
 
     async def set_llm(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
         """Show, set, or reset this scope's LLM settings (admins only).

@@ -18,7 +18,7 @@ from blybot.services.capture import CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
-from blybot.services.rules import parse_rule
+from blybot.services.rules import MAX_RULES, parse_rule
 from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
 
 _CHANNEL = 555000111
@@ -380,3 +380,148 @@ async def test_llm_reports_storage_down() -> None:
     service, _store = _llm_service(store=InMemoryProfiles(fail=True))
     result = await service.set_llm(_SCOPE, is_admin=True, tokens=["show"])
     assert result.text == c.REPLY_STORAGE_DOWN
+
+
+# --- events / rule / rules (issue #40) ---------------------------------------
+
+
+def _storeless() -> CommandService:
+    """A deployment with no profile store: every write is self-service-off."""
+    return CommandService(
+        directory=_directory(None),
+        groups=GroupPolicy(allowed=set()),
+        page_url_for=str,
+        counters=Counters(),
+    )
+
+
+async def test_events_and_rules_reject_non_admins() -> None:
+    service, _store, _capture = _service()
+    results = [
+        await service.events(_SCOPE, is_admin=False, tokens=["on"]),
+        await service.set_events(_SCOPE, is_admin=False, enabled=True),
+        await service.rule(_SCOPE, is_admin=False, tokens=["clear"]),
+        await service.add_rule(_SCOPE, is_admin=False, spec="release"),
+        await service.remove_rule(_SCOPE, is_admin=False, rule_id="abcd"),
+        await service.clear_rules(_SCOPE, is_admin=False),
+        await service.list_rules(_SCOPE, is_admin=False),
+    ]
+    assert [r.text for r in results] == [c.REPLY_NOT_ADMIN] * len(results)
+    assert not any(r.ok for r in results)
+
+
+async def test_events_usage_covers_every_non_toggle_argument() -> None:
+    service, _store, _capture = _service()
+    for tokens in ([], ["sometimes"], ["releases,prs"]):
+        result = await service.events(_SCOPE, is_admin=True, tokens=list(tokens))
+        assert result.text == c.REPLY_EVENTS_USAGE
+        assert result.ok is False
+
+
+async def test_events_on_seeds_then_keeps_the_ruleset() -> None:
+    service, store, _capture = _service()
+    await service.directory.set_repo(_SCOPE, "org/repo")
+
+    seeded = await service.events(_SCOPE, is_admin=True, tokens=["on"])
+    assert seeded.text == c.REPLY_EVENTS_SEEDED
+    assert {rule.trigger.token for rule in store.profiles[_SCOPE].rules} == {
+        "pr.merged",
+        "release",
+    }
+
+    again = await service.events(_SCOPE, is_admin=True, tokens=["ON"])
+    assert again.text == c.REPLY_EVENTS_SET.format(state="on")
+
+    off = await service.events(_SCOPE, is_admin=True, tokens=["off"])
+    assert off.text == c.REPLY_EVENTS_SET.format(state="off")
+    assert store.profiles[_SCOPE].events_enabled is False
+
+
+async def test_events_on_needs_a_repo_bound_at_this_very_scope() -> None:
+    service, store, _capture = _service()
+    result = await service.set_events(_SCOPE, is_admin=True, enabled=True)
+    assert result.text == c.REPLY_EVENTS_NEED_REPO
+    assert result.ok is False
+    assert _SCOPE not in store.profiles or not store.profiles[_SCOPE].events_enabled
+
+
+async def test_rule_dispatches_add_remove_and_clear() -> None:
+    service, store, _capture = _service()
+    added = await service.rule(_SCOPE, is_admin=True, tokens=["add", "pr.merged", "base:main"])
+    (rule,) = store.profiles[_SCOPE].rules
+    assert added.text == c.REPLY_RULE_ADDED.format(
+        desc=f"[{rule.rule_id}] pr.merged base:main → live"
+    )
+
+    listing = await service.list_rules(_SCOPE, is_admin=True)
+    assert listing.text.startswith("Rules for this scope:")
+    assert rule.rule_id in listing.text
+
+    removed = await service.rule(_SCOPE, is_admin=True, tokens=["remove", rule.rule_id])
+    assert removed.text == c.REPLY_RULE_REMOVED.format(id=rule.rule_id)
+    assert store.profiles[_SCOPE].rules == ()
+
+    await service.add_rule(_SCOPE, is_admin=True, spec="release")
+    cleared = await service.rule(_SCOPE, is_admin=True, tokens=["CLEAR"])
+    assert cleared.text == c.REPLY_RULES_CLEARED.format(count=1)
+
+
+async def test_rule_usage_covers_every_bad_subcommand() -> None:
+    service, _store, _capture = _service()
+    for tokens in ([], ["frobnicate"], ["remove"], ["remove", "a", "b"]):
+        result = await service.rule(_SCOPE, is_admin=True, tokens=list(tokens))
+        assert result.text == c.REPLY_RULE_USAGE
+        assert result.ok is False
+
+
+async def test_rule_add_surfaces_the_parse_error_verbatim() -> None:
+    service, _store, _capture = _service()
+    result = await service.add_rule(_SCOPE, is_admin=True, spec="nope.nope")
+    assert "Unknown event type" in result.text
+    assert result.ok is False
+
+
+async def test_rule_add_enforces_the_per_scope_cap() -> None:
+    service, store, _capture = _service()
+    for _ in range(MAX_RULES):
+        await service.add_rule(_SCOPE, is_admin=True, spec="pr.merged")
+    result = await service.add_rule(_SCOPE, is_admin=True, spec="release")
+    assert result.text == c.REPLY_RULES_FULL.format(max=MAX_RULES)
+    assert len(store.profiles[_SCOPE].rules) == MAX_RULES
+
+
+async def test_rule_remove_and_list_report_the_empty_cases() -> None:
+    service, _store, _capture = _service()
+    unknown = await service.remove_rule(_SCOPE, is_admin=True, rule_id="nope")
+    assert unknown.text == c.REPLY_RULE_UNKNOWN.format(id="nope")
+    assert unknown.ok is False
+
+    empty = await service.list_rules(_SCOPE, is_admin=True)
+    assert empty.text == c.REPLY_RULES_NONE
+    assert empty.ok is False
+
+
+async def test_events_and_rules_report_a_storage_outage() -> None:
+    service, _store, _capture = _service(store=InMemoryProfiles(fail=True))
+    results = [
+        await service.set_events(_SCOPE, is_admin=True, enabled=True),
+        await service.add_rule(_SCOPE, is_admin=True, spec="release"),
+        await service.remove_rule(_SCOPE, is_admin=True, rule_id="abcd"),
+        await service.clear_rules(_SCOPE, is_admin=True),
+        await service.list_rules(_SCOPE, is_admin=True),
+    ]
+    assert [r.text for r in results] == [c.REPLY_STORAGE_DOWN] * len(results)
+    assert not any(r.ok for r in results)
+
+
+async def test_events_and_rules_report_self_service_off() -> None:
+    service = _storeless()
+    results = [
+        await service.set_events(_SCOPE, is_admin=True, enabled=True),
+        await service.add_rule(_SCOPE, is_admin=True, spec="release"),
+        await service.remove_rule(_SCOPE, is_admin=True, rule_id="abcd"),
+        await service.clear_rules(_SCOPE, is_admin=True),
+        await service.list_rules(_SCOPE, is_admin=True),
+    ]
+    assert [r.text for r in results] == [c.REPLY_SELF_SERVICE_OFF] * len(results)
+    assert not any(r.ok for r in results)

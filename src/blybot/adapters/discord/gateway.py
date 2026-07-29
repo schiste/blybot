@@ -13,10 +13,16 @@ connection:
   render the reply. ``run`` is a one-line shell around ``client.run``.
 
 Onboarding is slash commands, not deep links (``deep_links=False``):
-``/capture`` and ``/setpage`` are server-admin config, ``/subscribe``,
-``/mysubs`` and ``/unsubscribe`` are the durable-DM digest flow. Outbound
-digests and reminders go out through the shared neutral delivery loop
-driving :class:`~blybot.adapters.discord.transport.DiscordTransport`.
+``/capture``, ``/setpage``, ``/settings``, ``/reset``, ``/revoke``,
+``/llm``, ``/events``, ``/rule`` and ``/rules`` are server-admin config;
+``/subscribe``, ``/mysubs`` and ``/unsubscribe`` are the durable-DM digest
+flow. ``/rule`` is an :class:`~discord.app_commands.Group`, so Discord
+routes its subcommands natively and each leaf is one neutral call — the
+grammar itself still lives in the shared
+:class:`~blybot.services.commands.CommandService`. Outbound digests,
+reminders and repo notifications go out through the shared neutral
+delivery loop driving
+:class:`~blybot.adapters.discord.transport.DiscordTransport`.
 """
 
 from __future__ import annotations
@@ -174,6 +180,45 @@ class DiscordGateway:
         result = await self.commands.set_llm(
             scope_of(channel_id, thread_id), is_admin=is_admin, tokens=options.split()
         )
+        return result.text
+
+    async def events_command(
+        self, channel_id: int, thread_id: int | None, state: str, *, is_admin: bool
+    ) -> str:
+        """Turn this channel's repo notifications on or off (server admins only)."""
+        result = await self.commands.events(
+            scope_of(channel_id, thread_id), is_admin=is_admin, tokens=state.split()
+        )
+        return result.text
+
+    async def rule_add_command(
+        self, channel_id: int, thread_id: int | None, spec: str, *, is_admin: bool
+    ) -> str:
+        """Add one composable repo-event rule to this channel (server admins only)."""
+        result = await self.commands.add_rule(
+            scope_of(channel_id, thread_id), is_admin=is_admin, spec=spec
+        )
+        return result.text
+
+    async def rule_remove_command(
+        self, channel_id: int, thread_id: int | None, rule_id: str, *, is_admin: bool
+    ) -> str:
+        """Drop one of this channel's rules by id (server admins only)."""
+        result = await self.commands.remove_rule(
+            scope_of(channel_id, thread_id), is_admin=is_admin, rule_id=rule_id
+        )
+        return result.text
+
+    async def rule_clear_command(
+        self, channel_id: int, thread_id: int | None, *, is_admin: bool
+    ) -> str:
+        """Remove every rule from this channel (server admins only)."""
+        result = await self.commands.clear_rules(scope_of(channel_id, thread_id), is_admin=is_admin)
+        return result.text
+
+    async def rules_command(self, channel_id: int, thread_id: int | None, *, is_admin: bool) -> str:
+        """List this channel's repo-event rules with their ids (server admins only)."""
+        result = await self.commands.list_rules(scope_of(channel_id, thread_id), is_admin=is_admin)
         return result.text
 
     async def analyze_command(
@@ -356,7 +401,7 @@ class DiscordGatewayClient(discord.Client):
             reply_to=reference.message_id if reference is not None else None,
         )
 
-    def _register_commands(self) -> None:
+    def _register_commands(self) -> None:  # noqa: PLR0915 -- one flat block per slash command
         gateway = self._gateway
 
         @self.tree.command(name="capture", description="Turn message capture on/off (admins).")
@@ -424,6 +469,63 @@ class DiscordGatewayClient(discord.Client):
             channel_id, thread_id = _channel_ids(interaction.channel)
             reply = await gateway.llm_command(
                 channel_id, thread_id, options, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="events", description="Turn rule-driven repo notifications on/off (admins)."
+        )
+        @app_commands.guild_only()
+        @app_commands.describe(state="on or off")
+        async def events(interaction: discord.Interaction, state: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.events_command(
+                channel_id, thread_id, state, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @self.tree.command(name="rules", description="List this channel's event rules (admins).")
+        @app_commands.guild_only()
+        async def rules(interaction: discord.Interaction) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.rules_command(
+                channel_id, thread_id, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        # Discord routes subcommands natively, so /rule needs no argv
+        # dispatcher of its own — each leaf calls the matching neutral
+        # CommandService method directly.
+        rule = app_commands.Group(
+            name="rule",
+            description="Manage this channel's repo event rules (admins).",
+            guild_only=True,
+        )
+        self.tree.add_command(rule)
+
+        @rule.command(name="add", description="Add an event rule.")
+        @app_commands.describe(spec="e.g. pr.merged base:main digest")
+        async def rule_add(interaction: discord.Interaction, spec: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.rule_add_command(
+                channel_id, thread_id, spec, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @rule.command(name="remove", description="Remove an event rule by id.")
+        @app_commands.describe(rule_id="The id shown by /rules")
+        async def rule_remove(interaction: discord.Interaction, rule_id: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.rule_remove_command(
+                channel_id, thread_id, rule_id, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @rule.command(name="clear", description="Remove every event rule here.")
+        async def rule_clear(interaction: discord.Interaction) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.rule_clear_command(
+                channel_id, thread_id, is_admin=_is_admin(interaction.user)
             )
             await _respond(interaction, reply)
 

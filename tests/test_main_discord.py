@@ -70,13 +70,16 @@ async def test_discord_full_deployment_wires_every_neutral_service(
     assert isinstance(gateway.directory.store, ToolsDbStore)
 
     collectors = _collectors(client)
-    assert set(collectors) == {"sub_tick"}  # digests deliver; reminders off by default
+    # Digests deliver and repo notifications poll; reminders are off by default.
+    assert set(collectors) == {"sub_tick", "repo_notify"}
     engine = collectors["sub_tick"].engine
-    assert set(engine.sources) == {"archive_window"}
-    assert set(engine.transforms) == {"prompt", "stats"}
+    assert collectors["repo_notify"].engine is engine  # one engine for the deployment
+    assert set(engine.sources) == {"archive_window", "repo_events"}
+    assert set(engine.transforms) == {"prompt", "stats", "rule_match"}
     # The wiki_section sink lets the on-demand analyses publish to the wiki,
-    # exactly like Telegram; the reply sink stays for scheduled digest DMs.
-    assert set(engine.sinks) == {"wiki_section", "reply"}
+    # exactly like Telegram; the reply sink stays for scheduled digest DMs and
+    # chat_message carries the rule-matched repo events.
+    assert set(engine.sinks) == {"wiki_section", "reply", "chat_message"}
     assert gateway.analysis.engine is engine  # analyses run through this engine
 
     # The bootstrap closure covers all three stores.
@@ -99,7 +102,13 @@ async def test_discord_store_only_deployment_has_no_capture(
     assert gateway.capture is None  # no pseudonym key: capture stays off
     assert gateway.subscriptions is None
     assert gateway.analysis is None  # analyses need the archive too
-    assert _collectors(client) == {}
+    # Repo notifications need only the profile store, so they still run here.
+    collectors = _collectors(client)
+    assert set(collectors) == {"repo_notify"}
+    engine = collectors["repo_notify"].engine
+    assert set(engine.sources) == {"repo_events"}
+    assert set(engine.transforms) == {"rule_match"}
+    assert set(engine.sinks) == {"chat_message"}
 
     # bootstrap runs only the profile store (archive/subs were never built).
     await cast("Any", client._on_setup).keywords["bootstrap"]()
@@ -131,7 +140,7 @@ async def test_discord_reannounce_cadence_adds_the_reminder(
     )
     client = cast("DiscordGatewayClient", seen["client"])
     collectors = _collectors(client)
-    assert set(collectors) == {"sub_tick", "capture_remind"}
+    assert set(collectors) == {"sub_tick", "repo_notify", "capture_remind"}
     assert collectors["capture_remind"].cadence.days == 30
     await seen["release"]()
 

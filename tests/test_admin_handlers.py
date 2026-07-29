@@ -333,7 +333,7 @@ async def test_events_on_requires_a_repo_at_this_scope() -> None:
     handlers = make_handlers(store)
     context, bot = admin_context(args=["on"])
     await handlers.on_events(command("/events on"), context)  # no repo bound
-    assert tg.sent_texts(bot) == [a.REPLY_EVENTS_NEED_REPO]
+    assert tg.sent_texts(bot) == [cmd.REPLY_EVENTS_NEED_REPO]
     assert gscope() not in store.profiles or not store.profiles[gscope()].events_enabled
 
 
@@ -347,7 +347,7 @@ async def test_events_on_enables_and_seeds_starter_rules() -> None:
     assert profile.events_enabled
     assert {rule.trigger.token for rule in profile.rules} == {"pr.merged", "release"}
     assert all(rule.mode is DeliveryMode.DIGEST for rule in profile.rules)
-    assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SEEDED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_EVENTS_SEEDED]
 
 
 async def test_events_on_keeps_existing_rules_and_does_not_reseed() -> None:
@@ -360,7 +360,7 @@ async def test_events_on_keeps_existing_rules_and_does_not_reseed() -> None:
     await handlers.on_events(command("/events on"), context)
     rules = store.profiles[gscope()].rules
     assert [rule.trigger.token for rule in rules] == ["issue.opened"]  # not reseeded
-    assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SET.format(state="on")]
+    assert tg.sent_texts(bot) == [cmd.REPLY_EVENTS_SET.format(state="on")]
 
 
 async def test_events_off_disables() -> None:
@@ -372,7 +372,7 @@ async def test_events_off_disables() -> None:
     context, bot = admin_context(args=["off"])
     await handlers.on_events(command("/events off"), context)
     assert not store.profiles[gscope()].events_enabled
-    assert tg.sent_texts(bot) == [a.REPLY_EVENTS_SET.format(state="off")]
+    assert tg.sent_texts(bot) == [cmd.REPLY_EVENTS_SET.format(state="off")]
 
 
 async def test_events_rejects_junk_and_reports_outages() -> None:
@@ -380,7 +380,7 @@ async def test_events_rejects_junk_and_reports_outages() -> None:
     for bad in ([], ["sometimes"], ["releases,prs"]):
         context, bot = admin_context(args=bad)
         await handlers.on_events(command("/events"), context)
-        assert tg.sent_texts(bot) == [a.REPLY_EVENTS_USAGE]
+        assert tg.sent_texts(bot) == [cmd.REPLY_EVENTS_USAGE]
 
     handlers = make_handlers(InMemoryProfiles(fail=True))
     context, bot = admin_context(args=["on"])
@@ -457,7 +457,7 @@ async def test_rule_add_stores_and_confirms() -> None:
     assert rule.trigger is EventType.PR_MERGED
     assert rule.filter.base == "main"
     (sent,) = tg.sent_texts(bot)
-    assert sent.startswith(f"Rule added for the group default: [{rule.rule_id}] pr.merged")
+    assert sent.startswith(f"Rule added for this scope: [{rule.rule_id}] pr.merged")
 
 
 async def test_rules_lists_every_rule_with_ids() -> None:
@@ -469,7 +469,7 @@ async def test_rules_lists_every_rule_with_ids() -> None:
     context, bot = admin_context()
     await handlers.on_rules(command("/rules"), context)
     listing = tg.sent_texts(bot)[-1]
-    assert listing.startswith("Rules for the group default:")
+    assert listing.startswith("Rules for this scope:")
     assert "pr.merged" in listing
     assert "issue.opened label:bug → live" in listing
 
@@ -478,7 +478,7 @@ async def test_rules_empty_prompts_to_add_one() -> None:
     handlers = make_handlers()
     context, bot = admin_context()
     await handlers.on_rules(command("/rules"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_RULES_NONE.format(scope="the group default")]
+    assert tg.sent_texts(bot) == [cmd.REPLY_RULES_NONE.format()]
 
 
 async def test_rule_remove_by_id_and_unknown() -> None:
@@ -490,14 +490,12 @@ async def test_rule_remove_by_id_and_unknown() -> None:
 
     context, bot = admin_context(args=["remove", "nope"])
     await handlers.on_rule(command("/rule remove nope"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_RULE_UNKNOWN.format(id="nope", scope="the group default")]
+    assert tg.sent_texts(bot) == [cmd.REPLY_RULE_UNKNOWN.format(id="nope")]
 
     context, bot = admin_context(args=["remove", rule.rule_id])
     await handlers.on_rule(command("/rule remove id"), context)
     assert store.profiles[gscope()].rules == ()
-    assert tg.sent_texts(bot) == [
-        a.REPLY_RULE_REMOVED.format(id=rule.rule_id, scope="the group default")
-    ]
+    assert tg.sent_texts(bot) == [cmd.REPLY_RULE_REMOVED.format(id=rule.rule_id)]
 
 
 async def test_rule_clear_reports_count() -> None:
@@ -509,7 +507,7 @@ async def test_rule_clear_reports_count() -> None:
     context, bot = admin_context(args=["clear"])
     await handlers.on_rule(command("/rule clear"), context)
     assert store.profiles[gscope()].rules == ()
-    assert tg.sent_texts(bot) == [a.REPLY_RULES_CLEARED.format(count=2, scope="the group default")]
+    assert tg.sent_texts(bot) == [cmd.REPLY_RULES_CLEARED.format(count=2)]
 
 
 async def test_rule_add_surfaces_parse_errors() -> None:
@@ -524,7 +522,7 @@ async def test_rule_bad_subcommand_shows_usage() -> None:
     for args in ([], ["frobnicate"], ["remove"], ["remove", "a", "b"]):
         context, bot = admin_context(args=args)
         await handlers.on_rule(command("/rule"), context)
-        assert tg.sent_texts(bot) == [a.REPLY_RULE_USAGE]
+        assert tg.sent_texts(bot) == [cmd.REPLY_RULE_USAGE]
 
 
 async def test_rule_cap_is_enforced() -> None:
@@ -536,9 +534,7 @@ async def test_rule_cap_is_enforced() -> None:
     context, bot = admin_context(args=["add", "release"])
     await handlers.on_rule(command("/rule add release"), context)
     assert len(store.profiles[gscope()].rules) == MAX_RULES  # not exceeded
-    assert tg.sent_texts(bot) == [
-        a.REPLY_RULES_FULL.format(max=MAX_RULES, scope="the group default")
-    ]
+    assert tg.sent_texts(bot) == [cmd.REPLY_RULES_FULL.format(max=MAX_RULES)]
 
 
 async def test_rule_and_rules_report_storage_outage() -> None:
@@ -559,8 +555,8 @@ async def test_rules_configure_the_topic_they_run_in() -> None:
     await handlers.on_rule(command_in_topic("/rule add pr.merged", 42), context)
     assert store.profiles[gscope(tg.GROUP.id, 42)].rules  # the topic, not the group default
     (_sent, thread) = tg.sent_calls(bot)[0]
-    assert thread == 42
-    assert "this topic" in tg.sent_texts(bot)[0]
+    assert thread == 42  # and the confirmation lands back in that topic
+    assert "pr.merged" in tg.sent_texts(bot)[0]
 
 
 def make_capture_handlers(

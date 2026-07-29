@@ -18,6 +18,7 @@ from blybot.services.capture import CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
+from blybot.services.repo import GroupRepoService
 from blybot.services.rules import MAX_RULES, parse_rule
 from tests.fakes import FakeClock, FakeRepoGateway, InMemoryArchive, InMemoryProfiles
 
@@ -632,3 +633,100 @@ async def test_store_token_reports_a_vault_outage() -> None:
     result = await service.store_token(_SCOPE, is_admin=True, token=_GOOD_PAT)
     assert result.text == c.REPLY_PAT_STORE_FAILED
     assert result.ok is False
+
+
+# --- issue / repo (issue #42) ------------------------------------------------
+
+
+def _issue_service(
+    *,
+    allowed: set[int] | None = None,
+    with_service: bool = True,
+    limit: int = 10,
+) -> tuple[CommandService, InMemoryProfiles, FakeRepoGateway]:
+    store = InMemoryProfiles()
+    gateway = FakeRepoGateway(valid_tokens={_GOOD_PAT})
+    directory = _directory(store)
+    groups = GroupPolicy(allowed=allowed if allowed is not None else set())
+    service = CommandService(
+        directory=directory,
+        groups=groups,
+        page_url_for=str,
+        counters=Counters(),
+        repo_service=(
+            GroupRepoService(gateway=gateway, vault=store, directory=directory)
+            if with_service
+            else None
+        ),
+        repo_limiter=SlidingWindowLimiter(
+            clock=FakeClock(), limit=limit, window=timedelta(minutes=1)
+        ),
+    )
+    return service, store, gateway
+
+
+async def _bind(service: CommandService, store: InMemoryProfiles) -> None:
+    await service.directory.set_repo(_SCOPE, "org/repo")
+    await store.store_token(_SCOPE, _GOOD_PAT)
+
+
+async def test_issue_files_anonymously_and_repo_summarizes() -> None:
+    service, store, gateway = _issue_service()
+    await _bind(service, store)
+
+    filed = await service.file_issue(_SCOPE, description="the button is broken")
+    assert filed.ok is True
+    (repo, token, _title, body) = gateway.issues[0]
+    assert (repo, token) == ("org/repo", _GOOD_PAT)
+    assert "No reporter identity is recorded" in body
+    assert "Telegram" not in body  # the preamble is platform-neutral
+
+    summary = await service.repo_summary(_SCOPE)
+    assert summary.ok is True
+    assert "org/repo" in summary.text
+
+
+async def test_issue_needs_a_description_and_the_deployment_wiring() -> None:
+    service, _store, _gateway = _issue_service()
+    for blank in ("", "   "):
+        assert (await service.file_issue(_SCOPE, description=blank)).text == c.REPLY_ISSUE_USAGE
+
+    off, _store, _gw = _issue_service(with_service=False)
+    assert (await off.file_issue(_SCOPE, description="x")).text == c.REPLY_ISSUE_DISABLED
+    assert (await off.repo_summary(_SCOPE)).text == c.REPLY_ISSUE_DISABLED
+
+
+async def test_issue_and_repo_refuse_channels_outside_the_allowlist() -> None:
+    service, _store, _gateway = _issue_service(allowed={999})
+    assert (await service.file_issue(_SCOPE, description="x")).text == c.REPLY_NOT_ALLOWED
+    assert (await service.repo_summary(_SCOPE)).text == c.REPLY_NOT_ALLOWED
+
+
+async def test_issue_and_repo_report_a_missing_binding_or_token() -> None:
+    service, store, _gateway = _issue_service()
+    unbound = await service.file_issue(_SCOPE, description="x")
+    assert unbound.text == c.REPLY_ISSUE_UNBOUND
+    assert (await service.repo_summary(_SCOPE)).text == c.REPLY_ISSUE_UNBOUND
+
+    await service.directory.set_repo(_SCOPE, "org/repo")  # bound, token never supplied
+    assert (await service.file_issue(_SCOPE, description="x")).text == c.REPLY_ISSUE_NO_PAT
+    assert (await service.repo_summary(_SCOPE)).text == c.REPLY_ISSUE_NO_PAT
+    assert store.tokens == {}
+
+
+async def test_issue_and_repo_surface_a_github_refusal() -> None:
+    service, store, gateway = _issue_service()
+    await _bind(service, store)
+    gateway.fail = True
+    assert (await service.file_issue(_SCOPE, description="x")).text == c.REPLY_ISSUE_FAILED
+    assert (await service.repo_summary(_SCOPE)).text == c.REPLY_ISSUE_FAILED
+
+
+async def test_issue_and_repo_are_rate_capped_per_command() -> None:
+    service, store, _gateway = _issue_service(limit=1)
+    await _bind(service, store)
+    assert (await service.file_issue(_SCOPE, description="first")).ok is True
+    assert (await service.file_issue(_SCOPE, description="second")).text == c.REPLY_THROTTLED
+    # /repo has its own bucket, so it is unaffected by /issue's cap.
+    assert (await service.repo_summary(_SCOPE)).ok is True
+    assert (await service.repo_summary(_SCOPE)).text == c.REPLY_THROTTLED

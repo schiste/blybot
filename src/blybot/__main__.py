@@ -253,23 +253,37 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         if subscriptions_store is not None and store is not None
         else None
     )
+    # One limiter object behind /log, /issue and /repo: the buckets are keyed
+    # per command, so sharing it preserves each command's own cap.
+    group_limiter = SlidingWindowLimiter(
+        clock=clock, limit=config.log_throttle_per_minute, window=timedelta(minutes=1)
+    )
+    commands = CommandService(
+        directory=directory,
+        groups=group_policy,
+        page_url_for=config.page_url,
+        counters=counters,
+        capture_service=capture_service,
+        vault=store,
+        repo_actions=gateway,
+        repo_service=(
+            GroupRepoService(gateway=gateway, vault=store, directory=directory) if store else None
+        ),
+        repo_limiter=group_limiter,
+        llm_defaults=llm_defaults,
+        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
+    )
     group_handlers = GroupHandlers(
         engine=engine,
         groups=group_policy,
-        limiter=SlidingWindowLimiter(
-            clock=clock,
-            limit=config.log_throttle_per_minute,
-            window=timedelta(minutes=1),
-        ),
+        limiter=group_limiter,
         directory=directory,
         page_url_for=config.page_url,
         counters=counters,
         group_greeting_text=config.group_greeting_text,
         maintainer=config.maintainer,
         newcomer_welcome_enabled=config.newcomer_welcome_enabled,
-        repo_service=(
-            GroupRepoService(gateway=gateway, vault=store, directory=directory) if store else None
-        ),
+        commands=commands,
         capabilities=TELEGRAM_CAPABILITIES,
         archive=archive,
         subscriptions=subscriptions_store,
@@ -285,17 +299,6 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         if llm_client is not None:
             await llm_client.aclose()
 
-    commands = CommandService(
-        directory=directory,
-        groups=group_policy,
-        page_url_for=config.page_url,
-        counters=counters,
-        capture_service=capture_service,
-        vault=store,
-        repo_actions=gateway,
-        llm_defaults=llm_defaults,
-        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
-    )
     private_handlers = PrivateHandlers(
         transcription=transcription,
         sessions=sessions,
@@ -651,6 +654,14 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
         capture_service=capture_service,
         vault=store,
         repo_actions=repo_gateway,
+        repo_service=(
+            GroupRepoService(gateway=repo_gateway, vault=store, directory=directory)
+            if store
+            else None
+        ),
+        repo_limiter=SlidingWindowLimiter(
+            clock=clock, limit=config.log_throttle_per_minute, window=timedelta(minutes=1)
+        ),
         llm_defaults=llm_defaults,
         llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
     )

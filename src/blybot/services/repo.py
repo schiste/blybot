@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from blybot.services.directory import ChannelDirectory
 
 _BODY_PREAMBLE: Final = (
-    "Filed anonymously from the group's Telegram chat (`/issue`). "
+    "Filed anonymously from the chat bound to this repository (`/issue`). "
     "No reporter identity is recorded.\n\n"
 )
 

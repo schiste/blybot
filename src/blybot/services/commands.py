@@ -5,8 +5,12 @@ This service holds that business logic once, so each adapter only maps its
 native trigger to a neutral call and renders the returned
 :class:`~blybot.domain.models.CommandResult`. It now covers ``capture
 on|off``, ``setpage``, ``settings``, ``reset``, ``revoke``, ``llm`` (#43),
-and the repo-notification surface — ``events on|off``, ``rule
-add|remove|clear`` and ``rules`` (#40).
+the repo-notification surface — ``events on|off``, ``rule
+add|remove|clear`` and ``rules`` (#40) — the ``setrepo``/token flow (#43),
+and the bound-repo commands ``issue`` and ``repo`` (#42).
+
+Most commands are admin-gated; ``issue`` and ``repo`` deliberately are not,
+since filing anonymously is the one repo action any member may take.
 
 The rule surface is offered in both shapes a platform router can want: a
 flat-token :meth:`CommandService.rule` dispatcher for adapters handed raw
@@ -32,14 +36,16 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import CommandResult
-from blybot.domain.ports import StorageError
+from blybot.domain.ports import IssueTrackerError, StorageError
 from blybot.observability import log_event
 from blybot.services.directory import (
     PageNotAllowedError,
     SelfServiceUnavailableError,
     TooManyRulesError,
 )
+from blybot.services.feedback import CONFIRMATION_TEMPLATE
 from blybot.services.llmconf import LlmParseError, describe_llm, parse_llm_args
+from blybot.services.repo import NoRepoBoundError, NoTokenError
 from blybot.services.rules import (
     MAX_RULES,
     RuleParseError,
@@ -56,7 +62,8 @@ if TYPE_CHECKING:
     from blybot.observability import Counters
     from blybot.services.capture import CaptureService
     from blybot.services.directory import ChannelDirectory
-    from blybot.services.policy import GroupPolicy
+    from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
+    from blybot.services.repo import GroupRepoService
 
 REPLY_NOT_ADMIN: Final = "Only this chat's admins can run that command."
 REPLY_NOT_ALLOWED: Final = "I'm not configured to serve this channel."
@@ -96,6 +103,8 @@ REPLY_LLM_RESET: Final = "LLM settings back to deployment defaults."
 _LLM_ORIGIN_OWN: Final = "set for this scope"
 _LLM_ORIGIN_INHERITED: Final = "inherited from the parent scope"
 _LLM_ORIGIN_DEFAULT: Final = "deployment defaults"
+# Bound-repo service failures that map to a user-facing reply.
+_REPO_ERRORS: Final = (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError)
 # GitHub owner/name, deliberately strict: no path traversal, no nesting.
 _REPO_PATTERN: Final = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 REPLY_SETREPO_USAGE: Final = "Usage: /setrepo owner/repository"
@@ -115,6 +124,20 @@ REPLY_PAT_STORE_FAILED: Final = (
 REPLY_PAT_SAVED: Final = (
     "Token validated, encrypted and stored. /issue and /repo are live for this "
     "scope; /revoke discards the token."
+)
+REPLY_THROTTLED: Final = "Rate limit reached — please try again in a minute."
+REPLY_ISSUE_USAGE: Final = "Describe the issue after the command: /issue something is broken"
+REPLY_ISSUE_DISABLED: Final = "Repository features aren't enabled on this deployment."
+REPLY_ISSUE_UNBOUND: Final = (
+    "No repository is bound at this scope — an admin can bind one with /setrepo."
+)
+REPLY_ISSUE_NO_PAT: Final = (
+    "A repository is bound but its token step was never completed — an admin "
+    "should run /setrepo here and supply the token."
+)
+REPLY_ISSUE_FAILED: Final = "Sorry, GitHub refused that — the token may have expired (/setrepo)."
+REPLY_REPO_SUMMARY: Final = (
+    "{repo}: {count} open items. Recent: {titles}\nhttps://github.com/{repo}/issues"
 )
 REPLY_EVENTS_USAGE: Final = "Usage: /events on | off — rules decide what's delivered (see /rules)"
 REPLY_EVENTS_SET: Final = "Repo notifications: {state}."
@@ -157,6 +180,17 @@ REPLY_SETTINGS: Final = (
 )
 
 
+def _repo_error_reply(error: Exception) -> str:
+    """One place mapping bound-repo failures to user-facing replies."""
+    if isinstance(error, NoRepoBoundError):
+        return REPLY_ISSUE_UNBOUND
+    if isinstance(error, NoTokenError):
+        return REPLY_ISSUE_NO_PAT
+    if isinstance(error, IssueTrackerError):
+        log_event("group_issue", "error")
+    return REPLY_ISSUE_FAILED
+
+
 @dataclass(eq=False)
 class CommandService:
     """Neutral business logic behind the shared admin commands.
@@ -180,6 +214,10 @@ class CommandService:
     # Only the token flow needs this: it validates a pasted token against
     # the bound repo before storing it. None disables /setrepo's token half.
     repo_actions: RepoActions | None = None
+    # /issue and /repo: the bound-repo service and the per-scope rate cap.
+    # None disables those commands / their throttling respectively.
+    repo_service: GroupRepoService | None = None
+    repo_limiter: SlidingWindowLimiter | None = None
     # Analysis-enabled deployments only: the /llm defaults and hard cap.
     # ``llm_defaults`` is None when LLM analyses are off, in which case
     # /llm fails closed to the off-deployment result. The ceiling default
@@ -351,6 +389,58 @@ class CommandService:
         self.counters.increment("tokens_bound")
         log_event("token_bound", "ok")
         return CommandResult(REPLY_PAT_SAVED)
+
+    async def file_issue(self, scope: Scope, *, description: str) -> CommandResult:
+        """File an anonymous issue in this scope's bound repo (any member).
+
+        Deliberately **not** admin-gated: filing is the one repo action any
+        member may take, and no reporter identity is recorded anywhere (R6).
+        Adapters are responsible for not leaking the caller when they render
+        the reply — on Discord that means an ephemeral response, since a
+        public one would attribute the command in the channel.
+        """
+        text = description.strip()
+        if not text:
+            return CommandResult(REPLY_ISSUE_USAGE, ok=False)
+        service = self.repo_service
+        if service is None:
+            return CommandResult(REPLY_ISSUE_DISABLED, ok=False)
+        if not self.groups.is_allowed(scope):
+            return CommandResult(REPLY_NOT_ALLOWED, ok=False)
+        if not self._repo_allowed("issue", scope):
+            return CommandResult(REPLY_THROTTLED, ok=False)
+        try:
+            url = await service.file_issue(scope, text)
+        except _REPO_ERRORS as error:
+            return CommandResult(_repo_error_reply(error), ok=False)
+        self.counters.increment("group_issues_filed")
+        log_event("group_issue", "ok")
+        return CommandResult(CONFIRMATION_TEMPLATE.format(url=url))
+
+    async def repo_summary(self, scope: Scope) -> CommandResult:
+        """Report the bound repository's open-items summary (any member)."""
+        service = self.repo_service
+        if service is None:
+            return CommandResult(REPLY_ISSUE_DISABLED, ok=False)
+        if not self.groups.is_allowed(scope):
+            return CommandResult(REPLY_NOT_ALLOWED, ok=False)
+        if not self._repo_allowed("repo", scope):
+            return CommandResult(REPLY_THROTTLED, ok=False)
+        try:
+            summary = await service.summary(scope)
+        except _REPO_ERRORS as error:
+            return CommandResult(_repo_error_reply(error), ok=False)
+        return CommandResult(
+            REPLY_REPO_SUMMARY.format(
+                repo=summary.repo,
+                count=summary.open_count,
+                titles="; ".join(summary.recent_titles) or "none",
+            )
+        )
+
+    def _repo_allowed(self, kind: str, scope: Scope) -> bool:
+        """Whether this scope is under its per-command repo rate cap."""
+        return self.repo_limiter is None or self.repo_limiter.allow(kind, int(scope.channel))
 
     async def events(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
         """Toggle notifications from a flat ``/events`` token list (admins only).

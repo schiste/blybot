@@ -83,21 +83,37 @@ class TokenEntryHandler:
         log_event("token_entry_opened", "ok")
         await self._reply(context, dm, REPLY_PAT_PROMPT.format(repo=settings.repo))
 
-    async def accept_token(
+    async def accept_token(  # noqa: PLR0913 -- the flattened message facts
         self,
         context: ContextTypes.DEFAULT_TYPE,
         dm: Scope,
         target: Scope,
         message_id: int,
         text: str,
+        user_id: int | None,
     ) -> None:
         """Delete the pasted secret, then validate and store the token."""
         # Remove the pasted secret from the chat first — bots may delete
         # messages in private chats, so don't rely on the admin doing it.
+        # This runs before authorization on purpose: the secret is already
+        # in the chat either way, so it is scrubbed even from a caller who
+        # turns out to be no longer allowed to supply it.
         try:
             await context.bot.delete_message(chat_id=int(dm.channel), message_id=message_id)
         except TelegramError:
             log_event("command_cleanup", "ignored")
+        # Re-verify admin-ship HERE, not only when the link was redeemed
+        # (issue #27). Redemption can be up to ``entry_ttl`` earlier, and a
+        # caller demoted in between must not be able to finish binding a
+        # token to the group. Discord's TokenModal re-checks on submit for
+        # the same reason.
+        # A message with no identifiable sender cannot prove anything, so it
+        # is denied outright rather than looked up under a placeholder id.
+        if user_id is None or not await is_group_admin(context.bot, int(target.channel), user_id):
+            self.binding.close_entry(dm)
+            log_event("token_entry_denied", "ignored")
+            await self._reply(context, dm, REPLY_LINK_NOT_ADMIN)
+            return
         # A vanished repo binding closes the flow outright; every other
         # failure leaves the prompt armed so the admin can paste again.
         settings = await self.directory.resolve(target)
@@ -107,7 +123,7 @@ class TokenEntryHandler:
             return
         # Validating the secret against the bound repo and encrypting it into
         # the vault is identical on every platform, so it lives in the neutral
-        # CommandService; admin-ship was proven when the link was redeemed.
+        # CommandService; admin-ship was just re-proven above.
         result = await self.commands.store_token(target, is_admin=True, token=text)
         if not result.ok:
             await self._reply(context, dm, result.text)

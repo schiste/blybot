@@ -611,7 +611,32 @@ platforms (so a new adapter package is covered the moment it lands):
   appears outside its own adapter — the pseudonymization boundary, keyed
   per platform.
 
-### 22.4 Authorization model (issue #27)
+### 22.4 Injection containment across ingestion surfaces (issue #26)
+
+Containment is a property of the **neutral** analysis path, not of any
+adapter: per-request fencing, control-token scrubbing, a fresh fence for the
+reduce step, and the `injection_suspected` heuristic all live in
+`PromptTransform`/`prompts`, operating on a `Transcript` read back from the
+archive. An adapter's only route into that archive is `CaptureService`, so a
+new ingestion surface inherits every guarantee by construction and cannot
+hand the analyser un-fenced content. `tests/test_injection.py` proves this
+end to end for Discord through the real gateway rather than asserting it.
+
+Two boundary rules keep it that way:
+
+- **Identity never crosses inward.** Each platform's identity access is
+  named in the architecture guard and forbidden outside its own adapter —
+  Telegram's `from_user`, Discord's `author.id`/`.bot`/`.name`/…. Discord's
+  is matched as an *attribute chain*, because the bare word `author`
+  collides with the domain's own `CapturedMessage.author`, which is the
+  already-pseudonymized label that is *supposed* to travel inward.
+- **Logs cannot be forged.** `log_event` flattens every field value to one
+  line: `LogField` permits `str`, and some values are upstream-controlled,
+  so an embedded newline would otherwise render one event as two records.
+  Control characters are replaced rather than dropped, leaving the tampering
+  visible.
+
+### 22.5 Authorization model (issue #27)
 
 Authorization is **checked live at the moment of the privileged action and
 never stored**. Each platform proves it its own way — Telegram

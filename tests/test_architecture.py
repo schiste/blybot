@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+import re
 from pathlib import Path
 
 from blybot.domain.models import PlatformCapabilities
@@ -37,12 +38,16 @@ PLATFORM_SDKS: dict[str, tuple[str, ...]] = {
     "discord": ("discord", "discord.py"),
 }
 
-# The platform identity attribute that must never cross inward past its own
-# adapter (the pseudonymization boundary, R6). One entry per platform whose
-# boundary is enforced today; a future platform adds its attr here.
+# The platform identity access that must never cross inward past its own
+# adapter (the pseudonymization boundary, R6). Regexes, not substrings: the
+# Telegram sentinel is a distinctive name, but Discord's identity object is
+# reached through ``author``, which collides with the domain's OWN
+# ``CapturedMessage.author`` — the already-pseudonymized label that is
+# supposed to travel inward. Matching the *attribute chain* separates them:
+# our author is a plain string and has no ``.id``/``.bot``/``.name``.
 FORBIDDEN_IDENTITY_ATTRS: dict[str, str] = {
-    "telegram": "from_user",
-    # "discord": "<author attr>",  # enforced once the Discord adapter lands (PR-5)
+    "telegram": r"\bfrom_user\b",
+    "discord": r"\bauthor\.(id|name|display_name|discriminator|bot|mention)\b",
 }
 
 
@@ -250,16 +255,20 @@ def test_services_hold_no_hard_coded_message_size() -> None:
 def test_platform_identity_stays_at_its_own_adapter_boundary() -> None:
     """A platform's user-identity attribute never crosses inward past its adapter.
 
-    ``from_user`` is the attribute every Telegram identity flows through;
-    keeping it out of domain, services, and the other adapters means captured
-    content is pseudonymized before it crosses inward. The rule is keyed by
-    platform, so a future platform's identity attribute is one dict entry.
+    ``from_user`` is the attribute every Telegram identity flows through, and
+    ``author.id``/``.bot``/… every Discord one; keeping them out of domain,
+    services, and the other adapters means captured content is pseudonymized
+    before it crosses inward. The rule is keyed by platform, so a future
+    platform's identity access is one dict entry.
     """
-    for platform, attr in FORBIDDEN_IDENTITY_ATTRS.items():
+    for platform, pattern in FORBIDDEN_IDENTITY_ATTRS.items():
         allowed = ADAPTERS / platform
+        probe = re.compile(pattern)
         for path in SRC.rglob("*.py"):
             if path.is_relative_to(allowed):
                 continue
-            assert attr not in path.read_text(
-                encoding="utf-8"
-            ), f"{path.relative_to(SRC.parent)} reads {platform} user identity ({attr})"
+            found = probe.search(path.read_text(encoding="utf-8"))
+            assert found is None, (
+                f"{path.relative_to(SRC.parent)} reads {platform} user identity "
+                f"({found.group(0) if found else pattern})"
+            )

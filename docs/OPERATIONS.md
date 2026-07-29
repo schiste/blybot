@@ -65,14 +65,24 @@ per job from the tokens present, so you normally leave it unset.)
    → **New Application**. Open **Bot**, then **Reset Token** and copy the
    value into `DISCORD_BOT_TOKEN` in the instance env file (over SSH,
    never into a chat or commit).
-2. **Enable the privileged intents.** On the same **Bot** page, turn on
-   **Message Content Intent** (capture cannot read message text without
-   it) and **Server Members Intent**. Both are privileged and off by
-   default.
+2. **Enable the one privileged intent.** On the same **Bot** page, turn on
+   **Message Content Intent** — capture cannot read message text without
+   it. It is privileged and off by default.
+
+   Do **not** enable **Server Members Intent**: the bot deliberately does
+   not request it (`default_intents()` asks for message content only), so
+   granting it would hand over member data nothing ever reads. Join
+   detection is not wired on Discord.
 3. **Invite the bot.** **OAuth2 → URL Generator**: scopes `bot` and
    `applications.commands`; bot permissions **View Channels**, **Send
-   Messages**, **Send Messages in Threads**, **Read Message History**.
-   Open the generated URL and add the bot to the server.
+   Messages**, **Send Messages in Threads**. Open the generated URL and add
+   the bot to the server.
+
+   The bot never fetches channel history — reply metadata arrives on the
+   live gateway event — so **Read Message History** should not be needed.
+   It was in earlier versions of this runbook; if you are tightening an
+   existing invite, drop it and confirm capture still records replies
+   before considering the change settled.
 4. **Configure the instance.** Add `DISCORD_BOT_TOKEN=…` to `~/<name>.env`
    (alongside any `TELEGRAM_BOT_TOKEN` — both run side by side), then
    `~/blybot/deploy-instance.sh start <name>`. That starts (or restarts) a

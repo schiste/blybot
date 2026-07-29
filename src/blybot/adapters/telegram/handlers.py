@@ -663,8 +663,17 @@ class PrivateHandlers:
         # can transcribe it: a pasted secret must never reach the wiki.
         pending = self.token_entry.claims_next_message(dm)
         if pending is not None:
+            # The sender id is passed explicitly rather than inferred from the
+            # DM chat id: accept_token re-verifies admin-ship of the *target
+            # group* against it (#27).
+            sender = message.from_user
             await self.token_entry.accept_token(
-                context, dm, pending, message.message_id, message.text
+                context,
+                dm,
+                pending,
+                message.message_id,
+                message.text,
+                sender.id if sender is not None else None,
             )
             return
         route = self.routes.route_for(dm)

@@ -611,6 +611,38 @@ platforms (so a new adapter package is covered the moment it lands):
   appears outside its own adapter — the pseudonymization boundary, keyed
   per platform.
 
+### 22.4 Authorization model (issue #27)
+
+Authorization is **checked live at the moment of the privileged action and
+never stored**. Each platform proves it its own way — Telegram
+`getChatMember`, Discord `guild_permissions.administrator` off the
+interaction, IRC channel ops when that adapter lands — but the rule is the
+same everywhere, and the neutral services take `is_admin` as an argument
+rather than deciding it.
+
+- **Single-step commands.** Every Telegram admin handler passes through
+  `_admin_chat` (allowlist → self-service enabled → live `getChatMember`);
+  every admin-only Discord slash command calls `_is_admin` on the
+  interaction. `/issue`, `/repo` and the digest commands are open to any
+  member by design.
+- **Multi-step flows re-check at *each* privileged step**, not once at the
+  start. The token-entry flow proves admin-ship three times: at `/setrepo`,
+  again when the deep link is redeemed, and again when the secret actually
+  arrives — the last two can be `entry_ttl` apart, so a caller demoted in
+  between is refused and the flow is closed rather than left armed.
+  Discord's `TokenModal` re-checks on submit for the same reason: a modal
+  can sit open indefinitely. A paste with no identifiable sender is denied
+  outright rather than looked up under a placeholder id.
+- **Capability codes** (`cfg_` token-entry nonces, `sub_` subscribe codes,
+  subscription and rule ids) are all CSPRNG (`secrets`), live in separate
+  single-purpose registries routed by prefix — a subscribe code can never
+  redeem a token-entry link — and redemption re-verifies admin-ship of the
+  *target* scope. A nonce is deliberately **not** consumed when a non-admin
+  taps it, so a leaked link cannot be burned before the real admin uses it.
+- **Least privilege.** Discord requests exactly one privileged intent
+  (message content); members/presence are never requested. See OPERATIONS
+  for the invite scopes and the permissions an operator should *not* grant.
+
 ---
 
 ## Appendix: naming

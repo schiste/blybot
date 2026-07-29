@@ -8,7 +8,7 @@ the repository, and this module never logs values — only key names.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 from typing import Final
@@ -59,15 +59,22 @@ class ConfigurationError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    """Validated runtime configuration."""
+    """Validated runtime configuration.
+
+    Every credential carries ``field(repr=False)``. A dataclass renders all
+    its fields, so without that one stray ``print(config)``, debug log, or
+    framework that dumps locals on an unhandled exception would spill every
+    secret the process holds at once (#24). ``repr=False`` alone changes no
+    behavior: the values stay readable through normal attribute access.
+    """
 
     bot_name: str
     platform: str
-    telegram_bot_token: str
-    discord_bot_token: str
+    telegram_bot_token: str = field(repr=False)
+    discord_bot_token: str = field(repr=False)
     wiki_api_url: str
     wiki_username: str
-    wiki_botpassword: str
+    wiki_botpassword: str = field(repr=False)
     log_target_page: str
     dm_target_base: str
     allowed_group_ids: frozenset[int]
@@ -85,14 +92,14 @@ class Config:
     welcome_text: str
     maintainer: str
     github_repo: str
-    github_token: str
+    github_token: str = field(repr=False)
     wiki_page_suffix: str
-    profile_encryption_key: str
+    profile_encryption_key: str = field(repr=False)
     toolsdb_host: str
     toolsdb_name: str
     toolsdb_cnf: str
     events_poll_minutes: int
-    archive_pseudonym_key: str
+    archive_pseudonym_key: str = field(repr=False)
     capture_max_per_minute: int
     capture_reannounce_days: int
     capture_retention_days: int

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
 from datetime import timedelta
 
 import pytest
+from cryptography.fernet import Fernet
 
 from blybot.config import Config, ConfigurationError, load_config
 from blybot.domain.models import ConsentMode, TimestampGranularity
@@ -212,3 +214,44 @@ def test_reannounce_days_accepts_zero_and_rejects_negatives() -> None:
         load_config({**REQUIRED, "CAPTURE_REANNOUNCE_DAYS": "-1"})
     with pytest.raises(ConfigurationError, match="integer"):
         load_config({**REQUIRED, "CAPTURE_REANNOUNCE_DAYS": "monthly"})
+
+
+def test_no_credential_survives_into_the_config_repr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #24: a dataclass renders every field, so one stray print(config)
+    or a framework dumping locals would spill all six secrets at once."""
+    secrets = {
+        "TELEGRAM_BOT_TOKEN": "tg-canary-value",
+        "DISCORD_BOT_TOKEN": "dc-canary-value",
+        "WIKI_BOTPASSWORD": "wiki-canary-value",
+        "GITHUB_TOKEN": "gh-canary-value",
+        "PROFILE_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+        "ARCHIVE_PSEUDONYM_KEY": "hmac-canary-value",
+    }
+    for key, value in {**REQUIRED, **secrets}.items():
+        monkeypatch.setenv(key, value)
+
+    config = load_config()
+    rendered = repr(config)
+    for name, value in secrets.items():
+        assert value not in rendered, f"{name} leaked into repr(Config)"
+    # The values are still reachable the normal way — repr=False changes
+    # visibility, not behavior.
+    assert config.telegram_bot_token == secrets["TELEGRAM_BOT_TOKEN"]
+    assert config.archive_pseudonym_key == secrets["ARCHIVE_PSEUDONYM_KEY"]
+    # A non-secret field still renders, so this isn't vacuously passing.
+    assert "Blybot" in rendered
+
+
+def test_every_credential_field_is_marked_non_repr() -> None:
+    """Guards the list itself: a new secret field must opt out explicitly."""
+    non_repr = {field.name for field in fields(Config) if not field.repr}
+    assert non_repr == {
+        "telegram_bot_token",
+        "discord_bot_token",
+        "wiki_botpassword",
+        "github_token",
+        "profile_encryption_key",
+        "archive_pseudonym_key",
+    }

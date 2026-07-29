@@ -97,10 +97,18 @@ deploy_base() {
         # Derived env = the base config with PLATFORM forced to this job's
         # platform (any PLATFORM line in the base is dropped first, so the
         # forced value always wins when run.sh sources the file).
-        {
-            grep -vE '^PLATFORM=' "${base_env}"
-            echo "PLATFORM=${platform}"
-        } >"${derived}"
+        # umask BEFORE the redirect, not chmod after: the shell creates the
+        # file at the redirect, so a later chmod leaves a window in which the
+        # bot token sits in a world-readable file on a shared multi-tenant
+        # host. The chmod stays for the re-deploy case, where the file
+        # already exists and umask no longer applies (#24).
+        (
+            umask 077
+            {
+                grep -vE '^PLATFORM=' "${base_env}"
+                echo "PLATFORM=${platform}"
+            } >"${derived}"
+        )
         chmod 600 "${derived}"
         printf '#!/bin/bash\nexport BLYBOT_CONFIG=%s\nexec %s/run.sh\n' "${derived}" "${REPO_DIR}" >"${wrapper}"
         chmod +x "${wrapper}"

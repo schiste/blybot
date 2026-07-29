@@ -181,3 +181,25 @@ def _a_sub(sub_id: str, dm: int) -> Subscription:
         recipe="summarize",
         lang="en",
     )
+
+
+async def test_subscribe_refuses_past_the_per_user_cap() -> None:
+    """Issue #23: the same cap the neutral admission enforces, reached through
+    the real Telegram handler."""
+    handlers, _profiles, subs, binding = make()
+    handlers.max_subs_per_user = 2
+
+    for _ in range(2):
+        binding.open_entry(dmscope(777), gscope(-100))
+        context, bot = tg.make_context()
+        await handlers.on_subscribe(dm(), context)
+        assert tg.sent_texts(bot)[0].startswith("Subscribed [")
+
+    binding.open_entry(dmscope(777), gscope(-100))
+    context, bot = tg.make_context()
+    await handlers.on_subscribe(dm(), context)
+    assert "maximum of 2" in tg.sent_texts(bot)[0]
+    assert len(subs.subs) == 2  # nothing extra was written
+    # The refused attempt leaves the pending target armed, so freeing a slot
+    # and retrying works without re-tapping the link.
+    assert binding.pending_target(dmscope(777)) == gscope(-100)

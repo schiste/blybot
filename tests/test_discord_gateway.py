@@ -49,6 +49,7 @@ from tests.fakes import (
     FakeRepoGateway,
     FakeSink,
     FakeSource,
+    InMemoryActions,
     InMemoryArchive,
     InMemoryProfiles,
     InMemorySubscriptions,
@@ -620,6 +621,7 @@ def test_build_registers_every_slash_command() -> None:
     client = build_gateway_client(gateway)
     names = sorted(command.name for command in client.tree.get_commands())
     assert names == [
+        "action",
         "capture",
         "events",
         "issue",
@@ -640,7 +642,9 @@ def test_build_registers_every_slash_command() -> None:
         "talkingpoints",
         "unsubscribe",
     ]
-    # /rule is a group: Discord routes its subcommands natively.
+    # /action and /rule are groups: Discord routes their subcommands natively.
+    (actions,) = [c for c in client.tree.get_commands() if c.name == "action"]
+    assert sorted(sub.name for sub in cast("Any", actions).commands) == ["add", "list", "remove"]
     (group,) = [c for c in client.tree.get_commands() if c.name == "rule"]
     assert sorted(sub.name for sub in cast("Any", group).commands) == ["add", "clear", "remove"]
     assert client.intents.message_content is True  # default privileged intents
@@ -1200,3 +1204,71 @@ async def test_subscribe_refuses_past_the_per_user_cap() -> None:
     # A different subscriber is unaffected, and the existing rows survive.
     assert "Subscribed" in await gateway.subscribe_command(_CHANNEL, None, 999, "")
     assert len(await subs.list_for_user(dm_scope(321))) == 2
+
+
+# --- /action: scheduled analyses (issue #43, increment 3) --------------------
+
+
+def _action_gateway() -> tuple[DiscordGateway, InMemoryActions]:
+    store = InMemoryProfiles()
+    actions = InMemoryActions()
+    directory = _directory(store)
+    groups = GroupPolicy(allowed=set())
+    commands = CommandService(
+        directory=directory,
+        groups=groups,
+        page_url_for=str,
+        counters=Counters(),
+        actions=actions,
+        clock=FakeClock(),
+    )
+    return DiscordGateway(directory=directory, groups=groups, commands=commands), actions
+
+
+async def test_action_commands_are_admin_gated_and_round_trip() -> None:
+    gateway, actions = _action_gateway()
+    assert (
+        await gateway.action_add_command(_CHANNEL, None, "daily@06:00 summarize", is_admin=False)
+        == cmd.REPLY_NOT_ADMIN
+    )
+    assert actions.actions == {}
+
+    added = await gateway.action_add_command(_CHANNEL, None, "daily@06:00 summarize", is_admin=True)
+    (spec,) = actions.actions[_SCOPE]
+    assert spec.action_id in added
+
+    listing = await gateway.action_list_command(_CHANNEL, None, is_admin=True)
+    assert listing.startswith("Scheduled actions for this scope:")
+
+    removed = await gateway.action_remove_command(_CHANNEL, None, spec.action_id, is_admin=True)
+    assert removed == cmd.REPLY_ACTION_REMOVED.format(id=spec.action_id)
+    assert actions.actions[_SCOPE] == ()
+
+    assert await gateway.action_list_command(_CHANNEL, None, is_admin=False) == cmd.REPLY_NOT_ADMIN
+    assert (
+        await gateway.action_remove_command(_CHANNEL, None, "x", is_admin=False)
+        == cmd.REPLY_NOT_ADMIN
+    )
+
+
+async def test_action_slash_subcommands_answer_ephemerally() -> None:
+    gateway, actions = _action_gateway()
+    client = build_gateway_client(gateway)
+    channel = SimpleNamespace(id=_CHANNEL)
+    group = cast("Any", _command(client, "action"))
+    leaves = {sub.name: sub for sub in group.commands}
+
+    interaction = _admin_interaction(channel)
+    await leaves["add"].callback(interaction, "daily@06:00 summarize")
+    assert interaction.response.sent[0][1] is True
+    (spec,) = actions.actions[_SCOPE]
+
+    interaction = _admin_interaction(channel)
+    await leaves["list"].callback(interaction)
+    (listing, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is True
+    assert spec.action_id in listing
+
+    interaction = _admin_interaction(channel)
+    await leaves["remove"].callback(interaction, spec.action_id)
+    assert interaction.response.sent == [(cmd.REPLY_ACTION_REMOVED.format(id=spec.action_id), True)]

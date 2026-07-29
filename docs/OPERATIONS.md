@@ -103,7 +103,8 @@ The slash commands the gateway registers:
 - **any member** — `/issue <description>` files anonymously in the bound
   repo, `/repo` shows its open items;
 - **on-demand analyses** — `/summarize`, `/stats`, `/talkingpoints`
-  (deferred first: a chunked run outlives Discord's 3-second deadline);
+  (deferred first: a chunked run outlives Discord's 3-second deadline), and
+  `/action add|remove|list` to schedule recurring ones;
 - **durable-DM digests** — `/subscribe [schedule] [recipe] [lang:xx]`,
   `/mysubs`, `/unsubscribe <id>`.
 
@@ -142,9 +143,6 @@ to keep anonymous. No reporter identity reaches GitHub either.
 These Telegram surfaces are **deferred / not yet built** on Discord, so an
 operator should not expect full parity:
 
-- **Scheduled wiki analyses** — the action scheduler (`/action`) does not
-  run on Discord; only the subscription digest tick, the repo poller, and
-  the capture reminder run in the background.
 - **`/setconsent`, `/subscribable`, `/capture purge`** — no Discord
   equivalent yet.
 - **DM `/log` + the chat picker** — the private `/log` flow and the

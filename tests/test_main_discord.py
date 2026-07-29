@@ -71,9 +71,12 @@ async def test_discord_full_deployment_wires_every_neutral_service(
 
     collectors = _collectors(client)
     # Digests deliver and repo notifications poll; reminders are off by default.
-    assert set(collectors) == {"sub_tick", "repo_notify"}
+    assert set(collectors) == {"sub_tick", "action_tick", "repo_notify"}
     engine = collectors["sub_tick"].engine
-    assert collectors["repo_notify"].engine is engine  # one engine for the deployment
+    assert collectors["repo_notify"].engine is engine
+    assert (
+        collectors["action_tick"].engine is engine
+    )  # scheduled analyses too  # one engine for the deployment
     assert set(engine.sources) == {"archive_window", "repo_events"}
     assert set(engine.transforms) == {"prompt", "stats", "rule_match"}
     # The wiki_section sink lets the on-demand analyses publish to the wiki,
@@ -140,7 +143,7 @@ async def test_discord_reannounce_cadence_adds_the_reminder(
     )
     client = cast("DiscordGatewayClient", seen["client"])
     collectors = _collectors(client)
-    assert set(collectors) == {"sub_tick", "repo_notify", "capture_remind"}
+    assert set(collectors) == {"sub_tick", "action_tick", "repo_notify", "capture_remind"}
     assert collectors["capture_remind"].cadence.days == 30
     await seen["release"]()
 

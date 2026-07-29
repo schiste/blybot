@@ -14,15 +14,16 @@ connection:
 
 Onboarding is slash commands, not deep links (``deep_links=False``):
 ``/capture``, ``/setpage``, ``/settings``, ``/reset``, ``/revoke``,
-``/llm``, ``/setrepo``, ``/settoken``, ``/events``, ``/rule`` and
-``/rules`` are server-admin config; ``/issue`` and ``/repo`` are open to
+``/llm``, ``/setrepo``, ``/settoken``, ``/events``, ``/rule``, ``/rules``
+and ``/action`` are server-admin config; ``/issue`` and ``/repo`` are open to
 any member; ``/subscribe``, ``/mysubs`` and ``/unsubscribe`` are the
 durable-DM digest flow. Every reply is ephemeral — for ``/issue`` that is
 load-bearing, not cosmetic: a public response would attribute the command
 to its caller and defeat the anonymity it promises.
 
 ``/settoken`` opens a :class:`TokenModal` rather than taking the secret as
-a slash-command parameter — see that class for why. ``/rule`` is an
+a slash-command parameter — see that class for why. ``/rule`` and
+``/action`` are each an
 :class:`~discord.app_commands.Group`, so Discord routes its subcommands
 natively and each leaf is one neutral call — the grammar itself still lives
 in the shared :class:`~blybot.services.commands.CommandService`. Outbound
@@ -244,6 +245,33 @@ class DiscordGateway:
     async def repo_command(self, channel_id: int, thread_id: int | None) -> str:
         """Show the bound repository's open-items summary (any member)."""
         result = await self.commands.repo_summary(scope_of(channel_id, thread_id))
+        return result.text
+
+    async def action_add_command(
+        self, channel_id: int, thread_id: int | None, spec: str, *, is_admin: bool
+    ) -> str:
+        """Schedule one recurring analysis for this channel (server admins only)."""
+        result = await self.commands.add_action(
+            scope_of(channel_id, thread_id), is_admin=is_admin, spec=spec
+        )
+        return result.text
+
+    async def action_remove_command(
+        self, channel_id: int, thread_id: int | None, action_id: str, *, is_admin: bool
+    ) -> str:
+        """Drop one of this channel's scheduled analyses (server admins only)."""
+        result = await self.commands.remove_action(
+            scope_of(channel_id, thread_id), is_admin=is_admin, action_id=action_id
+        )
+        return result.text
+
+    async def action_list_command(
+        self, channel_id: int, thread_id: int | None, *, is_admin: bool
+    ) -> str:
+        """List this channel's scheduled analyses (server admins only)."""
+        result = await self.commands.list_actions(
+            scope_of(channel_id, thread_id), is_admin=is_admin
+        )
         return result.text
 
     async def events_command(
@@ -611,6 +639,41 @@ class DiscordGatewayClient(discord.Client):
                 return
             channel_id, thread_id = _channel_ids(interaction.channel)
             await interaction.response.send_modal(TokenModal(gateway, channel_id, thread_id))
+
+        # /action mirrors /rule: Discord routes the subcommands natively, so
+        # each leaf is one neutral call and the grammar stays in the service.
+        action = app_commands.Group(
+            name="action",
+            description="Schedule recurring analyses for this channel (admins).",
+            guild_only=True,
+        )
+        self.tree.add_command(action)
+
+        @action.command(name="add", description="Schedule a recurring analysis.")
+        @app_commands.describe(spec="e.g. daily@06:00 summarize window=24h")
+        async def action_add(interaction: discord.Interaction, spec: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.action_add_command(
+                channel_id, thread_id, spec, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @action.command(name="remove", description="Remove a scheduled analysis by id.")
+        @app_commands.describe(action_id="The id shown by /action list")
+        async def action_remove(interaction: discord.Interaction, action_id: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.action_remove_command(
+                channel_id, thread_id, action_id, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
+
+        @action.command(name="list", description="List this channel's scheduled analyses.")
+        async def action_list(interaction: discord.Interaction) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.action_list_command(
+                channel_id, thread_id, is_admin=_is_admin(interaction.user)
+            )
+            await _respond(interaction, reply)
 
         @self.tree.command(
             name="events", description="Turn rule-driven repo notifications on/off (admins)."

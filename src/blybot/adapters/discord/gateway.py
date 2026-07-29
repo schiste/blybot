@@ -15,15 +15,18 @@ connection:
 Onboarding is slash commands, not deep links (``deep_links=False``):
 ``/capture``, ``/setpage``, ``/settings``, ``/reset``, ``/revoke``,
 ``/llm``, ``/setrepo``, ``/settoken``, ``/events``, ``/rule`` and
-``/rules`` are server-admin config;
-``/subscribe``, ``/mysubs`` and ``/unsubscribe`` are the durable-DM digest
-flow. ``/settoken`` opens a :class:`TokenModal` rather than taking the
-secret as a slash-command parameter — see that class for why. ``/rule`` is
-an :class:`~discord.app_commands.Group`, so Discord
-routes its subcommands natively and each leaf is one neutral call — the
-grammar itself still lives in the shared
-:class:`~blybot.services.commands.CommandService`. Outbound digests,
-reminders and repo notifications go out through the shared neutral
+``/rules`` are server-admin config; ``/issue`` and ``/repo`` are open to
+any member; ``/subscribe``, ``/mysubs`` and ``/unsubscribe`` are the
+durable-DM digest flow. Every reply is ephemeral — for ``/issue`` that is
+load-bearing, not cosmetic: a public response would attribute the command
+to its caller and defeat the anonymity it promises.
+
+``/settoken`` opens a :class:`TokenModal` rather than taking the secret as
+a slash-command parameter — see that class for why. ``/rule`` is an
+:class:`~discord.app_commands.Group`, so Discord routes its subcommands
+natively and each leaf is one neutral call — the grammar itself still lives
+in the shared :class:`~blybot.services.commands.CommandService`. Outbound
+digests, reminders and repo notifications go out through the shared neutral
 delivery loop driving
 :class:`~blybot.adapters.discord.transport.DiscordTransport`.
 """
@@ -219,6 +222,23 @@ class DiscordGateway:
         result = await self.commands.store_token(
             scope_of(channel_id, thread_id), is_admin=is_admin, token=token
         )
+        return result.text
+
+    async def issue_command(self, channel_id: int, thread_id: int | None, description: str) -> str:
+        """File an anonymous issue in this channel's bound repo (any member).
+
+        Not admin-gated by design. The reply MUST stay ephemeral: a public
+        slash-command response attributes the invocation to its caller in
+        the channel, which would defeat the anonymity the command promises.
+        """
+        result = await self.commands.file_issue(
+            scope_of(channel_id, thread_id), description=description
+        )
+        return result.text
+
+    async def repo_command(self, channel_id: int, thread_id: int | None) -> str:
+        """Show the bound repository's open-items summary (any member)."""
+        result = await self.commands.repo_summary(scope_of(channel_id, thread_id))
         return result.text
 
     async def events_command(
@@ -542,6 +562,23 @@ class DiscordGatewayClient(discord.Client):
                 channel_id, thread_id, options, is_admin=_is_admin(interaction.user)
             )
             await _respond(interaction, reply)
+
+        @self.tree.command(name="issue", description="File an anonymous issue in the bound repo.")
+        @app_commands.guild_only()
+        @app_commands.describe(description="What is wrong")
+        async def issue(interaction: discord.Interaction, description: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.issue_command(channel_id, thread_id, description)
+            # Ephemeral is load-bearing here, not just tidy: a public response
+            # would show "<user> used /issue" in the channel and deanonymize
+            # the reporter the command exists to protect.
+            await _respond(interaction, reply)
+
+        @self.tree.command(name="repo", description="Show the bound repo's open items.")
+        @app_commands.guild_only()
+        async def repo(interaction: discord.Interaction) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            await _respond(interaction, await gateway.repo_command(channel_id, thread_id))
 
         @self.tree.command(name="setrepo", description="Bind this channel to a GitHub repo.")
         @app_commands.guild_only()

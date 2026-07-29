@@ -42,6 +42,7 @@ from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
+from blybot.services.repo import GroupRepoService
 from tests.fakes import (
     FakeClock,
     FakeRepoGateway,
@@ -620,8 +621,10 @@ def test_build_registers_every_slash_command() -> None:
     assert names == [
         "capture",
         "events",
+        "issue",
         "llm",
         "mysubs",
+        "repo",
         "reset",
         "revoke",
         "rule",
@@ -1121,3 +1124,58 @@ async def test_token_modal_rechecks_admin_at_submit_time() -> None:
     await modal.on_submit(cast("Any", demoted))
     assert demoted.response.sent == [(cmd.REPLY_NOT_ADMIN, True)]
     assert store.tokens == {}
+
+
+# --- /issue and /repo (issue #42) --------------------------------------------
+
+
+def _issue_gateway() -> tuple[DiscordGateway, InMemoryProfiles, FakeRepoGateway]:
+    store = InMemoryProfiles()
+    actions = FakeRepoGateway(valid_tokens={_GOOD_PAT})
+    directory = _directory(store)
+    groups = GroupPolicy(allowed=set())
+    commands = CommandService(
+        directory=directory,
+        groups=groups,
+        page_url_for=str,
+        counters=Counters(),
+        repo_service=GroupRepoService(gateway=actions, vault=store, directory=directory),
+        repo_limiter=SlidingWindowLimiter(clock=FakeClock(), limit=10, window=timedelta(minutes=1)),
+    )
+    gateway = DiscordGateway(directory=directory, groups=groups, commands=commands)
+    return gateway, store, actions
+
+
+async def test_issue_and_repo_commands_delegate_to_the_neutral_service() -> None:
+    gateway, store, actions = _issue_gateway()
+    unbound = await gateway.issue_command(_CHANNEL, None, "broken")
+    assert unbound == cmd.REPLY_ISSUE_UNBOUND
+
+    await gateway.directory.set_repo(_SCOPE, "org/repo")
+    await store.store_token(_SCOPE, _GOOD_PAT)
+    filed = await gateway.issue_command(_CHANNEL, None, "broken")
+    assert "github.com/org/repo/issues" in filed
+    assert actions.issues[0][0] == "org/repo"
+
+    assert "org/repo" in await gateway.repo_command(_CHANNEL, None)
+
+
+async def test_issue_and_repo_slash_commands_stay_ephemeral() -> None:
+    """Ephemeral is load-bearing: a public reply would name the reporter."""
+    gateway, store, _actions = _issue_gateway()
+    await gateway.directory.set_repo(_SCOPE, "org/repo")
+    await store.store_token(_SCOPE, _GOOD_PAT)
+    client = build_gateway_client(gateway)
+    channel = SimpleNamespace(id=_CHANNEL)
+
+    interaction = _admin_interaction(channel)
+    await _command(client, "issue").callback(interaction, "the button is broken")
+    (content, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is True
+    assert "github.com/org/repo/issues" in content
+
+    interaction = _admin_interaction(channel)
+    await _command(client, "repo").callback(interaction)
+    (summary, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is True
+    assert "org/repo" in summary

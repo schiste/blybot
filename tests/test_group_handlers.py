@@ -26,6 +26,8 @@ from blybot.domain.models import (
 )
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
+from blybot.services import commands as cmd
+from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
@@ -108,20 +110,28 @@ def make_handlers(
         counters=Counters(),
         clock=FakeClock(),
     )
+    limiter = SlidingWindowLimiter(clock=FakeClock(), limit=limit, window=timedelta(minutes=1))
     handlers = h.GroupHandlers(
         engine=engine,
         groups=policy,
-        limiter=SlidingWindowLimiter(clock=FakeClock(), limit=limit, window=timedelta(minutes=1)),
+        limiter=limiter,
         directory=directory,
         page_url_for=page_url_for,
         counters=Counters(),
         group_greeting_text="Hello, I am Blybot.",
         maintainer="Test Maintainer",
         newcomer_welcome_enabled=newcomer_welcome_enabled,
-        repo_service=(
-            GroupRepoService(gateway=gateway, vault=store, directory=directory)
-            if with_repo_service
-            else None
+        commands=CommandService(
+            directory=directory,
+            groups=policy,
+            page_url_for=page_url_for,
+            counters=Counters(),
+            repo_service=(
+                GroupRepoService(gateway=gateway, vault=store, directory=directory)
+                if with_repo_service
+                else None
+            ),
+            repo_limiter=limiter,
         ),
         capabilities=capabilities,
         archive=archive,
@@ -646,7 +656,7 @@ async def test_issue_without_description_shows_usage() -> None:
     handlers, _, _ = make_handlers()
     context, bot = tg.make_context()
     await handlers.on_issue(tg.command_update(tg.message(text="/issue")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_USAGE]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_USAGE]
 
 
 async def test_issue_without_binding_or_token_explains_what_is_missing() -> None:
@@ -654,19 +664,19 @@ async def test_issue_without_binding_or_token_explains_what_is_missing() -> None
     handlers, _, _ = make_handlers(store=store)
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_UNBOUND]
 
     await handlers.directory.set_repo(gscope(), "x/y")  # bound, but no token
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_NO_PAT]
 
 
 async def test_issue_in_v1_mode_says_disabled() -> None:
     handlers, _, _ = make_handlers(with_repo_service=False)
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_DISABLED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_DISABLED]
 
 
 async def test_issue_is_rate_limited() -> None:
@@ -687,7 +697,7 @@ async def test_issue_github_failure_reports_neutrally() -> None:
     gateway.fail = True
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_FAILED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_FAILED]
 
 
 async def test_issue_storage_failure_reports_neutrally() -> None:
@@ -697,13 +707,13 @@ async def test_issue_storage_failure_reports_neutrally() -> None:
     store.fail = True
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]  # resolve degraded to defaults
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_UNBOUND]  # resolve degraded to defaults
 
     store.fail = False
     store.fail_token_reads = True  # vault outage after a healthy resolve
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_FAILED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_FAILED]
 
 
 async def test_repo_summarizes_the_bound_repository() -> None:
@@ -721,12 +731,12 @@ async def test_repo_without_binding_or_service_explains() -> None:
     handlers, _, _ = make_handlers()
     context, bot = tg.make_context()
     await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_UNBOUND]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_UNBOUND]
 
     handlers, _, _ = make_handlers(with_repo_service=False)
     context, bot = tg.make_context()
     await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_DISABLED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_DISABLED]
 
 
 async def test_repo_reports_missing_token_and_failures() -> None:
@@ -735,14 +745,14 @@ async def test_repo_reports_missing_token_and_failures() -> None:
     await handlers.directory.set_repo(gscope(), "x/y")
     context, bot = tg.make_context()
     await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_NO_PAT]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_NO_PAT]
 
     await store.store_token(gscope(), "ghp_group")
     gateway.valid_tokens.add("ghp_group")
     gateway.fail = True
     context, bot = tg.make_context()
     await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_ISSUE_FAILED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ISSUE_FAILED]
 
 
 async def test_issue_and_repo_ignore_unlisted_groups_and_private_chats() -> None:

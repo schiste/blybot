@@ -90,6 +90,8 @@ The slash commands the gateway registers:
 - **server admins** — `/capture on|off`, `/setpage <path>`, `/settings`,
   `/reset`, `/revoke`, `/llm show|set|reset`, `/setrepo owner/repo`,
   `/settoken`, `/events on|off`, `/rule add|remove|clear`, `/rules`;
+- **any member** — `/issue <description>` files anonymously in the bound
+  repo, `/repo` shows its open items;
 - **on-demand analyses** — `/summarize`, `/stats`, `/talkingpoints`
   (deferred first: a chunked run outlives Discord's 3-second deadline);
 - **durable-DM digests** — `/subscribe [schedule] [recipe] [lang:xx]`,
@@ -120,14 +122,16 @@ The token is validated against the bound repo before it is encrypted and
 stored, and admin-ship is re-checked when the form is **submitted**, not
 only when it was opened.
 
+`/issue` replies **ephemerally**, and that is a privacy requirement rather
+than a style choice: a public slash-command response shows "<user> used
+/issue" in the channel, which would attribute a report the feature promises
+to keep anonymous. No reporter identity reaches GitHub either.
+
 ### What Discord does NOT do yet
 
 These Telegram surfaces are **deferred / not yet built** on Discord, so an
 operator should not expect full parity:
 
-- **Repo commands** — `/issue` and `/repo` are Telegram-only (issue #42),
-  so a stored token currently powers notifications but no interactive
-  repo commands on Discord.
 - **Scheduled wiki analyses** — the action scheduler (`/action`) does not
   run on Discord; only the subscription digest tick, the repo poller, and
   the capture reminder run in the background.

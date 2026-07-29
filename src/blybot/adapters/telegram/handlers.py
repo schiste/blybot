@@ -43,7 +43,6 @@ from blybot.services.feedback import BUG_ACTION
 from blybot.services.feedback import CONFIRMATION_TEMPLATE as BUG_CONFIRMATION
 from blybot.services.publish import CONFIRMATION_TEMPLATE as PUBLISH_CONFIRMATION
 from blybot.services.publish import NothingToPublishError, PublishedLog, log_action
-from blybot.services.repo import NoRepoBoundError, NoTokenError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -55,12 +54,12 @@ if TYPE_CHECKING:
     from blybot.adapters.telegram.token_entry import TokenEntryHandler
     from blybot.domain.models import PlatformCapabilities, Session
     from blybot.domain.ports import MessageArchive, SubscriptionStore
+    from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory, ChannelSettings
     from blybot.services.dm_routing import DmRouteRegistry
     from blybot.services.engine import ActionEngine
     from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
-    from blybot.services.repo import GroupRepoService
     from blybot.services.sessions import SessionRegistry
     from blybot.services.transcribe import DmTranscriptionService
 
@@ -116,19 +115,9 @@ REPLY_NO_LOG_PAGE: Final = (
     "<page path> here to set the group default, or inside a topic to scope "
     "it to that topic. Nothing was published."
 )
-REPLY_ISSUE_USAGE: Final = "Describe the issue after the command: /issue something is broken"
-REPLY_ISSUE_UNBOUND: Final = (
-    "No repository is bound to this group — an admin can bind one with /setrepo."
-)
-REPLY_ISSUE_DISABLED: Final = "Repository features aren't enabled on this deployment."
-REPLY_ISSUE_NO_PAT: Final = (
-    "A repository is bound but its token step was never completed — an admin "
-    "should run /setrepo again and follow the private link."
-)
-REPLY_ISSUE_FAILED: Final = "Sorry, GitHub refused that — the token may have expired (/setrepo)."
-REPLY_REPO_SUMMARY: Final = (
-    "{repo}: {count} open items. Recent: {titles}\nhttps://github.com/{repo}/issues"
-)
+# /issue and /repo wording (and their error mapping) now live in the neutral
+# CommandService — both platforms share it; on_issue/on_repo render whatever
+# CommandResult it returns.
 NEWCOMER_PROMPT: Final = "Welcome! Tap below for a private note on how I work."
 NEWCOMER_BUTTON: Final = "What is this bot?"
 HELP_PRIVATE: Final = (
@@ -191,8 +180,6 @@ PRIVACY_TEXT: Final = (
 _MEMBER_STATUSES: Final = frozenset(
     {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
 )
-# Errors from the bound-repo services that map to a user-facing reply.
-_REPO_ERRORS: Final = (NoRepoBoundError, NoTokenError, StorageError, IssueTrackerError)
 _SUPPORTED_IMAGE_TYPES: Final = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp"})
 # The /bug pipeline runs on a placeholder scope so no private chat id (a
 # user identifier) ever enters the engine; the handler routes the reply.
@@ -218,17 +205,6 @@ def _just_joined(change: ChatMemberUpdated) -> bool:
         change.old_chat_member.status not in _MEMBER_STATUSES
         and change.new_chat_member.status in _MEMBER_STATUSES
     )
-
-
-def _repo_error_reply(error: Exception) -> str:
-    """One place mapping repo-service failures to user-facing replies."""
-    if isinstance(error, NoRepoBoundError):
-        return REPLY_ISSUE_UNBOUND
-    if isinstance(error, NoTokenError):
-        return REPLY_ISSUE_NO_PAT
-    if isinstance(error, IssueTrackerError):
-        log_event("group_issue", "error")
-    return REPLY_ISSUE_FAILED
 
 
 def _message_text(message: Message) -> str | None:
@@ -283,7 +259,9 @@ class GroupHandlers:
     group_greeting_text: str
     maintainer: str
     newcomer_welcome_enabled: bool
-    repo_service: GroupRepoService | None
+    # /issue and /repo are pure delegations to the neutral service, which
+    # carries the bound-repo service and their rate cap.
+    commands: CommandService
     # Gates the platform-shaped niceties: command-message cleanup needs
     # message_delete, and the newcomer welcome mints a deep link
     # (deep_links). Telegram has both, so neither gate changes its behavior.
@@ -459,55 +437,18 @@ class GroupHandlers:
         chat = self._served_group(update)
         if chat is None:
             return
-        thread_id = thread_of(update)
-        bot = context.bot
-        description = " ".join(context.args or ()).strip()
-        if not description:
-            await send_threaded(bot, chat.id, thread_id, REPLY_ISSUE_USAGE)
-            return
-        if self.repo_service is None:
-            await send_threaded(bot, chat.id, thread_id, REPLY_ISSUE_DISABLED)
-            return
-        if not self.limiter.allow("issue", chat.id):
-            await send_threaded(bot, chat.id, thread_id, REPLY_THROTTLED)
-            return
-        try:
-            url = await self.repo_service.file_issue(scope_of(update), description)
-        except _REPO_ERRORS as error:
-            await send_threaded(bot, chat.id, thread_id, _repo_error_reply(error))
-        else:
-            self.counters.increment("group_issues_filed")
-            log_event("group_issue", "ok")
-            await send_threaded(bot, chat.id, thread_id, REPLY_BUG_FILED.format(url=url))
+        result = await self.commands.file_issue(
+            scope_of(update), description=" ".join(context.args or ())
+        )
+        await send_threaded(context.bot, chat.id, thread_of(update), result.text)
 
     async def on_repo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show the bound repository's open-items summary."""
         chat = self._served_group(update)
         if chat is None:
             return
-        thread_id = thread_of(update)
-        bot = context.bot
-        if self.repo_service is None:
-            await send_threaded(bot, chat.id, thread_id, REPLY_ISSUE_DISABLED)
-            return
-        if not self.limiter.allow("repo", chat.id):
-            await send_threaded(bot, chat.id, thread_id, REPLY_THROTTLED)
-            return
-        try:
-            summary = await self.repo_service.summary(scope_of(update))
-        except _REPO_ERRORS as error:
-            await send_threaded(bot, chat.id, thread_id, _repo_error_reply(error))
-        else:
-            await send_threaded(
-                bot,
-                chat.id,
-                thread_id,
-                REPLY_REPO_SUMMARY.format(
-                    repo=summary.repo,
-                    count=summary.open_count,
-                    titles="; ".join(summary.recent_titles) or "none",
-                ),
-            )
+        result = await self.commands.repo_summary(scope_of(update))
+        await send_threaded(context.bot, chat.id, thread_of(update), result.text)
 
     def _served_group(self, update: Update) -> Chat | None:
         """Return the chat when this is a group the bot serves."""

@@ -289,3 +289,46 @@ def test_startup_and_liveness_logging_lives_in_one_place() -> None:
             if path != owner and f'log_event("{event}"' in path.read_text(encoding="utf-8")
         ]
         assert not emitters, f"{event} is logged outside services/health.py: {emitters}"
+
+
+def test_no_capability_is_declared_but_never_consulted() -> None:
+    """A capability nobody gates on is worse than none: it looks authoritative.
+
+    ``chat_picker`` sat in both descriptors, gated on by nothing, named after
+    Telegram's picker *widget* rather than the platform fact underneath — and
+    was duly misread as "Discord cannot do DM transcription" (#45). Scoped to
+    the PlatformCapabilities body: a naive scan of models.py also collects
+    GroupProfile/RuleFilter/CommandResult booleans this guard has no opinion
+    about, so a failure would name an irrelevant field.
+    """
+    # Declared for a named future increment rather than forgotten. Anything
+    # NOT listed here must have a live consumer.
+    pending_by_design = {
+        "threads": "informational; every platform served so far has them",
+        "rich_choices": "the OutboundMessage.choices increment (#32) is unbuilt",
+    }
+    body = (
+        (SRC / "domain" / "models.py")
+        .read_text(encoding="utf-8")
+        .split("class PlatformCapabilities:")[1]
+        .split("\nclass ")[0]
+    )
+    fields = {
+        line.split(":")[0].strip()
+        for line in body.splitlines()
+        if line.startswith("    ") and ": bool" in line
+    }
+    assert "durable_dm" in fields, "the scan did not find the capability class"
+    consulted = "".join(
+        path.read_text(encoding="utf-8")
+        for path in SRC.rglob("*.py")
+        if path != SRC / "domain" / "models.py"
+    )
+    unused = sorted(
+        name for name in fields if f".{name}" not in consulted and name not in pending_by_design
+    )
+    assert not unused, f"capabilities declared but never consulted: {unused}"
+    # And the acknowledgement list must not rot: a listed capability that HAS
+    # gained a consumer should be removed from it.
+    stale = sorted(name for name in pending_by_design if f".{name}" in consulted)
+    assert not stale, f"listed as pending but now consulted: {stale}"

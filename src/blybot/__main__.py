@@ -82,7 +82,7 @@ from blybot.services.publish import (
 )
 from blybot.services.repo import GroupRepoService
 from blybot.services.schedule import ActionScheduler
-from blybot.services.sessions import SessionRegistry
+from blybot.services.sessions import SessionRegistry, SessionSweeper
 from blybot.services.subscriptions import SubscriptionBinding, SubscriptionScheduler
 from blybot.services.transcribe import DmTranscriptionService
 
@@ -661,6 +661,21 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
             )
         )
 
+    dm_sessions = SessionRegistry(
+        pseudonyms=RandomPseudonymFactory(), clock=clock, ttl=config.session_ttl
+    )
+    transcription = DmTranscriptionService(
+        publisher=publisher,
+        sanitizer=sanitizer,
+        sessions=dm_sessions,
+        target_page=config.dm_target_base,
+        edit_summary=config.edit_summary,
+        debounce_seconds=config.burst_debounce.total_seconds(),
+        timestamp_granularity=config.timestamp_granularity,
+    )
+    # Discord has no maintenance tick of its own, so expired DM sessions would
+    # otherwise accumulate forever and degrade pseudonym minting.
+    collectors.append((SessionSweeper(sessions=dm_sessions, counters=counters), "session_sweep"))
     commands = CommandService(
         directory=directory,
         groups=group_policy,
@@ -687,17 +702,7 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
         directory=directory,
         groups=group_policy,
         commands=commands,
-        transcription=DmTranscriptionService(
-            publisher=publisher,
-            sanitizer=sanitizer,
-            sessions=SessionRegistry(
-                pseudonyms=RandomPseudonymFactory(), clock=clock, ttl=config.session_ttl
-            ),
-            target_page=config.dm_target_base,
-            edit_summary=config.edit_summary,
-            debounce_seconds=config.burst_debounce.total_seconds(),
-            timestamp_granularity=config.timestamp_granularity,
-        ),
+        transcription=transcription,
         routes=DmRouteRegistry(clock=clock, route_ttl=config.session_ttl),
         capture=capture_service,
         masker=masker,
@@ -707,6 +712,10 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
     )
 
     async def release_clients() -> None:
+        # Flush debounced DM lines before the publisher closes, or the last
+        # burst of a private discussion is lost on shutdown (as Telegram's
+        # Lifecycle already does).
+        await transcription.flush_all()
         await publisher.aclose()
         await repo_gateway.aclose()
         if llm_client is not None:

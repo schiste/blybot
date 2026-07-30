@@ -67,6 +67,7 @@ from blybot.services.directory import ChannelDirectory
 from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.engine import ActionEngine
 from blybot.services.feedback import FeedbackService
+from blybot.services.health import heartbeat_loop, log_startup
 from blybot.services.notify import (
     ChatMessagesSink,
     RepoEventsSource,
@@ -434,25 +435,6 @@ def _spawn(coro: Coroutine[object, object, None]) -> asyncio.Task[None]:
 _DISCORD_HEARTBEAT_SECONDS: Final = 900.0
 
 
-async def _discord_heartbeat(
-    counters: Counters, archive: ToolsDbArchive | None, interval_seconds: float
-) -> None:
-    """Emit a liveness heartbeat (and archive size) on a fixed cadence.
-
-    Mirrors the Telegram maintenance heartbeat so a *healthy* Discord instance
-    is visible in the logs — otherwise "connected and running" is
-    indistinguishable from "crash-looping" (see issue #28).
-    """
-    while True:
-        await asyncio.sleep(interval_seconds)
-        log_event("heartbeat", "ok", **counters.snapshot())
-        if archive is not None:
-            try:
-                log_event("archive_size", "ok", rows=await archive.total())
-            except StorageError:
-                log_event("archive_size", "error")
-
-
 async def _discord_startup(  # noqa: PLR0913 -- setup-hook wiring enumerates its dependencies
     client: DiscordGatewayClient,
     *,
@@ -479,8 +461,8 @@ async def _discord_startup(  # noqa: PLR0913 -- setup-hook wiring enumerates its
     transport = DiscordTransport(client)
     for collector, label in collectors:
         _spawn(message_loop(transport, collector, poll_interval, label))
-    _spawn(_discord_heartbeat(counters, archive, heartbeat_interval))
-    log_event("startup", "ok")
+    _spawn(heartbeat_loop(counters, archive, heartbeat_interval))
+    log_startup()
 
 
 def discord_run(

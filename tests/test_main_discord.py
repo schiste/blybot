@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, cast
 
@@ -228,55 +227,9 @@ async def test_discord_startup_contains_a_bootstrap_failure(
     )
 
 
-class _StubArchive:
-    def __init__(self, *, total: int | None = None) -> None:
-        self._total = total
-
-    async def total(self) -> int:
-        if self._total is None:
-            raise StorageError
-        return self._total
-
-
-def _sleep_then_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let the heartbeat run exactly one body, then break its endless loop."""
-    calls = {"n": 0}
-
-    async def fake_sleep(_seconds: float) -> None:
-        calls["n"] += 1
-        if calls["n"] >= 2:
-            raise asyncio.CancelledError
-
-    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
-
-
-async def test_discord_heartbeat_logs_liveness_and_archive_size(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    _sleep_then_cancel(monkeypatch)
-    with caplog.at_level(logging.INFO, logger="blybot"), pytest.raises(asyncio.CancelledError):
-        await entry._discord_heartbeat(Counters(), cast("Any", _StubArchive(total=7)), 900.0)
-    assert any("event=heartbeat outcome=ok" in m for m in caplog.messages)
-    assert any("event=archive_size outcome=ok rows=7" in m for m in caplog.messages)
-
-
-async def test_discord_heartbeat_reports_an_archive_outage(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    _sleep_then_cancel(monkeypatch)
-    with caplog.at_level(logging.INFO, logger="blybot"), pytest.raises(asyncio.CancelledError):
-        await entry._discord_heartbeat(Counters(), cast("Any", _StubArchive(total=None)), 900.0)
-    assert any("event=archive_size outcome=error" in m for m in caplog.messages)
-
-
-async def test_discord_heartbeat_without_an_archive_still_beats(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    _sleep_then_cancel(monkeypatch)
-    with caplog.at_level(logging.INFO, logger="blybot"), pytest.raises(asyncio.CancelledError):
-        await entry._discord_heartbeat(Counters(), None, 900.0)
-    assert any("event=heartbeat outcome=ok" in m for m in caplog.messages)
-    assert not any("archive_size" in m for m in caplog.messages)
+# The heartbeat/startup assertions moved to tests/test_health.py when the
+# logging became a shared neutral helper (#46); what stays Discord's own
+# concern is that the loop is actually spawned, covered by the startup tests.
 
 
 async def test_spawn_schedules_a_background_task() -> None:

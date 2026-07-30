@@ -607,6 +607,9 @@ platforms (so a new adapter package is covered the moment it lands):
   exempt);
 - **no hard-coded per-message size literal** (`4096`, `3500`) appears in
   services — caps live only in `PlatformCapabilities`;
+- **startup and liveness logging** (`event=startup`, `heartbeat`,
+  `archive_size`) is emitted only from `services/health.py` — each
+  adapter used to re-implement it and the copies drifted (#46);
 - a platform's user-identity attribute (Telegram's `from_user`) never
   appears outside its own adapter — the pseudonymization boundary, keyed
   per platform.

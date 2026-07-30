@@ -41,7 +41,7 @@ import discord
 from discord import app_commands
 
 from blybot.adapters.discord.scope import dm_scope, scope_of
-from blybot.domain.models import CapturedMessage, LogContent
+from blybot.domain.models import CapturedMessage, CommandResult, LogContent
 from blybot.domain.ports import StorageError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
@@ -154,16 +154,19 @@ class DiscordGateway:
 
     async def capture_command(
         self, channel_id: int, thread_id: int | None, *, enabled: bool, is_admin: bool
-    ) -> str:
+    ) -> CommandResult:
         """Turn this channel's message capture on or off (server admins only).
 
-        A thin map to the neutral :class:`CommandService`: pull the scope off
-        the Discord ids, delegate, and render the reply.
+        Returns the whole :class:`CommandResult`, not just its text — unlike
+        every other command here — because the shell must know whether this
+        succeeded. Discord has no privacy mode, so the ON confirmation *is*
+        the channel's only notice that archiving started, and it has to be
+        posted publicly and permanently rather than ephemerally to the admin
+        who ran it (issue #17). A refusal still answers privately.
         """
-        result = await self.commands.capture(
+        return await self.commands.capture(
             scope_of(channel_id, thread_id), is_admin=is_admin, enabled=enabled
         )
-        return result.text
 
     async def setpage_command(
         self, channel_id: int, thread_id: int | None, page: str, *, is_admin: bool
@@ -456,9 +459,15 @@ def _is_admin(user: Any) -> bool:
     return bool(perms is not None and perms.administrator)
 
 
-async def _respond(interaction: discord.Interaction, text: str) -> None:
-    """Answer a slash command ephemerally (only the caller sees it)."""
-    await interaction.response.send_message(text, ephemeral=True)
+async def _respond(interaction: discord.Interaction, text: str, *, ephemeral: bool = True) -> None:
+    """Answer a slash command; ephemeral (caller-only) unless told otherwise.
+
+    Ephemeral is the default because it is usually the privacy-preserving
+    choice — a public response attributes the invocation to its caller, which
+    would deanonymize ``/issue`` and the log context menu. ``/capture on`` is
+    the deliberate exception: there the *channel* is the audience.
+    """
+    await interaction.response.send_message(text, ephemeral=ephemeral)
 
 
 class TokenModal(discord.ui.Modal):
@@ -558,13 +567,17 @@ class DiscordGatewayClient(discord.Client):
         @app_commands.describe(state="on or off")
         async def capture(interaction: discord.Interaction, state: str) -> None:
             channel_id, thread_id = _channel_ids(interaction.channel)
-            reply = await gateway.capture_command(
+            result = await gateway.capture_command(
                 channel_id,
                 thread_id,
                 enabled=state.strip().lower() == "on",
                 is_admin=_is_admin(interaction.user),
             )
-            await _respond(interaction, reply)
+            # The ONE command whose success must be public: on a platform with
+            # no privacy mode this reply is the channel's notice that its
+            # messages are being archived. Refusals ("not an admin", storage
+            # down) stay ephemeral — no reason to broadcast those.
+            await _respond(interaction, result.text, ephemeral=not result.ok)
 
         @self.tree.command(name="setpage", description="Set this channel's wiki page (admins).")
         @app_commands.guild_only()

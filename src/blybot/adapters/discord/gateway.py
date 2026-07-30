@@ -41,7 +41,7 @@ import discord
 from discord import app_commands
 
 from blybot.adapters.discord.scope import dm_scope, scope_of
-from blybot.domain.models import CapturedMessage
+from blybot.domain.models import CapturedMessage, LogContent
 from blybot.domain.ports import StorageError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
@@ -83,6 +83,8 @@ REPLY_PAT_NEXT_STEP: Final = (
 )
 PAT_MODAL_TITLE: Final = "GitHub token"
 PAT_MODAL_LABEL: Final = "Fine-grained PAT (Issues read/write)"
+# The message context-menu entry label (Apps → …).
+LOG_MENU_LABEL: Final = "Log to wiki"
 REPLY_ANALYSES_UNAVAILABLE: Final = "On-demand analyses aren't available on this deployment."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
 REPLY_SUBSCRIBED: Final = (
@@ -245,6 +247,27 @@ class DiscordGateway:
     async def repo_command(self, channel_id: int, thread_id: int | None) -> str:
         """Show the bound repository's open-items summary (any member)."""
         result = await self.commands.repo_summary(scope_of(channel_id, thread_id))
+        return result.text
+
+    async def log_command(
+        self,
+        channel_id: int,
+        thread_id: int | None,
+        *,
+        text: str,
+        is_author: bool,
+    ) -> str:
+        """Publish one message to this channel's wiki page, unattributed.
+
+        ``is_author`` is resolved in the shell by comparing the invoker with
+        the target's author — raw Discord identities never leave this adapter.
+        Discord needs no requester-hiding step: a context-menu command posts
+        no message at all, so there is nothing to delete (where Telegram must
+        race to remove the ``/log`` command message).
+        """
+        result = await self.commands.log_message(
+            scope_of(channel_id, thread_id), is_author=is_author, content=LogContent(text=text)
+        )
         return result.text
 
     async def action_add_command(
@@ -597,6 +620,25 @@ class DiscordGatewayClient(discord.Client):
                 channel_id, thread_id, options, is_admin=_is_admin(interaction.user)
             )
             await _respond(interaction, reply)
+
+        # A message context-menu entry, not a slash command: Discord's
+        # equivalent of Telegram's "reply to a message with /log". Right-click
+        # the message → Apps → Log to wiki.
+        async def log_to_wiki(interaction: discord.Interaction, message: discord.Message) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.log_command(
+                channel_id,
+                thread_id,
+                text=message.content,
+                # Compared HERE, at the boundary: the neutral service is told
+                # only whether the requester authored the target.
+                is_author=interaction.user.id == message.author.id,
+            )
+            # Ephemeral keeps the requester unattributed in the channel, the
+            # property Telegram gets by deleting the command message.
+            await _respond(interaction, reply)
+
+        self.tree.add_command(app_commands.ContextMenu(name=LOG_MENU_LABEL, callback=log_to_wiki))
 
         @self.tree.command(name="issue", description="File an anonymous issue in the bound repo.")
         @app_commands.guild_only()

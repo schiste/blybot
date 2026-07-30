@@ -10,29 +10,52 @@ for.
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any, cast
 
-from blybot.domain.models import ConsentMode, LlmSettings, Scope
+from blybot.domain.models import (
+    ConsentMode,
+    LlmSettings,
+    LogContent,
+    OutboundMessage,
+    Scope,
+)
+from blybot.domain.ports import WikiWriteError
 from blybot.observability import Counters
 from blybot.services import commands as c
 from blybot.services.actions import MAX_ACTIONS, describe_action, parse_action
 from blybot.services.capture import CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
+from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
+from blybot.services.publish import NothingToPublishError
 from blybot.services.repo import GroupRepoService
 from blybot.services.rules import MAX_RULES, parse_rule
 from tests.fakes import (
     FakeClock,
     FakeRepoGateway,
+    FakeSink,
     InMemoryActions,
     InMemoryArchive,
     InMemoryProfiles,
+    SuffixTransform,
 )
 
 _CHANNEL = 555000111
 _SCOPE = Scope("neutral", str(_CHANNEL))
 _TOPIC = Scope("neutral", str(_CHANNEL), "7")
 _CEILING = 4096
+_LOG_CONFIRMATION = OutboundMessage(scope=_SCOPE, text="Published: https://wiki/Page")
+
+
+class _RaisingTransform:
+    """A log_publish stand-in that fails the way the real pipeline can."""
+
+    def __init__(self, error: type[Exception]) -> None:
+        self._error = error
+
+    async def apply(self, _context: object, _step: object, _payload: object) -> object:
+        raise self._error
 
 
 def _directory(store: InMemoryProfiles | None, *, page_suffix: str = "Logs") -> ChannelDirectory:
@@ -834,3 +857,131 @@ async def test_action_reports_a_storage_outage() -> None:
         await service.list_actions(_SCOPE, is_admin=True),
     ]
     assert [r.text for r in results] == [c.REPLY_STORAGE_DOWN] * len(results)
+
+
+# --- anonymous /log (issue #44) -----------------------------------------------
+
+
+def _log_service(
+    *,
+    allowed: set[int] | None = None,
+    store: InMemoryProfiles | None = None,
+    with_engine: bool = True,
+    limit: int = 10,
+    sink_messages: tuple[OutboundMessage, ...] = (_LOG_CONFIRMATION,),
+    transform: object | None = None,
+) -> tuple[CommandService, InMemoryProfiles]:
+    store = store if store is not None else InMemoryProfiles()
+    directory = _directory(store, page_suffix="Logs")
+    engine = ActionEngine(
+        sources={},
+        transforms={"log_publish": cast("Any", transform or SuffixTransform())},
+        sinks={"chat_confirm": FakeSink(messages=sink_messages)},
+        counters=Counters(),
+        clock=FakeClock(),
+    )
+    service = CommandService(
+        directory=directory,
+        groups=GroupPolicy(allowed=allowed if allowed is not None else set()),
+        page_url_for=str,
+        counters=Counters(),
+        engine=engine if with_engine else None,
+        repo_limiter=SlidingWindowLimiter(
+            clock=FakeClock(), limit=limit, window=timedelta(minutes=1)
+        ),
+    )
+    return service, store
+
+
+async def _with_page(service: CommandService) -> None:
+    """Self-service is on whenever a store exists, so a scope must pick its own
+    page before /log will publish — that is the guard, not a test artifact."""
+    await service.directory.set_log_page(_SCOPE, "WikiProject Foo")
+
+
+async def test_log_publishes_and_returns_the_confirmation() -> None:
+    service, store = _log_service()  # no self-service page gate
+    await _with_page(service)
+    result = await service.log_message(
+        _SCOPE, is_author=True, content=LogContent(text="worth keeping")
+    )
+    assert result.ok is True
+    assert result.text == _LOG_CONFIRMATION.text
+    # The only stored state is the page the admin chose — nothing about
+    # the requester or the message author.
+    assert store.profiles[_SCOPE].log_page == "WikiProject Foo/Logs"
+
+
+async def test_log_refuses_a_channel_outside_the_allowlist() -> None:
+    service, _store = _log_service(allowed={999})
+    result = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
+    assert result.text == c.REPLY_NOT_ALLOWED
+    assert result.ok is False
+
+
+async def test_log_fails_closed_when_settings_are_unknown() -> None:
+    """A storage outage must not publish on defaults: the consent policy and
+    target page are both unknown right then."""
+    service, _store = _log_service(store=InMemoryProfiles(fail=True))
+    result = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
+    assert result.text == c.REPLY_LOG_CONFIG_UNAVAILABLE
+    assert result.ok is False
+
+
+async def test_log_requires_a_self_service_scope_to_choose_its_page() -> None:
+    """Never leak a self-service scope's logs onto the operator default."""
+    service, _store = _log_service()  # page_suffix set => self-service on
+    result = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
+    assert result.text == c.REPLY_LOG_NO_PAGE
+    assert result.ok is False
+
+
+async def test_log_honours_the_author_only_consent_policy() -> None:
+    store = InMemoryProfiles()
+    service, _store = _log_service(store=store)
+    await _with_page(service)
+    await service.directory.set_consent(_SCOPE, ConsentMode.AUTHOR_ONLY)
+
+    refused = await service.log_message(_SCOPE, is_author=False, content=LogContent(text="x"))
+    assert refused.text == c.REPLY_LOG_AUTHOR_ONLY
+    assert refused.ok is False
+
+    allowed = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
+    assert allowed.ok is True
+
+
+async def test_log_is_rate_capped() -> None:
+    service, _store = _log_service(limit=1)
+    await _with_page(service)
+    assert (await service.log_message(_SCOPE, is_author=True, content=LogContent(text="a"))).ok
+    second = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="b"))
+    assert second.text == c.REPLY_THROTTLED
+
+
+async def test_log_reports_an_unpublishable_target_and_a_wiki_failure() -> None:
+    nothing, _store = _log_service(transform=_RaisingTransform(NothingToPublishError))
+    await _with_page(nothing)
+    empty = await nothing.log_message(_SCOPE, is_author=True, content=LogContent())
+    assert empty.text == c.REPLY_LOG_NOTHING
+    assert empty.ok is False
+
+    broken, _store2 = _log_service(transform=_RaisingTransform(WikiWriteError))
+    await _with_page(broken)
+    failed = await broken.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
+    assert failed.text == c.REPLY_LOG_WIKI_ERROR
+    assert failed.ok is False
+
+
+async def test_log_without_an_engine_fails_closed() -> None:
+    service, _store = _log_service(with_engine=False)
+    result = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
+    assert result.text == c.REPLY_LOG_OFF_DEPLOY
+    assert result.ok is False
+
+
+async def test_log_with_a_silent_sink_reports_nothing_published() -> None:
+    service, _store = _log_service(sink_messages=())
+    await _with_page(service)
+    result = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
+    assert result.text == c.REPLY_LOG_NOTHING
+    assert result.ok is False

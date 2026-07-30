@@ -269,6 +269,7 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         repo_actions=gateway,
         actions=store if archive is not None else None,
         clock=clock,
+        engine=engine,
         repo_service=(
             GroupRepoService(gateway=gateway, vault=store, directory=directory) if store else None
         ),
@@ -531,8 +532,23 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
     # One engine for every deployment tier, exactly as on Telegram: the
     # registries grow with the features this deployment enables.
     sources: dict[str, Source] = {}
-    transforms: dict[str, Transform] = {}
-    sinks: dict[str, Sink] = {}
+    # The /log pipeline is available on every tier: it publishes the message
+    # it is handed, needing neither the profile store nor the archive.
+    transforms: dict[str, Transform] = {
+        "log_publish": LogPublishTransform(
+            service=LogPublicationService(
+                publisher=publisher,
+                sanitizer=sanitizer,
+                pseudonyms=RandomPseudonymFactory(),
+                clock=clock,
+                target_page=config.log_target_page,
+                edit_summary=config.edit_summary,
+                timestamp_granularity=config.timestamp_granularity,
+            ),
+            page_url_for=config.page_url,
+        )
+    }
+    sinks: dict[str, Sink] = {"chat_confirm": ChatConfirmSink()}
     if store is not None:
         sources["repo_events"] = RepoEventsSource(store=store, vault=store, gateway=repo_gateway)
         transforms["rule_match"] = RuleMatchTransform(counters=counters)
@@ -652,6 +668,7 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
         repo_actions=repo_gateway,
         actions=store if archive is not None else None,
         clock=clock,
+        engine=engine,
         repo_service=(
             GroupRepoService(gateway=repo_gateway, vault=store, directory=directory)
             if store

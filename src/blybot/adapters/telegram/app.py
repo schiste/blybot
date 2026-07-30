@@ -33,6 +33,7 @@ from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES, TelegramTr
 from blybot.domain.ports import StorageError
 from blybot.observability import log_event
 from blybot.services.delivery import message_loop
+from blybot.services.health import log_archive_size, log_heartbeat, log_startup
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -84,8 +85,7 @@ class Maintenance:
             if ticks % self.heartbeat_every_ticks == 0:
                 if self.capture is not None:
                     await self.capture.sweep_retention()
-                if self.archive is not None:
-                    await _archive_heartbeat(self.archive)
+                await log_archive_size(self.archive)
 
     def tick(self, ticks: int) -> None:
         """Sweep expired sessions; prove liveness every Nth tick."""
@@ -94,7 +94,7 @@ class Maintenance:
             self.counters.increment("sessions_expired", expired)
             log_event("session_sweep", "ok", expired=expired)
         if ticks % self.heartbeat_every_ticks == 0:
-            log_event("heartbeat", "ok", **self.counters.snapshot())
+            log_heartbeat(self.counters)
 
 
 @dataclass(eq=False)
@@ -154,7 +154,7 @@ class Lifecycle:
                     transport, self.subscription_scheduler, self.poll_interval_seconds, "sub_tick"
                 )
             )
-        log_event("startup", "ok")
+        log_startup()
 
     async def post_shutdown(self, app: _App) -> None:
         """Stop maintenance, flush pending DM buffers, release the wiki client."""
@@ -176,14 +176,6 @@ class Lifecycle:
         await self.transcription.flush_all()
         await self.release()
         log_event("shutdown", "ok")
-
-
-async def _archive_heartbeat(archive: MessageArchive) -> None:
-    """Report archive growth (v3): rows only, never content."""
-    try:
-        log_event("archive_size", "ok", rows=await archive.total())
-    except StorageError:
-        log_event("archive_size", "error")
 
 
 def build_application(  # noqa: PLR0913 -- one handler bundle per concern

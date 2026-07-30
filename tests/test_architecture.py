@@ -272,3 +272,20 @@ def test_platform_identity_stays_at_its_own_adapter_boundary() -> None:
                 f"{path.relative_to(SRC.parent)} reads {platform} user identity "
                 f"({found.group(0) if found else pattern})"
             )
+
+
+def test_startup_and_liveness_logging_lives_in_one_place() -> None:
+    """Issue #46: each adapter used to re-implement these lines and they drifted.
+
+    Guards the extraction — a new platform must call `services.health`, not
+    copy the loop. Keyed on the event names, so a fresh `log_event("heartbeat"…)`
+    anywhere else fails regardless of how the surrounding code is shaped.
+    """
+    owner = SRC / "services" / "health.py"
+    for event in ("startup", "heartbeat", "archive_size"):
+        emitters = [
+            path.relative_to(SRC.parent)
+            for path in SRC.rglob("*.py")
+            if path != owner and f'log_event("{event}"' in path.read_text(encoding="utf-8")
+        ]
+        assert not emitters, f"{event} is logged outside services/health.py: {emitters}"

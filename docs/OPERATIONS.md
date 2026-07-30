@@ -421,6 +421,35 @@ a `~/<name>.env`.
   | `event=wiki_edit outcome=retry` | maxlag/transient API backoff in progress |
   | `event=wiki_login outcome=error` | BotPassword rejected — check credentials |
 
+### The Discord consent model
+
+Telegram's capture safety rests partly on a *structural* gate: Group Privacy
+mode means the bot cannot see ordinary messages until an operator
+deliberately turns it off. **Discord has no equivalent** — with the Message
+Content Intent the bot already receives every message in every channel it
+can see. So the consent boundary has to be entirely behavioural, and it is
+three things:
+
+1. **Nothing is archived until an admin runs `/capture on` in that channel.**
+   The stored flag defaults to off and there is no row at all for an
+   unconfigured channel, so inviting the bot archives nothing anywhere. The
+   operator's `ALLOWED_GROUP_IDS` allowlist gates it further.
+2. **`/capture on` announces publicly.** Its confirmation is *the* notice to
+   the channel that archiving has started, so it is posted as a normal,
+   permanent channel message — **not** ephemerally to the admin who ran it.
+   Every other Discord reply is ephemeral (that is the privacy-preserving
+   default, and `/issue` and the log context menu depend on it); `/capture`
+   is the deliberate exception, because there the *channel* is the audience.
+   A refusal — not an admin, storage down — still answers privately.
+   `/capture off` is public too: members told it started are told it stopped.
+3. **It re-announces.** Set `CAPTURE_REANNOUNCE_DAYS` and every
+   capture-enabled channel gets a periodic reminder, so consent does not
+   quietly age out as membership changes. Same cadence knob as Telegram.
+
+Authors are recorded only as per-channel pseudonymous labels, computed at the
+adapter boundary before anything crosses inward — the raw Discord user id
+never reaches the archive.
+
 ### Subscription limits
 
 Two independent ceilings bound the digest feature, and they answer different

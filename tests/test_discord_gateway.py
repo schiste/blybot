@@ -253,36 +253,37 @@ async def test_ingest_records_media_and_reply_metadata_in_a_thread() -> None:
 
 async def test_capture_command_rejects_non_admins() -> None:
     gateway, _store, _archive, _capture = _capture_gateway()
-    reply = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=False)
+    reply = (await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=False)).text
     assert reply == cmd.REPLY_NOT_ADMIN
 
 
 async def test_capture_command_reports_when_capture_is_off_on_the_deployment() -> None:
     gateway = _make_gateway(_directory(None), GroupPolicy(allowed=set()))
-    reply = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)
+    reply = (await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)).text
     assert reply == cmd.REPLY_CAPTURE_OFF_DEPLOY
 
 
 async def test_capture_command_refuses_a_channel_outside_the_allowlist() -> None:
     gateway, _store, _archive, _capture = _capture_gateway(allowed={999})
-    reply = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)
+    reply = (await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)).text
     assert reply == cmd.REPLY_NOT_ALLOWED
 
 
 async def test_capture_command_enables_and_disables() -> None:
     gateway, store, _archive, _capture = _capture_gateway()
     on = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)
-    assert on == cmd.REPLY_CAPTURE_ENABLED
+    assert on.text == cmd.REPLY_CAPTURE_ENABLED
+    assert on.ok is True  # drives the PUBLIC announcement in the shell
     assert store.profiles[_SCOPE].capture_enabled is True
     off = await gateway.capture_command(_CHANNEL, None, enabled=False, is_admin=True)
-    assert off == cmd.REPLY_CAPTURE_DISABLED
+    assert off.text == cmd.REPLY_CAPTURE_DISABLED
     assert store.profiles[_SCOPE].capture_enabled is False
 
 
 async def test_capture_command_tombstones_on_a_failed_disable() -> None:
     store = InMemoryProfiles(fail=True)
     gateway, _store, _archive, capture = _capture_gateway(store=store)
-    reply = await gateway.capture_command(_CHANNEL, None, enabled=False, is_admin=True)
+    reply = (await gateway.capture_command(_CHANNEL, None, enabled=False, is_admin=True)).text
     assert reply == cmd.REPLY_STORAGE_DOWN
     assert _SCOPE in capture._denied  # fail-closed until the disable lands
 
@@ -290,7 +291,7 @@ async def test_capture_command_tombstones_on_a_failed_disable() -> None:
 async def test_capture_command_does_not_tombstone_a_failed_enable() -> None:
     store = InMemoryProfiles(fail=True)
     gateway, _store, _archive, capture = _capture_gateway(store=store)
-    reply = await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)
+    reply = (await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)).text
     assert reply == cmd.REPLY_STORAGE_DOWN
     assert _SCOPE not in capture._denied  # a failed enable already fails safe (stays off)
 
@@ -764,7 +765,9 @@ async def test_capture_slash_command_answers_ephemerally() -> None:
     client = build_gateway_client(gateway)
     interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
     await _command(client, "capture").callback(interaction, "on")
-    assert interaction.response.sent == [(cmd.REPLY_CAPTURE_ENABLED, True)]
+    # PUBLIC, not ephemeral: on a platform with no privacy mode this reply is
+    # the channel's only notice that its messages are now archived (#17).
+    assert interaction.response.sent == [(cmd.REPLY_CAPTURE_ENABLED, False)]
 
 
 async def test_setpage_slash_command_answers_ephemerally() -> None:
@@ -1372,3 +1375,77 @@ async def test_log_context_menu_answers_ephemerally_and_compares_authors() -> No
     other = SimpleNamespace(content="not mine", author=SimpleNamespace(id=99))
     await menu.callback(interaction, cast("Any", other))
     assert interaction.response.sent == [(cmd.REPLY_LOG_AUTHOR_ONLY, True)]
+
+
+# --- capture consent: the announcement must be loud (issue #17) ---------------
+
+
+async def test_capture_on_announces_publicly_but_refuses_privately() -> None:
+    """Discord has no privacy mode, so /capture on's confirmation IS the
+    channel's notice that archiving began. Ephemeral would mean only the admin
+    who ran it ever knew — and ephemeral messages are not permanent either."""
+    gateway, _store, _archive, _capture = _capture_gateway()
+    client = build_gateway_client(gateway)
+    channel = SimpleNamespace(id=_CHANNEL)
+
+    interaction = _admin_interaction(channel)
+    await _command(client, "capture").callback(interaction, "on")
+    (text, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is False  # the whole point
+    assert text == cmd.REPLY_CAPTURE_ENABLED
+
+    # Turning it back off is also public: members were told it started, so
+    # they are told it stopped.
+    interaction = _admin_interaction(channel)
+    await _command(client, "capture").callback(interaction, "off")
+    assert interaction.response.sent == [(cmd.REPLY_CAPTURE_DISABLED, False)]
+
+    # A refusal is nobody else's business.
+    outsider = SimpleNamespace(
+        channel=channel,
+        user=SimpleNamespace(guild_permissions=SimpleNamespace(administrator=False)),
+        response=_Response(),
+    )
+    await _command(client, "capture").callback(cast("Any", outsider), "on")
+    assert outsider.response.sent == [(cmd.REPLY_NOT_ADMIN, True)]
+
+
+async def test_capture_is_off_until_an_admin_turns_it_on() -> None:
+    """Adding the bot must archive nothing: the Message Content Intent means it
+    already SEES every message, so the store default is the only gate."""
+    gateway, store, archive, _capture = _capture_gateway()
+    await gateway.ingest_message(
+        channel_id=_CHANNEL,
+        thread_id=None,
+        author_id=7,
+        message_id=1,
+        posted_at=datetime(2026, 7, 20, tzinfo=UTC),
+        text="said before anyone opted in",
+        reply_to=None,
+    )
+    assert archive.messages == []
+    assert store.profiles == {}  # no row at all, not merely a false flag
+
+
+async def test_nothing_is_archived_before_the_announcement_is_sent() -> None:
+    """Ordering matters: the announcement must not trail the first archived
+    message. /capture on writes the flag and returns the notice together, so a
+    message arriving after the toggle is the earliest that can be captured."""
+    gateway, _store, archive, _capture = _capture_gateway()
+    client = build_gateway_client(gateway)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+
+    await _command(client, "capture").callback(interaction, "on")
+    assert archive.messages == []  # nothing retroactive
+    assert interaction.response.sent[0][1] is False  # …and the channel was told
+
+    await gateway.ingest_message(
+        channel_id=_CHANNEL,
+        thread_id=None,
+        author_id=7,
+        message_id=2,
+        posted_at=datetime(2026, 7, 20, tzinfo=UTC),
+        text="after the notice",
+        reply_to=None,
+    )
+    assert [m.text for m in archive.messages] == ["after the notice"]

@@ -639,7 +639,23 @@ Two boundary rules keep it that way:
   Control characters are replaced rather than dropped, leaving the tampering
   visible.
 
-### 22.5 Authorization model (issue #27)
+### 22.5 Consent on a platform with no privacy gate (issue #17)
+
+Capture is "opt-in, loud, reversible" (R-v3.1) on every platform, but the
+*loud* part is carried differently. Telegram has a structural gate (Group
+Privacy mode) plus the in-chat announcement; Discord has only the
+announcement, because the Message Content Intent means the bot already
+receives every message.
+
+So on Discord the announcement is load-bearing, and that inverts the
+adapter's usual rule: slash replies are ephemeral by default because a
+public response attributes the invocation to its caller (which would
+deanonymize `/issue` and the log context menu), but `/capture on` **must**
+be public — the channel, not the admin, is the audience, and an ephemeral
+message is not permanent either. `CommandResult.ok` is what lets one
+adapter make that split: announce on success, refuse privately.
+
+### 22.6 Authorization model (issue #27)
 
 Authorization is **checked live at the moment of the privileged action and
 never stored**. Each platform proves it its own way — Telegram

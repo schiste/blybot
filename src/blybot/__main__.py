@@ -712,6 +712,10 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
     )
 
     async def release_clients() -> None:
+        # Flush debounced DM lines before the publisher closes, or the last
+        # burst of a private discussion is lost on shutdown (as Telegram's
+        # Lifecycle already does).
+        await transcription.flush_all()
         await publisher.aclose()
         await repo_gateway.aclose()
         if llm_client is not None:

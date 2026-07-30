@@ -38,6 +38,12 @@ from typing import TYPE_CHECKING, Final
 from blybot.domain.models import CommandResult
 from blybot.domain.ports import IssueTrackerError, StorageError
 from blybot.observability import log_event
+from blybot.services.actions import (
+    MAX_ACTIONS,
+    ActionParseError,
+    describe_action,
+    parse_action,
+)
 from blybot.services.directory import (
     PageNotAllowedError,
     SelfServiceUnavailableError,
@@ -58,7 +64,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from blybot.domain.models import LlmSettings, Scope
-    from blybot.domain.ports import RepoActions, TokenVault
+    from blybot.domain.ports import ActionStore, Clock, RepoActions, TokenVault
     from blybot.observability import Counters
     from blybot.services.capture import CaptureService
     from blybot.services.directory import ChannelDirectory
@@ -124,6 +130,30 @@ REPLY_PAT_STORE_FAILED: Final = (
 REPLY_PAT_SAVED: Final = (
     "Token validated, encrypted and stored. /issue and /repo are live for this "
     "scope; /revoke discards the token."
+)
+REPLY_ACTION_USAGE: Final = (
+    "Usage:\n"
+    "/action add <schedule> <recipe> [key=value …]\n"
+    "/action remove <id>\n"
+    "/action list\n"
+    "Schedules: every:<N>h · daily@HH:MM · weekly@<dow>.HH:MM (UTC). "
+    "Recipes: summarize, talking_points, stats, stats_narrative, prompt:<template>. "
+    "Params: window=24h|7d · page=<title> · model=default|large · "
+    "lang=<code> · temp=<0..1>"
+)
+REPLY_ACTIONS_OFF_DEPLOY: Final = (
+    "Scheduled analyses aren't enabled on this deployment; ask the operator."
+)
+REPLY_ACTION_ADDED: Final = "Scheduled for this scope: {desc}"
+REPLY_ACTION_REMOVED: Final = "Action {id} removed from this scope."
+REPLY_ACTION_UNKNOWN: Final = "No action {id} at this scope. Use /action list to see them."
+REPLY_ACTIONS_NONE: Final = (
+    "No scheduled actions for this scope. Add one, e.g. /action add daily@06:00 summarize"
+)
+REPLY_ACTIONS_LIST: Final = "Scheduled actions for this scope:\n{lines}"
+REPLY_ACTIONS_FULL: Final = (
+    "You already have the maximum of {max} actions at this scope; "
+    "remove one with /action remove <id>."
 )
 REPLY_THROTTLED: Final = "Rate limit reached — please try again in a minute."
 REPLY_ISSUE_USAGE: Final = "Describe the issue after the command: /issue something is broken"
@@ -218,6 +248,11 @@ class CommandService:
     # None disables those commands / their throttling respectively.
     repo_service: GroupRepoService | None = None
     repo_limiter: SlidingWindowLimiter | None = None
+    # /action: the schedule store and the clock that stamps a new action's
+    # first due time. Both None on a deployment without scheduled analyses,
+    # in which case /action fails closed to the off-deployment result.
+    actions: ActionStore | None = None
+    clock: Clock | None = None
     # Analysis-enabled deployments only: the /llm defaults and hard cap.
     # ``llm_defaults`` is None when LLM analyses are off, in which case
     # /llm fails closed to the off-deployment result. The ceiling default
@@ -441,6 +476,80 @@ class CommandService:
     def _repo_allowed(self, kind: str, scope: Scope) -> bool:
         """Whether this scope is under its per-command repo rate cap."""
         return self.repo_limiter is None or self.repo_limiter.allow(kind, int(scope.channel))
+
+    async def action(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
+        """Add, remove, or list this scope's scheduled analyses (admins only).
+
+        The argv-shaped surface, mirroring :meth:`rule`. Platforms with
+        native subcommands call :meth:`add_action`, :meth:`remove_action`
+        or :meth:`list_actions` directly.
+        """
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        sub = tokens[0].lower() if tokens else ""
+        if sub == "add" and len(tokens) > 1:
+            return await self.add_action(scope, is_admin=True, spec=" ".join(tokens[1:]))
+        if sub == "remove" and len(tokens) == 2:  # noqa: PLR2004 -- "remove <id>"
+            return await self.remove_action(scope, is_admin=True, action_id=tokens[1])
+        if sub == "list":
+            return await self.list_actions(scope, is_admin=True)
+        return CommandResult(REPLY_ACTION_USAGE, ok=False)
+
+    async def add_action(self, scope: Scope, *, is_admin: bool, spec: str) -> CommandResult:
+        """Schedule one recurring analysis for this scope (admins only)."""
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        store, clock = self.actions, self.clock
+        if store is None or clock is None:
+            return CommandResult(REPLY_ACTIONS_OFF_DEPLOY, ok=False)
+        try:
+            parsed = parse_action(spec, now_iso=clock.now().isoformat())
+        except ActionParseError as error:
+            return CommandResult(str(error), ok=False)
+        try:
+            current = await store.get_actions(scope)
+            if len(current) >= MAX_ACTIONS:
+                return CommandResult(REPLY_ACTIONS_FULL.format(max=MAX_ACTIONS), ok=False)
+            await store.set_actions(scope, (*current, parsed))
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        self.counters.increment("actions_configured")
+        log_event("profile_update", "ok")
+        return CommandResult(REPLY_ACTION_ADDED.format(desc=describe_action(parsed)))
+
+    async def remove_action(self, scope: Scope, *, is_admin: bool, action_id: str) -> CommandResult:
+        """Drop one scheduled analysis by id (admins only)."""
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        store = self.actions
+        if store is None:
+            return CommandResult(REPLY_ACTIONS_OFF_DEPLOY, ok=False)
+        try:
+            current = await store.get_actions(scope)
+            kept = tuple(spec for spec in current if spec.action_id != action_id)
+            if len(kept) == len(current):
+                return CommandResult(REPLY_ACTION_UNKNOWN.format(id=action_id), ok=False)
+            await store.set_actions(scope, kept)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        log_event("profile_update", "ok")
+        return CommandResult(REPLY_ACTION_REMOVED.format(id=action_id))
+
+    async def list_actions(self, scope: Scope, *, is_admin: bool) -> CommandResult:
+        """List this scope's scheduled analyses (admins only, read-only)."""
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        store = self.actions
+        if store is None:
+            return CommandResult(REPLY_ACTIONS_OFF_DEPLOY, ok=False)
+        try:
+            current = await store.get_actions(scope)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        if not current:
+            return CommandResult(REPLY_ACTIONS_NONE, ok=False)
+        lines = "\n".join(describe_action(spec) for spec in current)
+        return CommandResult(REPLY_ACTIONS_LIST.format(lines=lines))
 
     async def events(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
         """Toggle notifications from a flat ``/events`` token list (admins only).

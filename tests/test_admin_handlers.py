@@ -853,8 +853,9 @@ def make_action_handlers(
 ) -> tuple[a.AdminHandlers, InMemoryActions]:
     handlers = make_handlers(store)
     actions = InMemoryActions()
-    handlers.actions = actions
-    handlers.clock = FakeClock()
+    # /action's store and clock now live on the shared CommandService.
+    handlers.commands.actions = actions
+    handlers.commands.clock = FakeClock()
     return handlers, actions
 
 
@@ -862,7 +863,7 @@ async def test_action_without_deployment_support_says_so() -> None:
     handlers = make_handlers()  # actions/clock left unset
     context, bot = admin_context(args=["list"])
     await handlers.on_action(command("/action list"), context)
-    assert tg.sent_texts(bot) == [a.REPLY_ACTIONS_OFF_DEPLOY]
+    assert tg.sent_texts(bot) == [cmd.REPLY_ACTIONS_OFF_DEPLOY]
 
 
 async def test_action_usage_on_bad_subcommands() -> None:
@@ -870,7 +871,7 @@ async def test_action_usage_on_bad_subcommands() -> None:
     for args in ([], ["add"], ["remove"], ["frobnicate"]):
         context, bot = admin_context(args=args)
         await handlers.on_action(command("/action"), context)
-        assert tg.sent_texts(bot) == [a.REPLY_ACTION_USAGE]
+        assert tg.sent_texts(bot) == [cmd.REPLY_ACTION_USAGE]
 
 
 async def test_action_add_stores_a_primed_spec_and_describes_it() -> None:
@@ -883,7 +884,7 @@ async def test_action_add_stores_a_primed_spec_and_describes_it() -> None:
     assert spec.trigger.schedule is not None
     assert spec.last_run == FakeClock().now()  # primed at creation
     reply = tg.sent_texts(bot)[0]
-    assert reply.startswith("Scheduled for the group default:")
+    assert reply.startswith("Scheduled for this scope:")
     assert "daily@06:00" in reply
 
 

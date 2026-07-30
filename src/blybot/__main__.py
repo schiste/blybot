@@ -266,6 +266,8 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         capture_service=capture_service,
         vault=store,
         repo_actions=gateway,
+        actions=store if archive is not None else None,
+        clock=clock,
         repo_service=(
             GroupRepoService(gateway=gateway, vault=store, directory=directory) if store else None
         ),
@@ -361,8 +363,6 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         commands=commands,
         archive=archive,
         capture_service=capture_service,
-        actions=store if analysis_handlers is not None else None,
-        clock=clock,
     )
 
     notifier = RepoNotifier(store=store, groups=group_policy, engine=engine) if store else None
@@ -501,9 +501,8 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
     """Build the Discord object graph and start the gateway client.
 
     Reuses every neutral service (directory, capture, engine, subscription
-    scheduler, repo notifier, archive, store) — only the transport and the
-    inbound event shell are Discord-specific. Scheduled analyses remain
-    deferred: the Discord admin surface does not yet configure them.
+    scheduler, repo notifier, action scheduler, archive, store) — only the
+    transport and the inbound event shell are Discord-specific.
     """
     counters = Counters()
     clock = SystemClock()
@@ -625,6 +624,21 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
                 "sub_tick",
             )
         )
+    if store is not None and archive is not None:
+        # Scheduled analyses need the archive to read from; /action configures
+        # them and this collector executes them, closing #41's Discord row.
+        collectors.append(
+            (
+                ActionScheduler(
+                    store=store,
+                    engine=engine,
+                    groups=group_policy,
+                    clock=clock,
+                    counters=counters,
+                ),
+                "action_tick",
+            )
+        )
     if store is not None:
         # Telegram drives the notifier through its bespoke Lifecycle hook;
         # here it is just another MessageCollector on the shared delivery
@@ -654,6 +668,8 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
         capture_service=capture_service,
         vault=store,
         repo_actions=repo_gateway,
+        actions=store if archive is not None else None,
+        clock=clock,
         repo_service=(
             GroupRepoService(gateway=repo_gateway, vault=store, directory=directory)
             if store

@@ -14,13 +14,20 @@ from datetime import timedelta
 from blybot.domain.models import ConsentMode, LlmSettings, Scope
 from blybot.observability import Counters
 from blybot.services import commands as c
+from blybot.services.actions import MAX_ACTIONS, describe_action, parse_action
 from blybot.services.capture import CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.repo import GroupRepoService
 from blybot.services.rules import MAX_RULES, parse_rule
-from tests.fakes import FakeClock, FakeRepoGateway, InMemoryArchive, InMemoryProfiles
+from tests.fakes import (
+    FakeClock,
+    FakeRepoGateway,
+    InMemoryActions,
+    InMemoryArchive,
+    InMemoryProfiles,
+)
 
 _CHANNEL = 555000111
 _SCOPE = Scope("neutral", str(_CHANNEL))
@@ -730,3 +737,100 @@ async def test_issue_and_repo_are_rate_capped_per_command() -> None:
     # /repo has its own bucket, so it is unaffected by /issue's cap.
     assert (await service.repo_summary(_SCOPE)).ok is True
     assert (await service.repo_summary(_SCOPE)).text == c.REPLY_THROTTLED
+
+
+# --- scheduled analyses: /action (issue #43, increment 3) ---------------------
+
+
+def _action_service(*, with_actions: bool = True) -> tuple[CommandService, InMemoryActions]:
+    store = InMemoryProfiles()
+    actions = InMemoryActions()
+    service = CommandService(
+        directory=_directory(store),
+        groups=GroupPolicy(allowed=set()),
+        page_url_for=str,
+        counters=Counters(),
+        actions=actions if with_actions else None,
+        clock=FakeClock() if with_actions else None,
+    )
+    return service, actions
+
+
+async def test_action_rejects_non_admins() -> None:
+    service, actions = _action_service()
+    results = [
+        await service.action(_SCOPE, is_admin=False, tokens=["list"]),
+        await service.add_action(_SCOPE, is_admin=False, spec="daily@06:00 summarize"),
+        await service.remove_action(_SCOPE, is_admin=False, action_id="abcd"),
+        await service.list_actions(_SCOPE, is_admin=False),
+    ]
+    assert [r.text for r in results] == [c.REPLY_NOT_ADMIN] * len(results)
+    assert actions.actions == {}
+
+
+async def test_action_reports_an_unscheduled_deployment() -> None:
+    service, _actions = _action_service(with_actions=False)
+    results = [
+        await service.add_action(_SCOPE, is_admin=True, spec="daily@06:00 summarize"),
+        await service.remove_action(_SCOPE, is_admin=True, action_id="abcd"),
+        await service.list_actions(_SCOPE, is_admin=True),
+    ]
+    assert [r.text for r in results] == [c.REPLY_ACTIONS_OFF_DEPLOY] * len(results)
+
+
+async def test_action_dispatches_add_remove_and_list() -> None:
+    service, actions = _action_service()
+    added = await service.action(_SCOPE, is_admin=True, tokens=["add", "daily@06:00", "summarize"])
+    (spec,) = actions.actions[_SCOPE]
+    assert added.text == c.REPLY_ACTION_ADDED.format(desc=describe_action(spec))
+    assert spec.last_run == FakeClock().now()  # primed so it isn't instantly due
+
+    listing = await service.action(_SCOPE, is_admin=True, tokens=["list"])
+    assert listing.text.startswith("Scheduled actions for this scope:")
+    assert spec.action_id in listing.text
+
+    removed = await service.action(_SCOPE, is_admin=True, tokens=["remove", spec.action_id])
+    assert removed.text == c.REPLY_ACTION_REMOVED.format(id=spec.action_id)
+    assert actions.actions[_SCOPE] == ()
+
+
+async def test_action_usage_covers_every_bad_subcommand() -> None:
+    service, _actions = _action_service()
+    for tokens in ([], ["add"], ["remove"], ["remove", "a", "b"], ["frobnicate"]):
+        result = await service.action(_SCOPE, is_admin=True, tokens=list(tokens))
+        assert result.text == c.REPLY_ACTION_USAGE
+        assert result.ok is False
+
+
+async def test_action_surfaces_parse_errors_and_the_cap() -> None:
+    service, actions = _action_service()
+    bad = await service.add_action(_SCOPE, is_admin=True, spec="hourly summarize")
+    assert "Unknown schedule" in bad.text
+
+    actions.actions[_SCOPE] = tuple(
+        parse_action("daily@06:00 summarize") for _ in range(MAX_ACTIONS)
+    )
+    full = await service.add_action(_SCOPE, is_admin=True, spec="daily@07:00 summarize")
+    assert full.text == c.REPLY_ACTIONS_FULL.format(max=MAX_ACTIONS)
+    assert len(actions.actions[_SCOPE]) == MAX_ACTIONS
+
+
+async def test_action_reports_the_empty_and_unknown_cases() -> None:
+    service, _actions = _action_service()
+    empty = await service.list_actions(_SCOPE, is_admin=True)
+    assert empty.text == c.REPLY_ACTIONS_NONE
+    assert empty.ok is False
+
+    unknown = await service.remove_action(_SCOPE, is_admin=True, action_id="nope")
+    assert unknown.text == c.REPLY_ACTION_UNKNOWN.format(id="nope")
+
+
+async def test_action_reports_a_storage_outage() -> None:
+    service, actions = _action_service()
+    actions.fail = True
+    results = [
+        await service.add_action(_SCOPE, is_admin=True, spec="daily@06:00 summarize"),
+        await service.remove_action(_SCOPE, is_admin=True, action_id="abcd"),
+        await service.list_actions(_SCOPE, is_admin=True),
+    ]
+    assert [r.text for r in results] == [c.REPLY_STORAGE_DOWN] * len(results)

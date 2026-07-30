@@ -217,8 +217,9 @@ async def test_capture_wiring_schedules_actions_on_the_tick(
     lifecycle = seen["lifecycle"]
     assert lifecycle.scheduler is not None
     assert lifecycle.scheduler.engine is seen["analysis_handlers"].analysis.engine
-    assert seen["admin_handlers"].actions is not None
-    assert seen["admin_handlers"].clock is not None
+    # /action is configured through the shared CommandService now.
+    assert seen["admin_handlers"].commands.actions is not None
+    assert seen["admin_handlers"].commands.clock is not None
     await lifecycle.release()
 
 

@@ -14,10 +14,12 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import Session
+from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from blybot.domain.models import Scope
+    from blybot.domain.models import OutboundMessage, Scope
     from blybot.domain.ports import Clock, PseudonymFactory
+    from blybot.observability import Counters
 
 _MINT_ATTEMPTS: Final = 32
 
@@ -98,3 +100,31 @@ class SessionRegistry:
     def _store(self, scope: Scope, session: Session) -> Session:
         self._sessions[scope] = session
         return session
+
+
+@dataclass(eq=False)
+class SessionSweeper:
+    """A :class:`~blybot.services.delivery.MessageCollector` that only evicts.
+
+    :meth:`SessionRegistry.peek` already expires a session logically, so an
+    unswept registry keeps *behaving* correctly — but the dict only ever
+    grows, and ``_mint`` draws its collision-avoidance set from every entry
+    it holds, live or dead. Left unswept long enough, minting degrades toward
+    reusing a pseudonym, and two concurrent discussions could share a section
+    heading — the one thing ``_mint`` exists to prevent.
+
+    Telegram sweeps from its maintenance tick. This exists so a platform with
+    no tick of its own (Discord) gets the same eviction through the shared
+    delivery loop instead of leaking. Returns no messages, ever.
+    """
+
+    sessions: SessionRegistry
+    counters: Counters
+
+    async def collect(self) -> list[OutboundMessage]:
+        """Drop expired sessions, reporting the count exactly as Telegram does."""
+        expired = self.sessions.sweep()
+        if expired:
+            self.counters.increment("sessions_expired", expired)
+            log_event("session_sweep", "ok", expired=expired)
+        return []

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
+import pytest
+
 from blybot.domain.models import Scope
-from blybot.services.sessions import SessionRegistry
+from blybot.observability import Counters
+from blybot.services.sessions import SessionRegistry, SessionSweeper
 from tests.fakes import FakeClock, ScriptedPseudonyms, SequentialPseudonyms
 
 TTL = timedelta(minutes=45)
@@ -135,3 +139,32 @@ def test_exhausted_redraw_budget_degrades_to_a_repeat() -> None:
     )
     registry.touch(dm(1))
     assert registry.touch(dm(2)).anchor == "Only"
+
+
+async def test_the_sweeper_evicts_and_reports_exactly_like_telegrams_tick(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression guard: peek() expires a session logically, so an unswept
+    registry keeps BEHAVING right while the dict grows — and _mint draws its
+    collision set from every entry it holds, live or dead. Discord has no
+    maintenance tick, so without this sweeper minting degrades toward reusing
+    a pseudonym and two discussions could share a section heading."""
+    clock = FakeClock()
+    registry = SessionRegistry(
+        pseudonyms=SequentialPseudonyms(), clock=clock, ttl=timedelta(minutes=30)
+    )
+    counters = Counters()
+    sweeper = SessionSweeper(sessions=registry, counters=counters)
+
+    registry.touch(Scope("discord", "1"))
+    registry.touch(Scope("discord", "2"))
+    assert await sweeper.collect() == []  # never emits messages
+    assert len(registry._sessions) == 2  # nothing expired yet
+    assert counters.snapshot().get("sessions_expired") is None  # and nothing logged
+
+    clock.advance(timedelta(hours=1))
+    with caplog.at_level(logging.INFO, logger="blybot"):
+        assert await sweeper.collect() == []
+    assert registry._sessions == {}  # the dict actually shrinks
+    assert counters.snapshot()["sessions_expired"] == 2
+    assert any("event=session_sweep outcome=ok expired=2" in m for m in caplog.messages)

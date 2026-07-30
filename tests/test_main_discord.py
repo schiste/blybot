@@ -70,7 +70,7 @@ async def test_discord_full_deployment_wires_every_neutral_service(
 
     collectors = _collectors(client)
     # Digests deliver and repo notifications poll; reminders are off by default.
-    assert set(collectors) == {"sub_tick", "action_tick", "repo_notify"}
+    assert set(collectors) == {"sub_tick", "action_tick", "repo_notify", "session_sweep"}
     engine = collectors["sub_tick"].engine
     assert collectors["repo_notify"].engine is engine
     assert (
@@ -106,7 +106,9 @@ async def test_discord_store_only_deployment_has_no_capture(
     assert gateway.analysis is None  # analyses need the archive too
     # Repo notifications need only the profile store, so they still run here.
     collectors = _collectors(client)
-    assert set(collectors) == {"repo_notify"}
+    # session_sweep runs on every tier: DM transcription works without a store,
+    # so expired sessions must be evicted regardless (see SessionSweeper).
+    assert set(collectors) == {"repo_notify", "session_sweep"}
     engine = collectors["repo_notify"].engine
     assert set(engine.sources) == {"repo_events"}
     # log_publish/chat_confirm are on every tier: /log needs neither store nor
@@ -144,7 +146,13 @@ async def test_discord_reannounce_cadence_adds_the_reminder(
     )
     client = cast("DiscordGatewayClient", seen["client"])
     collectors = _collectors(client)
-    assert set(collectors) == {"sub_tick", "action_tick", "repo_notify", "capture_remind"}
+    assert set(collectors) == {
+        "sub_tick",
+        "action_tick",
+        "repo_notify",
+        "session_sweep",
+        "capture_remind",
+    }
     assert collectors["capture_remind"].cadence.days == 30
     await seen["release"]()
 

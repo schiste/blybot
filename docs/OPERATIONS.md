@@ -101,7 +101,9 @@ The slash commands the gateway registers:
   `/reset`, `/revoke`, `/llm show|set|reset`, `/setrepo owner/repo`,
   `/settoken`, `/events on|off`, `/rule add|remove|clear`, `/rules`;
 - **any member** — `/issue <description>` files anonymously in the bound
-  repo, `/repo` shows its open items;
+  repo, `/repo` shows its open items, and **Apps → Log to wiki** on any
+  message publishes it unattributed (a message context menu, Discord's
+  equivalent of Telegram's reply-`/log`);
 - **on-demand analyses** — `/summarize`, `/stats`, `/talkingpoints`
   (deferred first: a chunked run outlives Discord's 3-second deadline), and
   `/action add|remove|list` to schedule recurring ones;

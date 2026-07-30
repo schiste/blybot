@@ -77,11 +77,11 @@ async def test_discord_full_deployment_wires_every_neutral_service(
         collectors["action_tick"].engine is engine
     )  # scheduled analyses too  # one engine for the deployment
     assert set(engine.sources) == {"archive_window", "repo_events"}
-    assert set(engine.transforms) == {"prompt", "stats", "rule_match"}
+    assert set(engine.transforms) == {"prompt", "stats", "rule_match", "log_publish"}
     # The wiki_section sink lets the on-demand analyses publish to the wiki,
     # exactly like Telegram; the reply sink stays for scheduled digest DMs and
     # chat_message carries the rule-matched repo events.
-    assert set(engine.sinks) == {"wiki_section", "reply", "chat_message"}
+    assert set(engine.sinks) == {"wiki_section", "reply", "chat_message", "chat_confirm"}
     assert gateway.analysis.engine is engine  # analyses run through this engine
 
     # The bootstrap closure covers all three stores.
@@ -109,8 +109,10 @@ async def test_discord_store_only_deployment_has_no_capture(
     assert set(collectors) == {"repo_notify"}
     engine = collectors["repo_notify"].engine
     assert set(engine.sources) == {"repo_events"}
-    assert set(engine.transforms) == {"rule_match"}
-    assert set(engine.sinks) == {"chat_message"}
+    # log_publish/chat_confirm are on every tier: /log needs neither store nor
+    # archive, it publishes the message it is handed.
+    assert set(engine.transforms) == {"rule_match", "log_publish"}
+    assert set(engine.sinks) == {"chat_message", "chat_confirm"}
 
     # bootstrap runs only the profile store (archive/subs were never built).
     await cast("Any", client._on_setup).keywords["bootstrap"]()

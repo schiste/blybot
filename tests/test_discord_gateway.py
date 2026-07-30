@@ -32,6 +32,7 @@ from blybot.domain.models import (
     OutboundMessage,
     Schedule,
     Scope,
+    TimestampGranularity,
 )
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
@@ -43,9 +44,15 @@ from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
 from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
+from blybot.services.publish import (
+    ChatConfirmSink,
+    LogPublicationService,
+    LogPublishTransform,
+)
 from blybot.services.repo import GroupRepoService
 from tests.fakes import (
     FakeClock,
+    FakePublisher,
     FakeRepoGateway,
     FakeSink,
     FakeSource,
@@ -53,6 +60,8 @@ from tests.fakes import (
     InMemoryArchive,
     InMemoryProfiles,
     InMemorySubscriptions,
+    PassthroughSanitizer,
+    SequentialPseudonyms,
     SuffixTransform,
 )
 
@@ -619,7 +628,9 @@ def _command(client: DiscordGatewayClient, name: str) -> Any:
 def test_build_registers_every_slash_command() -> None:
     gateway, _store, _archive, _capture = _capture_gateway()
     client = build_gateway_client(gateway)
-    names = sorted(command.name for command in client.tree.get_commands())
+    # Context menus share the tree with slash commands; split them out.
+    entries = client.tree.get_commands()
+    names = sorted(c.name for c in entries if not isinstance(c, discord.app_commands.ContextMenu))
     assert names == [
         "action",
         "capture",
@@ -642,6 +653,10 @@ def test_build_registers_every_slash_command() -> None:
         "talkingpoints",
         "unsubscribe",
     ]
+    # /log is a message context menu, not a slash command — Discord's
+    # equivalent of Telegram's reply-to-a-message gesture.
+    menus = [c for c in entries if isinstance(c, discord.app_commands.ContextMenu)]
+    assert [m.name for m in menus] == [gw.LOG_MENU_LABEL]
     # /action and /rule are groups: Discord routes their subcommands natively.
     (actions,) = [c for c in client.tree.get_commands() if c.name == "action"]
     assert sorted(sub.name for sub in cast("Any", actions).commands) == ["add", "list", "remove"]
@@ -1272,3 +1287,88 @@ async def test_action_slash_subcommands_answer_ephemerally() -> None:
     interaction = _admin_interaction(channel)
     await leaves["remove"].callback(interaction, spec.action_id)
     assert interaction.response.sent == [(cmd.REPLY_ACTION_REMOVED.format(id=spec.action_id), True)]
+
+
+# --- anonymous /log via the message context menu (issue #44) -----------------
+
+
+def _log_gateway() -> tuple[DiscordGateway, InMemoryProfiles, FakePublisher]:
+    store = InMemoryProfiles()
+    publisher = FakePublisher()
+    directory = _directory(store)
+    groups = GroupPolicy(allowed=set())
+    engine = ActionEngine(
+        sources={},
+        transforms={
+            "log_publish": LogPublishTransform(
+                service=LogPublicationService(
+                    publisher=publisher,
+                    sanitizer=PassthroughSanitizer(),
+                    pseudonyms=SequentialPseudonyms(),
+                    clock=FakeClock(),
+                    target_page="Project:Log",
+                    edit_summary="Log entry",
+                    timestamp_granularity=TimestampGranularity.NONE,
+                ),
+                page_url_for=str,
+            )
+        },
+        sinks={"chat_confirm": ChatConfirmSink()},
+        counters=Counters(),
+        clock=FakeClock(),
+    )
+    commands = CommandService(
+        directory=directory,
+        groups=groups,
+        page_url_for=str,
+        counters=Counters(),
+        engine=engine,
+        repo_limiter=SlidingWindowLimiter(clock=FakeClock(), limit=10, window=timedelta(minutes=1)),
+    )
+    gateway = DiscordGateway(directory=directory, groups=groups, commands=commands)
+    return gateway, store, publisher
+
+
+async def test_log_command_publishes_the_target_text() -> None:
+    gateway, _store, publisher = _log_gateway()
+    await gateway.directory.set_log_page(_SCOPE, "WikiProject Foo")
+    reply = await gateway.log_command(_CHANNEL, None, text="worth keeping", is_author=True)
+    assert "WikiProject Foo" in reply
+    assert "worth keeping" in publisher.started[0][2]
+
+
+async def test_log_command_honours_author_only_consent() -> None:
+    gateway, _store, publisher = _log_gateway()
+    await gateway.directory.set_log_page(_SCOPE, "WikiProject Foo")
+    await gateway.directory.set_consent(_SCOPE, ConsentMode.AUTHOR_ONLY)
+    reply = await gateway.log_command(_CHANNEL, None, text="someone else's", is_author=False)
+    assert reply == cmd.REPLY_LOG_AUTHOR_ONLY
+    assert publisher.wrote_nothing
+
+
+async def test_log_context_menu_answers_ephemerally_and_compares_authors() -> None:
+    """The requester stays unattributed: a context menu posts no message at
+    all, so unlike Telegram there is nothing to delete afterwards."""
+    gateway, _store, publisher = _log_gateway()
+    await gateway.directory.set_log_page(_SCOPE, "WikiProject Foo")
+    client = build_gateway_client(gateway)
+    (menu,) = [
+        c for c in client.tree.get_commands() if isinstance(c, discord.app_commands.ContextMenu)
+    ]
+
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    interaction.user = SimpleNamespace(id=7, guild_permissions=None)
+    target = SimpleNamespace(content="published verbatim", author=SimpleNamespace(id=7))
+    await menu.callback(interaction, cast("Any", target))
+    (content, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is True
+    assert "WikiProject Foo" in content
+    assert "published verbatim" in publisher.started[0][2]
+
+    # A different author is refused under author_only consent.
+    await gateway.directory.set_consent(_SCOPE, ConsentMode.AUTHOR_ONLY)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    interaction.user = SimpleNamespace(id=7, guild_permissions=None)
+    other = SimpleNamespace(content="not mine", author=SimpleNamespace(id=99))
+    await menu.callback(interaction, cast("Any", other))
+    assert interaction.response.sent == [(cmd.REPLY_LOG_AUTHOR_ONLY, True)]

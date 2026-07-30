@@ -35,8 +35,8 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
-from blybot.domain.models import CommandResult
-from blybot.domain.ports import IssueTrackerError, StorageError
+from blybot.domain.models import CommandResult, ConsentMode
+from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 from blybot.observability import log_event
 from blybot.services.actions import (
     MAX_ACTIONS,
@@ -51,6 +51,7 @@ from blybot.services.directory import (
 )
 from blybot.services.feedback import CONFIRMATION_TEMPLATE
 from blybot.services.llmconf import LlmParseError, describe_llm, parse_llm_args
+from blybot.services.publish import NothingToPublishError, log_action
 from blybot.services.repo import NoRepoBoundError, NoTokenError
 from blybot.services.rules import (
     MAX_RULES,
@@ -63,11 +64,12 @@ from blybot.services.rules import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from blybot.domain.models import LlmSettings, Scope
+    from blybot.domain.models import LlmSettings, LogContent, Scope
     from blybot.domain.ports import ActionStore, Clock, RepoActions, TokenVault
     from blybot.observability import Counters
     from blybot.services.capture import CaptureService
-    from blybot.services.directory import ChannelDirectory
+    from blybot.services.directory import ChannelDirectory, ChannelSettings
+    from blybot.services.engine import ActionEngine
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.repo import GroupRepoService
 
@@ -131,6 +133,19 @@ REPLY_PAT_SAVED: Final = (
     "Token validated, encrypted and stored. /issue and /repo are live for this "
     "scope; /revoke discards the token."
 )
+REPLY_LOG_CONFIG_UNAVAILABLE: Final = (
+    "I can't confirm this chat's settings right now, so I won't publish. Try again shortly."
+)
+REPLY_LOG_NO_PAGE: Final = (
+    "No log page is set for this scope. An admin needs to run /setpage <page path> here first. "
+    "Nothing was published."
+)
+REPLY_LOG_AUTHOR_ONLY: Final = (
+    "This chat's consent policy only lets authors publish their own messages."
+)
+REPLY_LOG_NOTHING: Final = "There's nothing publishable in that message."
+REPLY_LOG_OFF_DEPLOY: Final = "Publishing isn't enabled on this deployment; ask the operator."
+REPLY_LOG_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see details in the logs."
 REPLY_ACTION_USAGE: Final = (
     "Usage:\n"
     "/action add <schedule> <recipe> [key=value …]\n"
@@ -253,6 +268,9 @@ class CommandService:
     # in which case /action fails closed to the off-deployment result.
     actions: ActionStore | None = None
     clock: Clock | None = None
+    # /log publishes through the action engine; None on a deployment that
+    # never publishes (the engine is always built, so this is for tests).
+    engine: ActionEngine | None = None
     # Analysis-enabled deployments only: the /llm defaults and hard cap.
     # ``llm_defaults`` is None when LLM analyses are off, in which case
     # /llm fails closed to the off-deployment result. The ceiling default
@@ -476,6 +494,67 @@ class CommandService:
     def _repo_allowed(self, kind: str, scope: Scope) -> bool:
         """Whether this scope is under its per-command repo rate cap."""
         return self.repo_limiter is None or self.repo_limiter.allow(kind, int(scope.channel))
+
+    async def log_message(
+        self, scope: Scope, *, is_author: bool, content: LogContent
+    ) -> CommandResult:
+        """Publish one message's content to this scope's wiki page, unattributed.
+
+        The shared core of ``/log``: the fail-closed guards, the consent
+        policy, the rate cap, and the publish pipeline. Deliberately **not**
+        admin-gated — any member may publish, which is why the guards matter.
+
+        ``is_author`` is resolved by the adapter (the requester authored the
+        target), never here: comparing raw platform identities is exactly the
+        work that must stay at the boundary. Whether the *requester* is
+        hidden afterwards is also the adapter's job, and platform-shaped —
+        Telegram deletes the command message, Discord never creates one.
+        """
+        if not self.groups.is_allowed(scope):
+            log_event("log_command", "ignored")
+            return CommandResult(REPLY_NOT_ALLOWED, ok=False)
+        engine = self.engine
+        if engine is None:
+            return CommandResult(REPLY_LOG_OFF_DEPLOY, ok=False)
+        # resolve() never raises: a storage outage comes back as degraded=True,
+        # which _log_decline fails closed on.
+        settings = await self.directory.resolve(scope)
+        if (decline := self._log_decline(scope, settings, is_author=is_author)) is not None:
+            return CommandResult(decline, ok=False)
+        try:
+            outcome = await engine.run(scope, log_action(settings.log_page), payload=content)
+        except NothingToPublishError:
+            self.counters.increment("log_declined_media")
+            return CommandResult(REPLY_LOG_NOTHING, ok=False)
+        except WikiWriteError:
+            return CommandResult(REPLY_LOG_WIKI_ERROR, ok=False)
+        log_event("log_command", "ok")
+        text = "\n".join(message.text for message in outcome.messages)
+        return CommandResult(text or REPLY_LOG_NOTHING, ok=bool(outcome.messages))
+
+    def _log_decline(
+        self, scope: Scope, settings: ChannelSettings, *, is_author: bool
+    ) -> str | None:
+        """The refusal for this /log, or None to publish. Order is significant.
+
+        The rate check consumes a limiter token, so it runs last — only once
+        the free guards have passed.
+        """
+        if settings.degraded:
+            # Fail closed: the consent policy and target page are unknown
+            # right now, and publishing on defaults could violate both.
+            return REPLY_LOG_CONFIG_UNAVAILABLE
+        if self.directory.self_service_enabled and not settings.page_explicit:
+            # A self-service scope must choose its own page — never leak its
+            # logs onto the shared operator default.
+            return REPLY_LOG_NO_PAGE
+        if settings.consent_mode is ConsentMode.AUTHOR_ONLY and not is_author:
+            self.counters.increment("log_declined_consent")
+            return REPLY_LOG_AUTHOR_ONLY
+        if not self._repo_allowed("log", scope):
+            self.counters.increment("log_throttled")
+            return REPLY_THROTTLED
+        return None
 
     async def action(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
         """Add, remove, or list this scope's scheduled analyses (admins only).

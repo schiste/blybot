@@ -62,7 +62,11 @@ async def test_other_telegram_error_maps_to_a_permanent_error() -> None:
         await transport.send(OutboundMessage(scope=Scope("telegram", "-1"), text="hi"))
 
 
-def test_capabilities_reports_telegram_supports_everything() -> None:
+def test_capabilities_reports_what_telegram_can_and_cannot_do() -> None:
+    """Telegram is NOT strictly the most capable platform, which the old
+    ``chat_picker`` flag accidentally implied: a Telegram bot cannot open a DM
+    with a user who has not written to it first. That single limitation is why
+    deep links and the destination picker exist at all."""
     transport, _bot = _transport()
     caps = transport.capabilities
     assert caps is TELEGRAM_CAPABILITIES
@@ -72,9 +76,9 @@ def test_capabilities_reports_telegram_supports_everything() -> None:
             caps.threads,
             caps.durable_dm,
             caps.deep_links,
-            caps.chat_picker,
             caps.message_delete,
             caps.id_can_change,
             caps.rich_choices,
         )
     )
+    assert caps.bot_can_open_dm is False

@@ -529,7 +529,15 @@ any adapter:
 - `deep_links` — deep-link Start (R5) → newcomer/subscription
   **onboarding** via a share link (Discord has none; onboarding is slash
   commands).
-- `chat_picker` — a native "choose a chat" picker (Telegram) vs none.
+- `bot_can_open_dm` — whether the **bot** may open a DM unprompted. This is
+  the fact that shapes DM transcription, and it replaced a `chat_picker` flag
+  that named Telegram's picker *widget* rather than the reason one is needed
+  (issue #45). A Telegram bot cannot write to a user who has not written to
+  it first, so the user must come to the bot, arriving with no indication of
+  which channel prompted them — hence both the deep link and the destination
+  picker. Where the bot can open the DM, the flow starts in the target
+  channel, the destination is known before the DM exists, and neither is
+  required. Note the polarity: Telegram is the *less* capable platform here.
 - `id_can_change` — ids migrate (Telegram's group→supergroup upgrade) →
   the `migrate` re-key path (R-v3.2) is exercised.
 - `threads` — the platform has threads/topics at all.
@@ -552,7 +560,7 @@ shape, nothing works yet.
 | `threads` | yes | yes | unbuilt | unbuilt |
 | `durable_dm` | yes | yes | unbuilt | unbuilt |
 | `deep_links` | yes | no | unbuilt | unbuilt |
-| `chat_picker` | yes | no | unbuilt | unbuilt |
+| `bot_can_open_dm` | **no** | **yes** | unbuilt | unbuilt |
 | `message_delete` | yes | yes | unbuilt | unbuilt |
 | `id_can_change` | yes | no | unbuilt | unbuilt |
 | `rich_choices` | yes | yes | unbuilt | unbuilt |

@@ -155,7 +155,16 @@ class PlatformCapabilities:
     threads: bool = False
     durable_dm: bool = False
     deep_links: bool = False
-    chat_picker: bool = False
+    # Whether the BOT may open a DM with a user unprompted. This is the fact
+    # that shapes the whole DM-transcription flow, and it was previously
+    # mis-modelled as ``chat_picker`` — the name of Telegram's picker WIDGET
+    # rather than the reason one is needed. A Telegram bot cannot message a
+    # user who has not written to it first, so the user must come to the bot,
+    # arriving with no indication of which channel prompted them: hence both
+    # the deep link and the destination picker. Where the bot can open the DM
+    # (Discord), the flow starts in the target channel and the destination is
+    # already known, so neither is required.
+    bot_can_open_dm: bool = False
     message_delete: bool = False
     id_can_change: bool = False  # supergroup-migration-style id changes
     rich_choices: bool = False

@@ -1,6 +1,6 @@
 """In-memory DM session registry (spec R4, section 10).
 
-The registry is the *only* place a Telegram private chat is held (as a DM
+The registry is the *only* place a private chat is held (as a DM
 :class:`Scope`, whose ``channel`` is the private chat id), and it is held
 exclusively in process memory — never serialized, never logged. Sessions
 vanish on TTL expiry, on explicit reset, or on process restart; all three

@@ -64,7 +64,7 @@ from blybot.services.capture import CaptureReminder, CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.delivery import message_loop
 from blybot.services.directory import ChannelDirectory
-from blybot.services.dm_routing import DmRouteRegistry
+from blybot.services.dm_routing import DmRouteRegistry, PendingDmMessages
 from blybot.services.engine import ActionEngine
 from blybot.services.feedback import FeedbackService
 from blybot.services.health import heartbeat_loop, log_startup
@@ -130,6 +130,7 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         timestamp_granularity=config.timestamp_granularity,
     )
     routes = DmRouteRegistry(clock=clock, route_ttl=config.session_ttl)
+    pending_dms = PendingDmMessages(clock=clock)
     # The key was validated at load; construction can't raise on it.
     store: ToolsDbStore | None = None
     archive: ToolsDbArchive | None = None
@@ -310,6 +311,8 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         directory=directory,
         groups=group_policy,
         routes=routes,
+        pending=pending_dms,
+        capabilities=TELEGRAM_CAPABILITIES,
         welcome_text=config.welcome_text,
         dm_page_url=config.page_url(config.dm_target_base),
         maintainer=config.maintainer,
@@ -684,6 +687,18 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
         directory=directory,
         groups=group_policy,
         commands=commands,
+        transcription=DmTranscriptionService(
+            publisher=publisher,
+            sanitizer=sanitizer,
+            sessions=SessionRegistry(
+                pseudonyms=RandomPseudonymFactory(), clock=clock, ttl=config.session_ttl
+            ),
+            target_page=config.dm_target_base,
+            edit_summary=config.edit_summary,
+            debounce_seconds=config.burst_debounce.total_seconds(),
+            timestamp_granularity=config.timestamp_granularity,
+        ),
+        routes=DmRouteRegistry(clock=clock, route_ttl=config.session_ttl),
         capture=capture_service,
         masker=masker,
         subscriptions=subscriptions_store,

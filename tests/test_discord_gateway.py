@@ -34,6 +34,7 @@ from blybot.domain.models import (
     Scope,
     TimestampGranularity,
 )
+from blybot.domain.ports import WikiWriteError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import Counters
 from blybot.services import analysis_run as ar
@@ -42,6 +43,7 @@ from blybot.services.analysis_run import AnalysisService
 from blybot.services.capture import CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
+from blybot.services.dm_routing import DmRouteRegistry
 from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
 from blybot.services.publish import (
@@ -50,6 +52,8 @@ from blybot.services.publish import (
     LogPublishTransform,
 )
 from blybot.services.repo import GroupRepoService
+from blybot.services.sessions import SessionRegistry
+from blybot.services.transcribe import DmTranscriptionService
 from tests.fakes import (
     FakeClock,
     FakePublisher,
@@ -652,6 +656,7 @@ def test_build_registers_every_slash_command() -> None:
         "subscribe",
         "summarize",
         "talkingpoints",
+        "transcribe",
         "unsubscribe",
     ]
     # /log is a message context menu, not a slash command — Discord's
@@ -726,6 +731,7 @@ async def test_on_message_archives_a_plain_channel_post() -> None:
     client = build_gateway_client(gateway)
     message = SimpleNamespace(
         author=SimpleNamespace(bot=False, id=7),
+        guild=SimpleNamespace(id=1),
         channel=SimpleNamespace(id=_CHANNEL),
         id=42,
         created_at=datetime(2026, 7, 20, tzinfo=UTC),
@@ -748,6 +754,7 @@ async def test_on_message_archives_a_thread_reply() -> None:
     client = build_gateway_client(gateway)
     message = SimpleNamespace(
         author=SimpleNamespace(bot=False, id=7),
+        guild=SimpleNamespace(id=1),
         channel=SimpleNamespace(id=999, parent_id=_CHANNEL),
         id=43,
         created_at=datetime(2026, 7, 20, tzinfo=UTC),
@@ -1449,3 +1456,184 @@ async def test_nothing_is_archived_before_the_announcement_is_sent() -> None:
         reply_to=None,
     )
     assert [m.text for m in archive.messages] == ["after the notice"]
+
+
+# --- DM transcription: /transcribe (issue #45) ---------------------------------
+
+
+def _transcribe_gateway() -> tuple[DiscordGateway, InMemoryProfiles, FakePublisher]:
+    store = InMemoryProfiles()
+    publisher = FakePublisher()
+    directory = _directory(store)
+    groups = GroupPolicy(allowed=set())
+    clock = FakeClock()
+    gateway = _make_gateway(directory, groups)
+    gateway.transcription = DmTranscriptionService(
+        publisher=publisher,
+        sanitizer=PassthroughSanitizer(),
+        sessions=SessionRegistry(
+            pseudonyms=SequentialPseudonyms(), clock=clock, ttl=timedelta(hours=1)
+        ),
+        target_page="Project:Discussions",
+        edit_summary="DM",
+        debounce_seconds=0,
+        timestamp_granularity=TimestampGranularity.NONE,
+    )
+    gateway.routes = DmRouteRegistry(clock=clock, route_ttl=timedelta(hours=1))
+    return gateway, store, publisher
+
+
+_DM_ID = 987654
+
+
+async def test_transcribe_needs_the_channel_to_have_chosen_a_page() -> None:
+    gateway, _store, _publisher = _transcribe_gateway()
+    assert await gateway.transcribe_command(_CHANNEL, None, _DM_ID) == cmd.REPLY_LOG_NO_PAGE
+    # Unrouted DMs stay silent — the bot must not answer private messages it
+    # was never asked to publish.
+    assert await gateway.transcribe_dm(_DM_ID, "hello?") is None
+
+
+async def test_transcribe_routes_the_dm_to_the_channels_page() -> None:
+    """The destination is known because the flow STARTED in the channel — no
+    picker, no deep link (Discord's bot_can_open_dm is True)."""
+    gateway, _store, _publisher = _transcribe_gateway()
+    await gateway.directory.set_log_page(_SCOPE, "WikiProject Foo")
+
+    opened = await gateway.transcribe_command(_CHANNEL, None, _DM_ID)
+    assert "WikiProject Foo/Discord logs" in opened
+    assert gateway.routes is not None
+    route = gateway.routes.route_for(dm_scope(_DM_ID))
+    assert route is not None
+    assert route.scope == _SCOPE  # the channel it was invoked in
+
+
+async def test_ten_dm_messages_become_one_discussion() -> None:
+    """The whole point of the feature: many messages, one section, one pseudonym."""
+    gateway, _store, publisher = _transcribe_gateway()
+    await gateway.directory.set_log_page(_SCOPE, "WikiProject Foo")
+    await gateway.transcribe_command(_CHANNEL, None, _DM_ID)
+
+    notices = [await gateway.transcribe_dm(_DM_ID, f"point {n}") for n in range(1, 11)]
+
+    # Exactly one notice — the first, disclosing the pseudonym; then silence.
+    assert notices[0] is not None
+    assert "WikiProject Foo/Discord logs" in notices[0]
+    assert notices[1:] == [None] * 9
+
+    # One section started, the other nine lines appended into it.
+    assert len(publisher.started) == 1
+    assert len(publisher.continued) == 9
+    pages = {page for page, _heading, _text, _summary in publisher.started + publisher.continued}
+    assert pages == {"WikiProject Foo/Discord logs"}
+    headings = {h for _page, h, _text, _summary in publisher.started + publisher.continued}
+    assert len(headings) == 1  # one heading = one discussion
+    published = " ".join(text for _p, _h, text, _s in publisher.started + publisher.continued)
+    for n in range(1, 11):
+        assert f"point {n}" in published
+
+
+async def test_transcribe_refuses_an_unserved_channel_and_reports_a_wiki_failure() -> None:
+    gateway, _store, _publisher = _transcribe_gateway()
+    gateway.groups = GroupPolicy(allowed={999})
+    assert await gateway.transcribe_command(_CHANNEL, None, _DM_ID) == cmd.REPLY_NOT_ALLOWED
+
+    broken, _store2, _pub = _transcribe_gateway()
+    broken.transcription = cast("Any", _FailingTranscription())
+    await broken.directory.set_log_page(_SCOPE, "WikiProject Foo")
+    await broken.transcribe_command(_CHANNEL, None, _DM_ID)
+    assert await broken.transcribe_dm(_DM_ID, "x") == gw.REPLY_TRANSCRIBE_FAILED
+
+
+async def test_transcribe_is_unavailable_without_the_wiring() -> None:
+    gateway, _store, _publisher = _transcribe_gateway()
+    gateway.transcription = None
+    assert (
+        await gateway.transcribe_command(_CHANNEL, None, _DM_ID) == gw.REPLY_TRANSCRIBE_UNAVAILABLE
+    )
+    assert await gateway.transcribe_dm(_DM_ID, "x") is None
+
+
+async def test_transcribe_fails_closed_when_channel_settings_are_unknown() -> None:
+    gateway, _store, _publisher = _transcribe_gateway()
+    gateway.directory.store = InMemoryProfiles(fail=True)
+    assert (
+        await gateway.transcribe_command(_CHANNEL, None, _DM_ID) == cmd.REPLY_LOG_CONFIG_UNAVAILABLE
+    )
+
+
+async def test_a_dm_never_reaches_capture_ingestion() -> None:
+    """Capture is per-channel and admin-announced; a DM is never a candidate."""
+    store = InMemoryProfiles(profiles={_SCOPE: GroupProfile(scope=_SCOPE, capture_enabled=True)})
+    gateway, _store, archive, _capture = _capture_gateway(store=store)
+    client = build_gateway_client(gateway)
+    sent: list[str] = []
+    dm_message = SimpleNamespace(
+        author=SimpleNamespace(bot=False, id=7),
+        guild=None,  # a DM
+        channel=SimpleNamespace(id=_DM_ID, send=_recorder(sent)),
+        id=42,
+        created_at=datetime(2026, 7, 20, tzinfo=UTC),
+        content="private",
+        reference=None,
+    )
+    await client.on_message(cast("discord.Message", dm_message))
+    assert archive.messages == []  # not archived…
+    assert sent == []  # …and no reply, since it is unrouted
+
+
+def _recorder(sink: list[str]) -> Any:
+    async def send(text: str) -> None:
+        sink.append(text)
+
+    return send
+
+
+class _FailingTranscription:
+    """A transcription service whose wiki write always fails."""
+
+    def __init__(self) -> None:
+        self.sessions = SessionRegistry(
+            pseudonyms=SequentialPseudonyms(), clock=FakeClock(), ttl=timedelta(hours=1)
+        )
+
+    async def record(self, scope: object, text: str, target_page: str | None = None) -> object:
+        del scope, text, target_page
+        raise WikiWriteError
+
+
+async def test_transcribe_slash_command_opens_the_dm_and_answers_ephemerally() -> None:
+    gateway, _store, _publisher = _transcribe_gateway()
+    await gateway.directory.set_log_page(_SCOPE, "WikiProject Foo")
+    client = build_gateway_client(gateway)
+    interaction = _dm_interaction(SimpleNamespace(id=_CHANNEL), dm_id=_DM_ID)
+
+    await _command(client, "transcribe").callback(interaction)
+
+    (content, ephemeral) = interaction.response.sent[0]
+    # Which channel someone is about to write privately about is nobody
+    # else's business, so this one stays ephemeral.
+    assert ephemeral is True
+    assert "WikiProject Foo/Discord logs" in content
+    assert gateway.routes is not None
+    assert gateway.routes.route_for(dm_scope(_DM_ID)) is not None
+
+
+async def test_a_routed_dm_is_transcribed_through_the_client_shell() -> None:
+    gateway, _store, publisher = _transcribe_gateway()
+    await gateway.directory.set_log_page(_SCOPE, "WikiProject Foo")
+    await gateway.transcribe_command(_CHANNEL, None, _DM_ID)
+    client = build_gateway_client(gateway)
+    sent: list[str] = []
+    dm_message = SimpleNamespace(
+        author=SimpleNamespace(bot=False, id=7),
+        guild=None,
+        channel=SimpleNamespace(id=_DM_ID, send=_recorder(sent)),
+        id=42,
+        created_at=datetime(2026, 7, 20, tzinfo=UTC),
+        content="first point",
+        reference=None,
+    )
+    await client.on_message(cast("discord.Message", dm_message))
+    assert len(sent) == 1  # the pseudonym disclosure
+    assert "first point" in publisher.started[0][2]

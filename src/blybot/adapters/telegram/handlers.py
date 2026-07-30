@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from blybot.domain.ports import MessageArchive, SubscriptionStore
     from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory, ChannelSettings
-    from blybot.services.dm_routing import DmRouteRegistry
+    from blybot.services.dm_routing import DmRouteRegistry, PendingDmMessages
     from blybot.services.engine import ActionEngine
     from blybot.services.feedback import FeedbackService
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
@@ -539,6 +539,15 @@ class PrivateHandlers:
     directory: ChannelDirectory
     groups: GroupPolicy
     routes: DmRouteRegistry
+    # Telegram cannot open a DM first, so a private message arrives with no
+    # hint of which group prompted it and must be parked while the user picks
+    # a destination. Platforms whose bot can open the DM never need this.
+    pending: PendingDmMessages
+    # Gates the park-and-pick handshake above: it exists only because
+    # bot_can_open_dm is False here. Stated as a capability rather than
+    # assumed, so the dependency is visible and a platform that gains the
+    # ability skips the detour instead of inheriting it.
+    capabilities: PlatformCapabilities
     welcome_text: str
     dm_page_url: str
     maintainer: str
@@ -678,7 +687,12 @@ class PrivateHandlers:
             return
         route = self.routes.route_for(dm)
         if route is None:
-            request_id = self.routes.open_pending(dm, message.text)
+            if self.capabilities.bot_can_open_dm:
+                # Unreachable on Telegram: a platform whose bot opens the DM
+                # knows the destination before the DM exists, so an unrouted
+                # private message is simply not part of the flow.
+                return
+            request_id = self.pending.open_pending(dm, message.text)
             await context.bot.send_message(
                 chat_id=chat.id,
                 text=REPLY_DM_DESTINATION_REQUIRED,
@@ -695,7 +709,7 @@ class PrivateHandlers:
         if chat is None or shared is None:
             return
         dm = dm_scope(chat.id)
-        text = self.routes.pop_pending(dm, shared.request_id)
+        text = self.pending.pop_pending(dm, shared.request_id)
         if text is None:
             await context.bot.send_message(
                 chat_id=chat.id,

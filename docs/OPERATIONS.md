@@ -147,9 +147,10 @@ operator should not expect full parity:
 
 - **`/setconsent`, `/subscribable`, `/capture purge`** — no Discord
   equivalent yet.
-- **DM `/log` + the chat picker** — the private `/log` flow and the
-  "choose a shared group" picker depend on `deep_links` / `chat_picker`,
-  which Discord lacks.
+- **DM `/log` + the destination picker** — Telegram's private `/log` flow
+  and its "choose a shared group" picker exist because a Telegram bot cannot
+  open a DM first. Discord does not need them: see **Publishing a private
+  discussion** above.
 
 Everything above is intentionally absent, not broken — it lands when the
 Discord admin surface grows the corresponding commands.
@@ -420,6 +421,27 @@ a `~/<name>.env`.
   | `event=token_bound outcome=ok` | a group admin bound a GitHub token |
   | `event=wiki_edit outcome=retry` | maxlag/transient API backoff in progress |
   | `event=wiki_login outcome=error` | BotPassword rejected — check credentials |
+
+### Publishing a private discussion (`/transcribe`)
+
+To publish a multi-message discussion to the wiki without it appearing in the
+channel, a member runs **`/transcribe` in the channel they want it published
+to**. The bot opens a DM and confirms (ephemerally, so nobody else learns
+which channel you are writing about); from then on every message you send it
+privately joins **one** wiki discussion — one section, one pseudonym, in
+order — until the session times out. Run `/transcribe` again elsewhere to
+switch destinations, or simply stop writing.
+
+Telegram gets to the same place differently, and the difference is a platform
+limit rather than a design preference: a Telegram bot cannot open a DM with
+someone who has not written to it first, so there the user taps a deep link,
+arrives in the DM with no context, and must pick a destination from a chat
+picker. Discord's bot *can* open the DM (`bot_can_open_dm`), so the flow
+starts where the destination is already known and no picker exists.
+
+The channel must have chosen its own page with `/setpage` first — the same
+guard as `/log`, so a scope that never opted in cannot publish onto the
+operator's default page.
 
 ### The Discord consent model
 

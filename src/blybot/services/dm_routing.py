@@ -1,10 +1,22 @@
 """Volatile routing state for private-message transcription.
 
-Private Telegram updates do not say which group prompted the user to
-write to the bot. This registry fills that gap without persisting a
-user-to-group association: it holds one pending message while the user
-chooses a group, then remembers the selected route only in process
-memory.
+Two classes, split along a line that matters (issue #45):
+
+* :class:`DmRouteRegistry` is **the feature**: where a DM session currently
+  publishes. Every platform needs it.
+* :class:`PendingDmMessages` is a **workaround** for platforms where the bot
+  cannot open a DM itself (``bot_can_open_dm=False``). There the user has to
+  write to the bot first, and that message arrives with no indication of
+  which channel prompted it — so it must be parked while the user picks a
+  destination. Where the bot *can* open the DM, the flow starts in the target
+  channel, the destination is known before any DM exists, and this class is
+  never touched.
+
+They used to be one class, which quietly baked one platform's two-phase
+handshake into the neutral API any second platform would inherit.
+
+Neither persists a user-to-channel association: routes and parked messages
+live in process memory only, so a restart forgets both.
 """
 
 from __future__ import annotations
@@ -39,40 +51,15 @@ class PendingDm:
 
 @dataclass
 class DmRouteRegistry:
-    """In-memory DM route and pending-message state, keyed by DM scope."""
+    """In-memory DM routes, keyed by DM scope. Needed on every platform."""
 
     clock: Clock
     route_ttl: timedelta
-    pending_ttl: timedelta = timedelta(minutes=5)
     _routes: dict[Scope, tuple[DmRoute, datetime]] = field(default_factory=dict)
-    _pending: dict[Scope, PendingDm] = field(default_factory=dict)
-    _next_request_id: int = 1
-
-    def open_pending(self, dm: Scope, text: str) -> int:
-        """Hold ``text`` until Telegram returns a chat picker result."""
-        self._prune()
-        request_id = self._next_request_id
-        self._next_request_id = (
-            self._next_request_id + 1 if self._next_request_id < _MAX_REQUEST_ID else 1
-        )
-        self._pending[dm] = PendingDm(text=text, request_id=request_id, opened_at=self.clock.now())
-        return request_id
-
-    def pop_pending(self, dm: Scope, request_id: int) -> str | None:
-        """Consume a pending message if it matches the picker response."""
-        pending = self._pending.get(dm)
-        if pending is None:
-            return None
-        if self.clock.now() - pending.opened_at > self.pending_ttl:
-            del self._pending[dm]
-            return None
-        if pending.request_id != request_id:
-            return None
-        del self._pending[dm]
-        return pending.text
 
     def save_route(self, dm: Scope, group: Scope, page: str) -> DmRoute:
-        """Remember the selected destination for subsequent DMs."""
+        """Remember the destination for subsequent DMs from this scope."""
+        self._prune()
         route = DmRoute(scope=group, page=page)
         self._routes[dm] = (route, self.clock.now())
         return route
@@ -96,13 +83,54 @@ class DmRouteRegistry:
 
     def _prune(self) -> None:
         now = self.clock.now()
-        self._pending = {
-            dm: pending
-            for dm, pending in self._pending.items()
-            if now - pending.opened_at <= self.pending_ttl
-        }
         self._routes = {
             dm: (route, touched_at)
             for dm, (route, touched_at) in self._routes.items()
             if now - touched_at < self.route_ttl
+        }
+
+
+@dataclass
+class PendingDmMessages:
+    """Messages parked while their author chooses a destination.
+
+    Only reached where ``bot_can_open_dm`` is False. The ``request_id`` pairs
+    a parked message with the specific picker response that answers it, so a
+    stale or replayed selection cannot publish the wrong text.
+    """
+
+    clock: Clock
+    pending_ttl: timedelta = timedelta(minutes=5)
+    _pending: dict[Scope, PendingDm] = field(default_factory=dict)
+    _next_request_id: int = 1
+
+    def open_pending(self, dm: Scope, text: str) -> int:
+        """Park ``text`` and return the id the picker response must carry."""
+        self._prune()
+        request_id = self._next_request_id
+        self._next_request_id = (
+            self._next_request_id + 1 if self._next_request_id < _MAX_REQUEST_ID else 1
+        )
+        self._pending[dm] = PendingDm(text=text, request_id=request_id, opened_at=self.clock.now())
+        return request_id
+
+    def pop_pending(self, dm: Scope, request_id: int) -> str | None:
+        """Consume a parked message if it matches this picker response."""
+        pending = self._pending.get(dm)
+        if pending is None:
+            return None
+        if self.clock.now() - pending.opened_at > self.pending_ttl:
+            del self._pending[dm]
+            return None
+        if pending.request_id != request_id:
+            return None
+        del self._pending[dm]
+        return pending.text
+
+    def _prune(self) -> None:
+        now = self.clock.now()
+        self._pending = {
+            dm: pending
+            for dm, pending in self._pending.items()
+            if now - pending.opened_at <= self.pending_ttl
         }

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 from blybot.domain.models import Scope
-from blybot.services.dm_routing import DmRouteRegistry
+from blybot.services.dm_routing import DmRouteRegistry, PendingDmMessages
 from tests.fakes import FakeClock
 
 
@@ -18,15 +18,15 @@ def grp(chat_id: int) -> Scope:
 
 
 def test_pending_message_round_trips_for_matching_request() -> None:
-    routes = DmRouteRegistry(clock=FakeClock(), route_ttl=timedelta(minutes=45))
+    routes = PendingDmMessages(clock=FakeClock())
     request_id = routes.open_pending(dm(1), "hello")
     assert routes.pop_pending(dm(1), request_id + 1) is None
     assert routes.pop_pending(dm(1), request_id) == "hello"
     assert routes.pop_pending(dm(1), request_id) is None
 
 
-def test_request_ids_wrap_inside_telegrams_signed_32_bit_range() -> None:
-    routes = DmRouteRegistry(clock=FakeClock(), route_ttl=timedelta(minutes=45))
+def test_request_ids_wrap_inside_a_signed_32_bit_range() -> None:
+    routes = PendingDmMessages(clock=FakeClock())
     routes._next_request_id = 2**31 - 1
     request_id = routes.open_pending(dm(1), "hello")
     assert request_id == 2**31 - 1
@@ -35,7 +35,7 @@ def test_request_ids_wrap_inside_telegrams_signed_32_bit_range() -> None:
 
 def test_pending_message_expires() -> None:
     clock = FakeClock()
-    routes = DmRouteRegistry(clock=clock, route_ttl=timedelta(minutes=45))
+    routes = PendingDmMessages(clock=clock)
     request_id = routes.open_pending(dm(1), "hello")
     clock.advance(timedelta(minutes=6))
     assert routes.pop_pending(dm(1), request_id) is None
@@ -58,12 +58,18 @@ def test_routes_expire_and_can_be_refreshed() -> None:
     routes.touch_route(dm(1))  # no-op after expiry
 
 
-def test_prune_discards_stale_state_when_opening_new_pending_message() -> None:
+def test_prune_discards_stale_state_on_each_side_of_the_split() -> None:
+    """Routes and parked messages expire independently now — they are separate
+    concerns with separate TTLs (#45)."""
     clock = FakeClock()
     routes = DmRouteRegistry(clock=clock, route_ttl=timedelta(minutes=45))
-    routes.open_pending(dm(1), "old")
+    pending = PendingDmMessages(clock=clock)
+    pending.open_pending(dm(1), "old")
     routes.save_route(dm(1), grp(-100), "Old")
     clock.advance(timedelta(hours=1))
-    routes.open_pending(dm(2), "new")
+
+    pending.open_pending(dm(2), "new")
+    assert pending._pending.keys() == {dm(2)}
+    routes.save_route(dm(2), grp(-200), "New")
     assert routes.route_for(dm(1)) is None
-    assert routes._pending.keys() == {dm(2)}
+    assert routes._routes.keys() == {dm(2)}

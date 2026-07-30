@@ -14,7 +14,7 @@ def test_capabilities_match_the_platform_contract() -> None:
     assert caps.threads is True
     assert caps.durable_dm is True
     assert caps.deep_links is False
-    assert caps.chat_picker is False
+    assert caps.bot_can_open_dm is True  # create_dm(): no destination picker needed
     assert caps.message_delete is True
     assert caps.id_can_change is False
     assert caps.rich_choices is True

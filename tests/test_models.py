@@ -26,7 +26,7 @@ def test_platform_capabilities_construct_and_default_off() -> None:
             caps.threads,
             caps.durable_dm,
             caps.deep_links,
-            caps.chat_picker,
+            caps.bot_can_open_dm,
             caps.message_delete,
             caps.id_can_change,
             caps.rich_choices,

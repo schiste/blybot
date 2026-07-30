@@ -42,7 +42,7 @@ from discord import app_commands
 
 from blybot.adapters.discord.scope import dm_scope, scope_of
 from blybot.domain.models import CapturedMessage, CommandResult, LogContent
-from blybot.domain.ports import StorageError
+from blybot.domain.ports import StorageError, WikiWriteError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
 from blybot.services import commands as cmd
@@ -55,6 +55,7 @@ from blybot.services.subscriptions import (
     mint_subscribe_code,
     parse_subscription,
 )
+from blybot.services.transcribe import record_dm_line
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -66,7 +67,9 @@ if TYPE_CHECKING:
     from blybot.services.capture import CaptureService
     from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory
+    from blybot.services.dm_routing import DmRouteRegistry
     from blybot.services.policy import GroupPolicy
+    from blybot.services.transcribe import DmTranscriptionService
 
     from .author_mask import DiscordAuthorMasker
 
@@ -85,6 +88,20 @@ PAT_MODAL_TITLE: Final = "GitHub token"
 PAT_MODAL_LABEL: Final = "Fine-grained PAT (Issues read/write)"
 # The message context-menu entry label (Apps → …).
 LOG_MENU_LABEL: Final = "Log to wiki"
+REPLY_TRANSCRIBE_UNAVAILABLE: Final = "Private transcription isn't available on this deployment."
+REPLY_TRANSCRIBE_OPENED: Final = (
+    "Check your DMs — everything you send me there now publishes to {page} as one "
+    "discussion, under a pseudonym that is never derived from your account. Send as "
+    "many messages as you like; run /transcribe again in another channel to switch, "
+    "or just stop writing."
+)
+REPLY_TRANSCRIBE_SESSION: Final = (
+    "You appear as {pseudonym} on {page}. Everything you send here from now on joins "
+    "that same discussion until the session times out."
+)
+REPLY_TRANSCRIBE_FAILED: Final = (
+    "Sorry, publishing failed. The operator can see details in the logs."
+)
 REPLY_ANALYSES_UNAVAILABLE: Final = "On-demand analyses aren't available on this deployment."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
 REPLY_SUBSCRIBED: Final = (
@@ -114,6 +131,9 @@ class DiscordGateway:
     masker: DiscordAuthorMasker | None = None
     subscriptions: SubscriptionStore | None = None
     analysis: AnalysisService | None = None
+    # DM transcription (#45): both unset on a deployment without it.
+    transcription: DmTranscriptionService | None = None
+    routes: DmRouteRegistry | None = None
     default_lang: str = "en"
     # Per-subscriber ceiling enforced at /subscribe admission (#23).
     max_subs_per_user: int = MAX_SUBS_PER_USER
@@ -251,6 +271,52 @@ class DiscordGateway:
         """Show the bound repository's open-items summary (any member)."""
         result = await self.commands.repo_summary(scope_of(channel_id, thread_id))
         return result.text
+
+    async def transcribe_command(self, channel_id: int, thread_id: int | None, dm_id: int) -> str:
+        """Open a DM that publishes to this channel's wiki page (any member).
+
+        Discord's answer to Telegram's deep-link-plus-picker dance: because the
+        bot may open the DM itself (``bot_can_open_dm``), the flow starts *in
+        the target channel*, so the destination is known before the DM exists
+        and there is nothing to pick. The same page guard as ``/log`` applies —
+        a scope that never chose a page must not publish onto the operator
+        default.
+        """
+        transcription, routes = self.transcription, self.routes
+        if transcription is None or routes is None:
+            return REPLY_TRANSCRIBE_UNAVAILABLE
+        scope = scope_of(channel_id, thread_id)
+        if not self.groups.is_allowed(scope):
+            return cmd.REPLY_NOT_ALLOWED
+        settings = await self.directory.resolve(scope)
+        if settings.degraded:
+            return cmd.REPLY_LOG_CONFIG_UNAVAILABLE
+        if self.directory.self_service_enabled and not settings.page_explicit:
+            return cmd.REPLY_LOG_NO_PAGE
+        routes.save_route(dm_scope(dm_id), scope, settings.log_page)
+        return REPLY_TRANSCRIBE_OPENED.format(page=settings.log_page)
+
+    async def transcribe_dm(self, dm_id: int, text: str) -> str | None:
+        """Transcribe one DM line to its routed page; ``None`` if unrouted.
+
+        Returning ``None`` rather than a complaint keeps an unrouted DM silent:
+        the bot must not respond to private messages it was never asked to
+        publish.
+        """
+        transcription, routes = self.transcription, self.routes
+        if transcription is None or routes is None:
+            return None
+        dm = dm_scope(dm_id)
+        route = routes.route_for(dm)
+        if route is None:
+            return None
+        try:
+            session, opened = await record_dm_line(transcription, routes, dm, text, route.page)
+        except WikiWriteError:
+            return REPLY_TRANSCRIBE_FAILED
+        if not opened:
+            return None  # stay quiet mid-conversation
+        return REPLY_TRANSCRIBE_SESSION.format(pseudonym=session.pseudonym, page=route.page)
 
     async def log_command(
         self,
@@ -544,8 +610,17 @@ class DiscordGatewayClient(discord.Client):
             await self._on_setup(self)
 
     async def on_message(self, message: discord.Message) -> None:
-        """Feed one incoming message to capture ingestion (bots ignored)."""
+        """Route one incoming message: DM transcription, else capture ingestion.
+
+        A DM is never a capture candidate — capture is a per-channel, admin-
+        announced thing — so the two paths are exclusive.
+        """
         if message.author.bot:
+            return
+        if message.guild is None:
+            notice = await self._gateway.transcribe_dm(message.channel.id, message.content)
+            if notice is not None:
+                await message.channel.send(notice)
             return
         channel_id, thread_id = _channel_ids(message.channel)
         reference = message.reference
@@ -652,6 +727,18 @@ class DiscordGatewayClient(discord.Client):
             await _respond(interaction, reply)
 
         self.tree.add_command(app_commands.ContextMenu(name=LOG_MENU_LABEL, callback=log_to_wiki))
+
+        @self.tree.command(
+            name="transcribe", description="Publish a private discussion to this channel's page."
+        )
+        @app_commands.guild_only()
+        async def transcribe(interaction: discord.Interaction) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            dm = await interaction.user.create_dm()
+            reply = await gateway.transcribe_command(channel_id, thread_id, dm.id)
+            # Ephemeral: which channel someone is about to write privately about
+            # is nobody else's business.
+            await _respond(interaction, reply)
 
         @self.tree.command(name="issue", description="File an anonymous issue in the bound repo.")
         @app_commands.guild_only()

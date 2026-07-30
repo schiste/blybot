@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -13,6 +14,7 @@ from telegram.error import TelegramError
 from blybot.adapters.telegram import handlers as h
 from blybot.adapters.telegram import token_entry
 from blybot.adapters.telegram.token_entry import TokenEntryHandler
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
 from blybot.domain.models import ConsentMode, Scope
 from blybot.domain.ports import IssueTrackerError
 from blybot.observability import Counters
@@ -20,7 +22,7 @@ from blybot.services import commands as cmd
 from blybot.services.binding import TokenBinding
 from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
-from blybot.services.dm_routing import DmRouteRegistry
+from blybot.services.dm_routing import DmRouteRegistry, PendingDmMessages
 from blybot.services.engine import ActionEngine
 from blybot.services.feedback import FeedbackService
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
@@ -110,6 +112,8 @@ def make_handlers(
         directory=directory,
         groups=GroupPolicy(allowed=set()),
         routes=DmRouteRegistry(clock=clock, route_ttl=TTL),
+        pending=PendingDmMessages(clock=clock),
+        capabilities=TELEGRAM_CAPABILITIES,
         welcome_text="Welcome to Blybot.",
         dm_page_url="https://meta.wikimedia.org/wiki/Meta_talk:Community/Discussions",
         maintainer="Test Maintainer",
@@ -472,6 +476,8 @@ async def test_dm_wiki_failure_reports_neutrally_and_skips_the_announcement() ->
         directory=directory,
         groups=GroupPolicy(allowed=set()),
         routes=DmRouteRegistry(clock=clock, route_ttl=TTL),
+        pending=PendingDmMessages(clock=clock),
+        capabilities=TELEGRAM_CAPABILITIES,
         welcome_text="Welcome.",
         dm_page_url="https://example.org/wiki/D",
         maintainer="",
@@ -750,3 +756,18 @@ async def test_token_paste_from_an_unidentifiable_sender_is_refused() -> None:
 
     assert store.tokens == {}
     assert tg.sent_texts(bot) == [token_entry.REPLY_LINK_NOT_ADMIN]
+
+
+async def test_a_platform_that_can_open_dms_skips_the_destination_detour() -> None:
+    """Issue #45: the park-and-pick handshake exists ONLY because a Telegram bot
+    cannot write first. Where the bot opens the DM the destination is known
+    before the DM exists, so an unrouted private message is simply not part of
+    the flow — no parked message, no picker, no reply."""
+    handlers, publisher = make_handlers(with_route=False)
+    handlers.capabilities = replace(TELEGRAM_CAPABILITIES, bot_can_open_dm=True)
+    context, bot = tg.make_context()
+
+    await handlers.on_dm(dm("would have opened a picker"), context)
+
+    assert tg.sent_texts(bot) == []  # no destination prompt
+    assert publisher.wrote_nothing

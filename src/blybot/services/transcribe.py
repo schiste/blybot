@@ -31,6 +31,7 @@ from blybot.observability import log_event
 if TYPE_CHECKING:
     from blybot.domain.models import Scope, Session, TimestampGranularity
     from blybot.domain.ports import Sanitizer, WikiPublisher
+    from blybot.services.dm_routing import DmRouteRegistry
     from blybot.services.sessions import SessionRegistry
 
 
@@ -165,3 +166,26 @@ class DmTranscriptionService:
         )
         self._published_anchors.add((buffer.target_page, buffer.anchor))
         log_event("dm_flush", "ok", lines=len(buffer.lines))
+
+
+async def record_dm_line(
+    transcription: DmTranscriptionService,
+    routes: DmRouteRegistry,
+    dm: Scope,
+    text: str,
+    page: str,
+) -> tuple[Session, bool]:
+    """Transcribe one DM line, keeping its route alive (issue #45).
+
+    The orchestration every platform repeats: note whether a session is about
+    to open (so the adapter can disclose the pseudonym the words will appear
+    under), record, then refresh the route's TTL so an active conversation
+    does not expire mid-flow.
+
+    :class:`~blybot.domain.ports.WikiWriteError` propagates — how to tell the
+    user is the adapter's business.
+    """
+    opened = transcription.sessions.peek(dm) is None
+    session = await transcription.record(dm, text, target_page=page)
+    routes.touch_route(dm)
+    return session, opened

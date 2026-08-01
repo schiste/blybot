@@ -549,25 +549,40 @@ any adapter:
 
 ### 22.1 Capability matrix
 
-Telegram and Discord values are the shipped `TELEGRAM_CAPABILITIES` /
-`DISCORD_CAPABILITIES` constants; Slack and IRC are aspirational targets
-for a future adapter, **not built** — their cells describe the expected
-shape, nothing works yet.
+Telegram, Discord and IRC values are the shipped `TELEGRAM_CAPABILITIES` /
+`DISCORD_CAPABILITIES` / `IRC_CAPABILITIES` constants; Slack is an
+aspirational target for a future adapter, **not built** — its cells
+describe the expected shape, nothing works yet.
 
-| Capability | Telegram | Discord | Slack (future) | IRC (future) |
+| Capability | Telegram | Discord | IRC | Slack (future) |
 |---|---|---|---|---|
-| `max_message_chars` | 4096 | 2000 | unbuilt | unbuilt |
-| `threads` | yes | yes | unbuilt | unbuilt |
-| `durable_dm` | yes | yes | unbuilt | unbuilt |
-| `deep_links` | yes | no | unbuilt | unbuilt |
-| `bot_can_open_dm` | **no** | **yes** | unbuilt | unbuilt |
-| `message_delete` | yes | yes | unbuilt | unbuilt |
-| `id_can_change` | yes | no | unbuilt | unbuilt |
-| `rich_choices` | yes | yes | unbuilt | unbuilt |
+| `max_message_chars` | 4096 | 2000 | 400 | unbuilt |
+| `threads` | yes | yes | **no** | unbuilt |
+| `durable_dm` | yes | yes | **no** | unbuilt |
+| `deep_links` | yes | no | **no** | unbuilt |
+| `bot_can_open_dm` | **no** | **yes** | yes | unbuilt |
+| `message_delete` | yes | yes | **no** | unbuilt |
+| `id_can_change` | yes | no | no | unbuilt |
+| `rich_choices` | yes | yes | **no** | unbuilt |
 
 Telegram supports every gate the core knows about, so on Telegram the
-gates never change behavior — they exist for the platforms (Discord, and
-later ones) that do not.
+gates never change behavior — they exist for the platforms (Discord, IRC,
+and later ones) that do not.
+
+IRC is the useful stress test: it is the first adapter that says **no** to
+most of the matrix. `durable_dm=False` gates digest subscriptions off
+entirely (a nick is not a durable address — it can be taken over by
+someone else after a disconnect, so a queued digest could reach a
+stranger). `threads=False` collapses every scope to a bare channel.
+`message_delete=False` means the requester-hiding cleanup cannot run, so
+any flow that relied on deleting a command message must not be offered.
+`max_message_chars=400` is a deliberate under-estimate of the 512-byte
+line: the true payload budget shrinks with the target's name length, and
+the transport re-splits by encoded bytes anyway (§22.3).
+
+What IRC *does* get is the whole point of the exercise: capture, the
+neutral analysis pipeline behind it, and the wiki sinks — none of which
+needed a line of IRC-specific logic.
 
 ### 22.2 The two edges
 
@@ -575,16 +590,27 @@ Each adapter has exactly **two edges** where an SDK/int identity meets a
 `Scope`, and the conversion lives only there:
 
 - **Inbound:** an SDK `(channel, thread)` becomes a `Scope`
-  (`telegram/_common.py`; `discord/scope.py` `scope_of` / `dm_scope`),
-  and the author is pseudonymized (R6) — before anything crosses into a
-  neutral service.
+  (`telegram/_common.py`; `discord/scope.py` `scope_of` / `dm_scope`;
+  `irc/scope.py` `scope_of` / `nick_scope`), and the author is
+  pseudonymized (R6) — before anything crosses into a neutral service.
 - **Outbound:** the transport turns a `Scope` back into the SDK target
-  (`telegram_target`; `discord_target`) to send.
+  (`telegram_target`; `discord_target`; `irc_target`) to send.
 
 Everything between compares and stores opaque `Scope`s only. Discord ids
 are int64 snowflakes stored as their decimal strings; a thread is itself a
 channel, so an in-thread `Scope` carries the thread snowflake in `thread`
 and the parent in `channel`.
+
+IRC has no numeric ids at all — the channel name *is* the address, which
+is why `Scope.channel` is a string and not an int. Channel names and nicks
+are case-insensitive on the wire, so both edges case-fold: `#Foo` and
+`#foo` must resolve to one scope, or a group's settings would fork on
+capitalization. There is no SDK: `irc/protocol.py` is a hand-rolled RFC
+1459 line parser and renderer, so IRC adds **zero** dependencies. The
+renderer splits by *encoded bytes* within the 512-byte line budget (which
+shrinks as the target name grows) and never mid-codepoint, and it maps a
+newline in neutral text to separate PRIVMSG lines — an unsplit newline
+would be a protocol injection.
 
 ### 22.3 Drift detection
 

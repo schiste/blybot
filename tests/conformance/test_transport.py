@@ -8,7 +8,7 @@ mapping is Telegram-specific, so it is asserted only against TelegramTransport.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import timedelta
 from typing import Any, cast
 
@@ -17,6 +17,7 @@ import pytest
 from telegram.error import RetryAfter, TelegramError, TimedOut
 
 from blybot.adapters.discord.transport import DiscordTransport
+from blybot.adapters.irc.transport import IrcTransport
 from blybot.adapters.telegram.transport import TelegramTransport
 from blybot.domain.models import OutboundMessage, Scope
 from blybot.domain.ports import (
@@ -106,10 +107,34 @@ def _discord_case() -> TransportCase:
     return _discord_transport(channel), lambda: len(channel.sent)
 
 
+class _RecordingLineChannel:
+    """A LineChannel that records protocol lines instead of writing a socket."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.lines_sent: list[str] = []
+        self._error = error
+
+    async def send_line(self, line: str) -> None:
+        if self._error is not None:
+            raise self._error
+        self.lines_sent.append(line)
+
+    def lines(self) -> AsyncIterator[Any]:  # pragma: no cover -- outbound-only here
+        raise NotImplementedError
+
+
+def _irc_case() -> TransportCase:
+    channel = _RecordingLineChannel()
+    # One short message is exactly one PRIVMSG line, so counting lines counts
+    # deliveries for the shared contract.
+    return IrcTransport(cast("Any", channel)), lambda: len(channel.lines_sent)
+
+
 # One entry per implementation. Adding a future transport is a single line.
 TRANSPORTS: list[tuple[str, Callable[[], TransportCase]]] = [
     ("telegram", _telegram_case),
     ("discord", _discord_case),
+    ("irc", _irc_case),
     ("fake", _fake_case),
 ]
 

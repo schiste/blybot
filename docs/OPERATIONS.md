@@ -2,10 +2,10 @@
 
 How to run one or many Blybot instances on Wikimedia Toolforge. An
 **instance** = one config file `~/<name>.env` publishing to its own wiki
-pages; it runs **one continuous job per platform it has a token for**
-(`<name>-telegram`, `<name>-discord`, …) — see "Choosing a platform"
-below. All instances on a tool share the repository checkout, the
-virtualenv, and the on-wiki account.
+pages; it runs **one continuous job per platform it is configured for**
+(`<name>-telegram`, `<name>-discord`, `<name>-irc`) — see "Choosing a
+platform" below. All instances on a tool share the repository checkout,
+the virtualenv, and the on-wiki account.
 
 Everything below runs on a Toolforge bastion **as the tool user**:
 
@@ -28,20 +28,21 @@ wrapper `~/run-<name>.sh`, job `<name>`, logs `~/<name>.out|.err`.
 
 ## Choosing a platform
 
-One instance runs **every platform it has a token for**, each as its own
-isolated continuous job. Put whichever bot tokens you have in the single
-base env `~/<name>.env`, and `deploy-instance.sh` starts one job per
-platform whose token is present: `TELEGRAM_BOT_TOKEN` → job
-`<name>-telegram`, `DISCORD_BOT_TOKEN` → job `<name>-discord`. Deploying an
-instance always (re)deploys all of them; removing a token retires that
-platform's job on the next deploy. You never hand-create per-platform
-instances, and a crash in one platform's job cannot touch the other's
-(separate process, memory, and `<name>-<platform>.out`/`.err` logs).
+One instance runs **every platform it is configured for**, each as its own
+isolated continuous job. Put whichever platform credentials you have in the
+single base env `~/<name>.env`, and `deploy-instance.sh` starts one job per
+platform whose enabling key is present: `TELEGRAM_BOT_TOKEN` → job
+`<name>-telegram`, `DISCORD_BOT_TOKEN` → job `<name>-discord`, `IRC_SERVER`
+→ job `<name>-irc`. Deploying an instance always (re)deploys all of them;
+clearing a key retires that platform's job on the next deploy. You never
+hand-create per-platform instances, and a crash in one platform's job
+cannot touch the others (separate process, memory, and
+`<name>-<platform>.out`/`.err` logs).
 
 Every non-chat feature (wiki publishing, ToolsDB, capture, LLM analyses,
 subscriptions) is shared: the platforms run against the **same** ToolsDB,
-whose rows are platform-tagged (`platform, channel, thread`), so Telegram
-and Discord state coexist without collision.
+whose rows are platform-tagged (`platform, channel, thread`), so Telegram,
+Discord and IRC state coexist without collision.
 
 **Shared env vars (all platforms).** `WIKI_USERNAME`, `WIKI_BOTPASSWORD`,
 `WIKI_API_URL`, `LOG_TARGET_PAGE`, `DM_TARGET_BASE`, `USER_AGENT`,
@@ -49,14 +50,16 @@ and Discord state coexist without collision.
 `ARCHIVE_PSEUDONYM_KEY`, and the `LIFTWING_*` / `LLM_*` analysis keys mean
 the same thing for every platform.
 
-**Per-platform tokens:** `TELEGRAM_BOT_TOKEN` (Telegram prerequisites
-below), `DISCORD_BOT_TOKEN` (Discord runbook below). Set as many as you
-want to run; an instance with none fails fast with
-`deploy-instance: … has no bot token yet`.
+**Per-platform enabling keys:** `TELEGRAM_BOT_TOKEN` (Telegram
+prerequisites below), `DISCORD_BOT_TOKEN` (Discord runbook below),
+`IRC_SERVER` (IRC runbook below — IRC needs no account and no token, so the
+server address is what switches it on). Set as many as you want to run; an
+instance with none fails fast with
+`deploy-instance: … configures no platform yet`.
 
 (`PLATFORM` in the env file is only consulted for a direct
 single-platform run — `python -m blybot`; the Toolforge deploy overrides it
-per job from the tokens present, so you normally leave it unset.)
+per job from the keys present, so you normally leave it unset.)
 
 ### Discord setup runbook
 
@@ -154,6 +157,47 @@ operator should not expect full parity:
 
 Everything above is intentionally absent, not broken — it lands when the
 Discord admin surface grows the corresponding commands.
+
+### IRC setup runbook
+
+IRC is the only platform with **nothing to create**: no application, no
+bot account, no token. Point the instance at a server and it connects.
+
+1. **Pick the server and channels.** Add to `~/<name>.env`:
+
+   ```
+   IRC_SERVER=irc.libera.chat
+   IRC_CHANNELS=#your-channel, #another-channel
+   IRC_NICK=blybot
+   ```
+
+   `IRC_PORT` defaults to `6697` and TLS is **on** unless you set exactly
+   `IRC_TLS=off`. Any other value (`false`, `no`, `0`) is rejected as a
+   configuration error rather than silently downgrading you to plaintext.
+2. **Register the nick if the network requires it.** On networks that
+   demand a server or NickServ password, put it in `IRC_PASSWORD` — it is
+   a secret, so it belongs only in the 0600 env file, never in a commit or
+   a chat. It is sent as `PASS` before `NICK`/`USER`, per RFC 1459.
+3. **Deploy.** `~/blybot/deploy-instance.sh start <name>` starts a
+   `<name>-irc` job; no `PLATFORM` line is needed.
+
+#### What IRC does NOT do
+
+IRC declines most of the capability matrix, and the core gates those
+features off automatically — nothing is half-working:
+
+- **Digest subscriptions are off.** `durable_dm=False`. A nick is not a
+  durable address: after a disconnect someone else can take it, so a
+  queued digest could be delivered to a stranger. This is a privacy gate,
+  not a missing feature.
+- **No threads.** Every scope is a bare channel.
+- **No message deletion**, so no requester-hiding cleanup.
+- **No buttons or deep links** — everything is plain text.
+
+What does work is the whole point of the exercise: capture, the neutral
+analysis pipeline behind it, and the wiki sinks — none of which needed a
+line of IRC-specific logic. Messages are split at the 512-byte protocol
+line limit, so long wiki-bound replies arrive as several lines.
 
 ## Per-instance prerequisites
 
@@ -497,7 +541,7 @@ permissions and env vars — there is no secret store to administer.
 
 | Secret | At rest in | Rotating it costs |
 |---|---|---|
-| `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` | `~/<name>.env` and the derived `~/.blybot-jobs/<name>-<platform>.env`, both `0600` | nothing — restart and go |
+| `TELEGRAM_BOT_TOKEN` / `DISCORD_BOT_TOKEN` / `IRC_PASSWORD` | `~/<name>.env` and the derived `~/.blybot-jobs/<name>-<platform>.env`, both `0600` | nothing — restart and go |
 | `WIKI_BOTPASSWORD` | same env files | nothing |
 | `PROFILE_ENCRYPTION_KEY` (Fernet) | env only; encrypts `token_ciphertext` in ToolsDB | **every group re-supplies its GitHub token** |
 | `ARCHIVE_PSEUDONYM_KEY` (HMAC) | env only; derives author labels | **past and future author labels stop matching** |

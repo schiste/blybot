@@ -65,7 +65,7 @@ def page_url_for(title: str) -> str:
 def make_handlers(
     publisher: FakePublisher | FailingPublisher | None = None,
     consent_mode: ConsentMode = ConsentMode.IMMEDIATE,
-    allowed: set[int] | None = None,
+    allowed: set[str] | None = None,
     limit: int = 100,
     cleanup_delay_seconds: float = 0,
     reply_cleanup_delay_seconds: float = 0,
@@ -393,7 +393,7 @@ async def test_log_media_fetch_failure_reports_without_publishing() -> None:
 
 
 async def test_log_in_unlisted_group_is_ignored_silently() -> None:
-    handlers, publisher, _ = make_handlers(allowed={-42})
+    handlers, publisher, _ = make_handlers(allowed={"-42"})
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
     assert isinstance(publisher, FakePublisher)
@@ -480,7 +480,7 @@ async def test_greets_once_on_joining_a_group(  # R3
 
 
 async def test_does_not_greet_when_leaving_or_in_unlisted_groups() -> None:
-    handlers, _, _ = make_handlers(allowed={-42})
+    handlers, _, _ = make_handlers(allowed={"-42"})
     context, bot = tg.make_context()
     await handlers.on_my_chat_member(
         tg.membership_update(tg.GROUP, user=tg.ALICE, joined=True, mine=True), context
@@ -493,7 +493,7 @@ async def test_does_not_greet_when_leaving_or_in_unlisted_groups() -> None:
 
 async def test_supergroup_migration_updates_the_allowlist(  # spec 8
 ) -> None:
-    handlers, _, policy = make_handlers(allowed={tg.GROUP.id})
+    handlers, _, policy = make_handlers(allowed={str(tg.GROUP.id)})
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
     await handlers.on_migration(tg.command_update(service_message), context)
@@ -510,10 +510,10 @@ async def test_membership_updates_outside_groups_are_ignored() -> None:
 
 
 async def test_regular_messages_are_not_migrations() -> None:
-    handlers, _, policy = make_handlers(allowed={tg.GROUP.id})
+    handlers, _, policy = make_handlers(allowed={str(tg.GROUP.id)})
     context, _ = tg.make_context()
     await handlers.on_migration(tg.command_update(tg.message(text="hello")), context)
-    assert policy.allowed == {tg.GROUP.id}  # untouched
+    assert policy.allowed == {str(tg.GROUP.id)}  # untouched
 
 
 async def test_newcomer_handler_ignores_updates_without_membership_change() -> None:
@@ -534,7 +534,7 @@ async def test_group_help_explains_the_log_gesture() -> None:
 
 
 async def test_group_help_stays_silent_in_unlisted_groups_and_dms() -> None:
-    handlers, _, _ = make_handlers(allowed={-42})
+    handlers, _, _ = make_handlers(allowed={"-42"})
     context, bot = tg.make_context()
     await handlers.on_help(tg.command_update(tg.message(text="/help")), context)
     await handlers.on_help(tg.command_update(tg.message(chat=tg.PRIVATE, text="/help")), context)
@@ -757,7 +757,7 @@ async def test_repo_reports_missing_token_and_failures() -> None:
 
 
 async def test_issue_and_repo_ignore_unlisted_groups_and_private_chats() -> None:
-    handlers, _, _ = make_handlers(allowed={-42})
+    handlers, _, _ = make_handlers(allowed={"-42"})
     context, bot = tg.make_context(args=["x"])
     await handlers.on_issue(tg.command_update(tg.message(text="/issue x")), context)
     await handlers.on_repo(tg.command_update(tg.message(text="/repo")), context)
@@ -800,7 +800,7 @@ async def test_group_help_hides_self_service_when_disabled() -> None:
 
 async def test_migration_carries_the_stored_profile() -> None:
     store = InMemoryProfiles()
-    handlers, _, policy = make_handlers(allowed={tg.GROUP.id}, store=store)
+    handlers, _, policy = make_handlers(allowed={str(tg.GROUP.id)}, store=store)
     await handlers.directory.set_log_page(gscope(), "WikiProject Ours")
     context, _ = tg.make_context()
     service_message = tg.message(text=None, migrate_to_chat_id=-100999)
@@ -812,7 +812,7 @@ async def test_migration_carries_the_stored_profile() -> None:
 
 
 async def test_migration_also_rekeys_subscriptions() -> None:
-    handlers, _, _ = make_handlers(allowed={tg.GROUP.id})
+    handlers, _, _ = make_handlers(allowed={str(tg.GROUP.id)})
     subs = InMemorySubscriptions()
     await subs.add(
         Subscription(

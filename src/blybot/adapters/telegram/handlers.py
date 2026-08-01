@@ -354,7 +354,7 @@ class GroupHandlers:
         CommandService alongside the rest.
         """
         user = message.from_user
-        return user is None or self.limiter.allow("user", user.id)
+        return user is None or self.limiter.allow("user", str(user.id))
 
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Greet once when added to a group (R3)."""
@@ -608,7 +608,7 @@ class PrivateHandlers:
         if not description:
             await reply(REPLY_BUG_USAGE)
             return
-        if not self.bug_limiter.allow("bug", chat.id):
+        if not self.bug_limiter.allow("bug", str(chat.id)):
             await reply(REPLY_THROTTLED)
             return
         try:

@@ -169,7 +169,7 @@ def _capture_service(
 
 
 def _capture_gateway(
-    *, allowed: set[int] | None = None, store: InMemoryProfiles | None = None
+    *, allowed: set[str] | None = None, store: InMemoryProfiles | None = None
 ) -> tuple[DiscordGateway, InMemoryProfiles, InMemoryArchive, CaptureService]:
     store = store if store is not None else InMemoryProfiles()
     archive = InMemoryArchive()
@@ -202,7 +202,7 @@ async def test_ingest_is_a_noop_without_capture_wiring() -> None:
 
 
 async def test_ingest_skips_a_channel_outside_the_allowlist() -> None:
-    gateway, _store, archive, _capture = _capture_gateway(allowed={999})
+    gateway, _store, archive, _capture = _capture_gateway(allowed={"999"})
     await gateway.ingest_message(
         channel_id=_CHANNEL,
         thread_id=None,
@@ -272,7 +272,7 @@ async def test_capture_command_reports_when_capture_is_off_on_the_deployment() -
 
 
 async def test_capture_command_refuses_a_channel_outside_the_allowlist() -> None:
-    gateway, _store, _archive, _capture = _capture_gateway(allowed={999})
+    gateway, _store, _archive, _capture = _capture_gateway(allowed={"999"})
     reply = (await gateway.capture_command(_CHANNEL, None, enabled=True, is_admin=True)).text
     assert reply == cmd.REPLY_NOT_ALLOWED
 
@@ -1539,7 +1539,7 @@ async def test_ten_dm_messages_become_one_discussion() -> None:
 
 async def test_transcribe_refuses_an_unserved_channel_and_reports_a_wiki_failure() -> None:
     gateway, _store, _publisher = _transcribe_gateway()
-    gateway.groups = GroupPolicy(allowed={999})
+    gateway.groups = GroupPolicy(allowed={"999"})
     assert await gateway.transcribe_command(_CHANNEL, None, _DM_ID) == cmd.REPLY_NOT_ALLOWED
 
     broken, _store2, _pub = _transcribe_gateway()

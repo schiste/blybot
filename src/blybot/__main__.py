@@ -34,6 +34,7 @@ from blybot.adapters.irc.author_mask import IrcAuthorMasker
 from blybot.adapters.irc.capabilities import IRC_CAPABILITIES
 from blybot.adapters.irc.connection import IrcConnection
 from blybot.adapters.irc.gateway import IrcGateway, IrcSession
+from blybot.adapters.irc.transport import IrcTransport
 from blybot.adapters.llm.liftwing import LiftWingClient
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
@@ -447,6 +448,7 @@ def _spawn(coro: Coroutine[object, object, None]) -> asyncio.Task[None]:
 
 # Roughly one liveness line every 15 minutes, matching the Telegram cadence.
 _DISCORD_HEARTBEAT_SECONDS: Final = 900.0
+_IRC_HEARTBEAT_SECONDS: Final = 900.0
 
 
 async def _discord_startup(  # noqa: PLR0913 -- setup-hook wiring enumerates its dependencies
@@ -763,7 +765,7 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
     return 0
 
 
-def run_irc(config: Config) -> int:
+def run_irc(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
     """Build the IRC object graph and run the session until the peer closes.
 
     The narrowest of the three roots, because IRC's capabilities admit the
@@ -795,8 +797,66 @@ def run_irc(config: Config) -> int:
         default_repo="",
         page_suffix=config.wiki_page_suffix,
     )
+    publisher = MetaWikiPublisher(
+        api_url=config.wiki_api_url,
+        username=config.wiki_username,
+        botpassword=config.wiki_botpassword,
+        user_agent=config.user_agent,
+        max_attempts=config.wiki_max_retries,
+        counters=counters,
+    )
+    sanitizer = WikitextSanitizer()
+    repo_gateway = GitHubRepoGateway(user_agent=config.user_agent)
+    llm_client: LiftWingClient | None = None
     capture_service: CaptureService | None = None
     masker: IrcAuthorMasker | None = None
+    llm_defaults: LlmSettings | None = None
+    collectors: list[tuple[MessageCollector, str]] = []
+
+    # The same engine graph as the other roots, grown by deployment tier.
+    sources: dict[str, Source] = {}
+    transforms: dict[str, Transform] = {}
+    sinks: dict[str, Sink] = {"chat_confirm": ChatConfirmSink()}
+    if store is not None:
+        sources["repo_events"] = RepoEventsSource(store=store, vault=store, gateway=repo_gateway)
+        transforms["rule_match"] = RuleMatchTransform(counters=counters)
+        sinks["chat_message"] = ChatMessagesSink()
+    if store is not None and archive is not None:
+        llm_defaults = LlmSettings(lang=config.llm_default_lang)
+        llm_client = LiftWingClient(
+            api_base=config.liftwing_api_base,
+            user_agent=config.user_agent,
+            models={
+                "default": config.liftwing_model_default,
+                "large": config.liftwing_model_large,
+            },
+            timeout_seconds=config.liftwing_timeout_seconds,
+            counters=counters,
+        )
+        sources["archive_window"] = ArchiveWindowSource(archive=archive)
+        transforms["prompt"] = PromptTransform(
+            runners={"liftwing": llm_client},
+            store=store,
+            defaults=llm_defaults,
+            max_tokens_ceiling=config.llm_max_tokens_ceiling,
+            max_chunks=config.llm_max_chunks_per_run,
+            counters=counters,
+            max_tokens_per_run=config.llm_max_tokens_per_run,
+        )
+        transforms["stats"] = StatsTransform()
+        sinks["wiki_section"] = WikiSectionSink(
+            publisher=publisher,
+            sanitizer=sanitizer,
+            resolve_page=explicit_page_resolver(directory),
+            page_url_for=config.page_url,
+            edit_summary=config.edit_summary,
+            bot_name=config.bot_name,
+        )
+        sinks["reply"] = ChatReplySink(max_chars=IRC_CAPABILITIES.max_message_chars)
+    engine = ActionEngine(
+        sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock
+    )
+
     if store is not None and archive is not None:
         capture_service = CaptureService(
             store=store,
@@ -810,6 +870,39 @@ def run_irc(config: Config) -> int:
             retention_window=timedelta(days=config.capture_retention_days),
         )
         masker = IrcAuthorMasker(key=config.archive_pseudonym_key)
+        collectors.append(
+            (
+                ActionScheduler(
+                    store=store,
+                    engine=engine,
+                    groups=group_policy,
+                    clock=clock,
+                    counters=counters,
+                ),
+                "action_tick",
+            )
+        )
+    if store is not None:
+        collectors.append(
+            (RepoNotifier(store=store, groups=group_policy, engine=engine), "repo_notify")
+        )
+    if capture_service is not None and store is not None and config.capture_reannounce_days:
+        # Consent must not quietly age out as a channel's membership turns
+        # over: the periodic re-announcement is the only thing that tells
+        # people who joined after `capture on` that they are being archived.
+        collectors.append(
+            (
+                CaptureReminder(
+                    store=store,
+                    groups=group_policy,
+                    clock=clock,
+                    cadence=timedelta(days=config.capture_reannounce_days),
+                ),
+                "capture_remind",
+            )
+        )
+    # No `sub_tick`: durable_dm=False gates digest subscriptions off, and no
+    # `session_sweep`: IRC runs no DM transcription sessions to expire.
 
     commands = CommandService(
         directory=directory,
@@ -818,8 +911,22 @@ def run_irc(config: Config) -> int:
         counters=counters,
         capture_service=capture_service,
         vault=store,
+        repo_actions=repo_gateway,
+        actions=store if archive is not None else None,
+        clock=clock,
+        engine=engine,
         capabilities=IRC_CAPABILITIES,
         default_lang=config.llm_default_lang,
+        repo_service=(
+            GroupRepoService(gateway=repo_gateway, vault=store, directory=directory)
+            if store
+            else None
+        ),
+        repo_limiter=SlidingWindowLimiter(
+            clock=clock, limit=config.log_throttle_per_minute, window=timedelta(minutes=1)
+        ),
+        llm_defaults=llm_defaults,
+        llm_max_tokens_ceiling=config.llm_max_tokens_ceiling,
     )
     gateway = IrcGateway(
         directory=directory,
@@ -830,17 +937,48 @@ def run_irc(config: Config) -> int:
         capture=capture_service,
         masker=masker,
     )
-    asyncio.run(_irc_main(config, gateway, store, archive))
+
+    async def release_clients() -> None:
+        await publisher.aclose()
+        await repo_gateway.aclose()
+        if llm_client is not None:
+            await llm_client.aclose()
+
+    asyncio.run(
+        _irc_main(
+            config,
+            gateway,
+            store,
+            archive,
+            collectors=tuple(collectors),
+            counters=counters,
+            release=release_clients,
+        )
+    )
     return 0
 
 
-async def _irc_main(
+async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph once
     config: Config,
     gateway: IrcGateway,
     store: ToolsDbStore | None,
     archive: ToolsDbArchive | None,
+    *,
+    collectors: tuple[tuple[MessageCollector, str], ...] = (),
+    counters: Counters | None = None,
+    release: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
-    """Bootstrap storage, dial the server, and run the session."""
+    """Bootstrap storage, dial the server, and run the session and its loops.
+
+    The background collectors write to the *same* socket the session reads
+    from, concurrently. That is safe because `IrcConnection.send_line` is
+    the single writer and serializes under a lock — and because it paces
+    every line through a token bucket, so a multi-line digest cannot flood
+    the bot off the server.
+
+    The session is the process: when the peer closes, the delivery loops
+    are cancelled rather than left spinning against a dead socket.
+    """
     if store is not None:
         try:
             await store.bootstrap()
@@ -859,10 +997,28 @@ async def _irc_main(
         channels=config.irc_channels,
         password=config.irc_password,
     )
+    transport = IrcTransport(channel=connection)
+    poll_interval = config.events_poll_minutes * 60
+    background = [
+        asyncio.create_task(message_loop(transport, collector, poll_interval, label))
+        for collector, label in collectors
+    ]
+    if counters is not None:
+        background.append(
+            asyncio.create_task(heartbeat_loop(counters, archive, _IRC_HEARTBEAT_SECONDS))
+        )
+    # Let every loop reach its first await before inbound traffic starts, so
+    # the delivery side is armed rather than merely scheduled.
+    await asyncio.sleep(0)
     try:
         await session.run()
     finally:
+        for task in background:
+            task.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
         await connection.close()
+        if release is not None:
+            await release()
 
 
 if __name__ == "__main__":

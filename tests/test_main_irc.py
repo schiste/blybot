@@ -10,13 +10,17 @@ from cryptography.fernet import Fernet
 
 import blybot.__main__ as entry
 from blybot.adapters.irc.capabilities import IRC_CAPABILITIES
+from blybot.adapters.irc.transport import IrcTransport
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
 from blybot.domain.ports import StorageError
+from blybot.observability import Counters
+from blybot.services.delivery import message_loop
 from tests.test_config import REQUIRED
 
 # Captured before `_run` patches it out, so the shell can still be exercised.
 _REAL_IRC_MAIN = entry._irc_main
+_REAL_MESSAGE_LOOP = message_loop
 
 if TYPE_CHECKING:
     from blybot.adapters.irc.gateway import IrcGateway
@@ -38,8 +42,10 @@ def _run(monkeypatch: pytest.MonkeyPatch, **extra: str) -> dict[str, Any]:
     _irc_env(monkeypatch, **extra)
     seen: dict[str, Any] = {}
 
-    def fake_main(config: Config, gateway: IrcGateway, store: Any, archive: Any) -> Any:
-        seen.update(config=config, gateway=gateway, store=store, archive=archive)
+    def fake_main(
+        config: Config, gateway: IrcGateway, store: Any, archive: Any, **kwargs: Any
+    ) -> Any:
+        seen.update(config=config, gateway=gateway, store=store, archive=archive, **kwargs)
         return _noop()
 
     monkeypatch.setattr(entry, "_irc_main", fake_main)
@@ -51,6 +57,10 @@ def _run(monkeypatch: pytest.MonkeyPatch, **extra: str) -> dict[str, Any]:
 
 async def _noop() -> None:
     return None  # pragma: no cover -- closed unstarted by the patched asyncio.run
+
+
+def _labels(seen: dict[str, Any]) -> set[str]:
+    return {label for _collector, label in seen["collectors"]}
 
 
 def test_irc_full_deployment_wires_capture_and_the_masker(
@@ -219,3 +229,112 @@ async def test_irc_main_contains_a_bootstrap_failure(
     # A dead ToolsDB must not stop the bot from serving the channel.
     await _REAL_IRC_MAIN(seen["config"], seen["gateway"], seen["store"], None)
     assert writer.closed
+
+
+# --- background delivery loops (#67) ------------------------------------------
+
+
+async def test_a_full_deployment_runs_every_collector_irc_can_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _run(
+        monkeypatch,
+        PROFILE_ENCRYPTION_KEY=Fernet.generate_key().decode(),
+        ARCHIVE_PSEUDONYM_KEY="long-random-operator-key",
+        CAPTURE_REANNOUNCE_DAYS="30",
+    )
+    # No `sub_tick`: durable_dm=False gates digests off. No `session_sweep`:
+    # IRC runs no DM transcription sessions to expire.
+    assert _labels(seen) == {"action_tick", "repo_notify", "capture_remind"}
+    await seen["release"]()  # closes the wiki, GitHub and LiftWing clients
+    collectors = {label: collector for collector, label in seen["collectors"]}
+    assert collectors["capture_remind"].cadence.days == 30
+    engine = collectors["action_tick"].engine
+    assert collectors["repo_notify"].engine is engine  # one engine per deployment
+    assert set(engine.sources) == {"archive_window", "repo_events"}
+    assert set(engine.sinks) == {"wiki_section", "reply", "chat_message", "chat_confirm"}
+
+
+def test_the_reminder_needs_the_cadence_to_be_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _run(
+        monkeypatch,
+        PROFILE_ENCRYPTION_KEY=Fernet.generate_key().decode(),
+        ARCHIVE_PSEUDONYM_KEY="long-random-operator-key",
+    )
+    assert _labels(seen) == {"action_tick", "repo_notify"}
+
+
+async def test_a_store_only_deployment_notifies_but_schedules_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _run(monkeypatch, PROFILE_ENCRYPTION_KEY=Fernet.generate_key().decode())
+    assert _labels(seen) == {"repo_notify"}  # scheduled analyses need the archive
+    collectors = {label: collector for collector, label in seen["collectors"]}
+    assert set(collectors["repo_notify"].engine.sources) == {"repo_events"}
+    await seen["release"]()  # no LiftWing client on this tier to close
+
+
+def test_a_minimal_deployment_has_no_background_work_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert _run(monkeypatch)["collectors"] == ()
+
+
+async def test_each_collector_gets_a_delivery_loop_on_the_session_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The loops write to the SAME socket the session reads from."""
+    seen = _gateway_for(monkeypatch, EVENTS_POLL_MINUTES="7")
+    _dial(monkeypatch, b"")
+    spawned: list[tuple[Any, Any, float, str]] = []
+
+    async def record(transport: Any, collector: Any, interval: float, label: str) -> None:
+        spawned.append((transport, collector, interval, label))
+
+    monkeypatch.setattr(entry, "message_loop", record)
+    collector = cast("Any", object())
+    await _REAL_IRC_MAIN(
+        seen["config"],
+        seen["gateway"],
+        None,
+        None,
+        collectors=((collector, "action_tick"),),
+    )
+
+    (transport, given, interval, label) = spawned[0]
+    assert (given, interval, label) == (collector, 420.0, "action_tick")
+    assert isinstance(transport, IrcTransport)
+    assert transport.capabilities is IRC_CAPABILITIES
+
+
+async def test_the_loops_are_cancelled_when_the_peer_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delivery loop left spinning against a dead socket would never exit."""
+    seen = _gateway_for(monkeypatch)
+    _dial(monkeypatch, b"")  # EOF immediately: the session ends at once
+    started: list[str] = []
+
+    async def forever(_transport: Any, _collector: Any, _interval: float, label: str) -> None:
+        started.append(label)
+        await asyncio.Event().wait()  # never completes on its own
+
+    monkeypatch.setattr(entry, "message_loop", forever)
+    released: list[int] = []
+
+    async def release() -> None:
+        released.append(1)
+
+    await _REAL_IRC_MAIN(
+        seen["config"],
+        seen["gateway"],
+        None,
+        None,
+        collectors=((cast("Any", object()), "repo_notify"),),
+        counters=Counters(),
+        release=release,
+    )
+    assert started == ["repo_notify"]  # it ran...
+    assert released == [1]  # ...and _irc_main still returned, clients closed

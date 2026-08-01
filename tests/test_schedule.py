@@ -21,7 +21,7 @@ def make_scheduler(
     clock: FakeClock,
     sink: FakeSink | None = None,
     transform: SuffixTransform | None = None,
-    allowed: set[int] | None = None,
+    allowed: set[str] | None = None,
     max_scopes: int = 200,
 ) -> tuple[ActionScheduler, Counters]:
     counters = Counters()
@@ -127,7 +127,7 @@ async def test_disallowed_groups_are_skipped() -> None:
     store, clock = InMemoryActions(), FakeClock()
     await seed(store, clock, chat_id=-99)
     clock.advance(timedelta(hours=6))
-    scheduler, _counters = make_scheduler(store, clock, allowed={-1})
+    scheduler, _counters = make_scheduler(store, clock, allowed={"-1"})
 
     assert await scheduler.collect() == []
     (stored,) = store.actions[Scope("telegram", "-99")]

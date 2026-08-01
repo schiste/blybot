@@ -161,7 +161,7 @@ async def test_v1_deployments_stay_silent_and_skip_the_api_call() -> None:
 
 async def test_unlisted_groups_cannot_configure_anything() -> None:
     handlers = make_handlers()
-    handlers.groups.allowed = {-42}  # this test group is not on the list
+    handlers.groups.allowed = {"-42"}  # this test group is not on the list
     context, bot = admin_context(args=["WikiProject", "X"])
     await handlers.on_setpage(command("/setpage WikiProject X"), context)
     assert tg.sent_texts(bot) == []

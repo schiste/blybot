@@ -74,7 +74,7 @@ class CaptureService:
             return
         # Throttle per (chat, topic) — the documented per-scope ceiling.
         # One busy topic must not starve its siblings' archives.
-        if not self.limiter.allow(f"capture:{scope.thread}", int(scope.channel)):
+        if not self.limiter.allow(f"capture:{scope.thread}", scope.channel):
             self.counters.increment("captures_throttled")
             return
         if len(message.text) > self.max_chars:

@@ -161,7 +161,7 @@ async def test_empty_windows_get_a_quiet_notice() -> None:
 
 async def test_disallowed_groups_get_silence() -> None:
     handlers = make_handlers()
-    handlers.groups = GroupPolicy(allowed={-999})
+    handlers.groups = GroupPolicy(allowed={"-999"})
     context, bot = admin_context()
 
     await handlers.on_summarize(command("/summarize"), context)

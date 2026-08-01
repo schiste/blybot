@@ -33,7 +33,7 @@ ISSUE = RepoEvent(
 def make_notifier(
     store: InMemoryProfiles,
     gateway: FakeRepoGateway,
-    allowed: set[int] | None = None,
+    allowed: set[str] | None = None,
 ) -> RepoNotifier:
     engine = ActionEngine(
         sources={"repo_events": RepoEventsSource(store=store, vault=store, gateway=gateway)},
@@ -236,4 +236,4 @@ async def test_notifications_never_go_to_unlisted_groups() -> None:
     store, gateway = InMemoryProfiles(), FakeRepoGateway(valid_tokens={"ghp_ok"})
     gateway.events = [RELEASE]
     await enable(store, chat_id=-1)
-    assert await make_notifier(store, gateway, allowed={-999}).collect() == []
+    assert await make_notifier(store, gateway, allowed={"-999"}).collect() == []

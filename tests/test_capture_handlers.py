@@ -37,7 +37,7 @@ def gscope(chat_id: int, thread_id: int = 0) -> Scope:
 def make_handlers(
     store: InMemoryProfiles | None = None,
     archive: InMemoryArchive | None = None,
-    allowed: set[int] | None = None,
+    allowed: set[str] | None = None,
 ) -> tuple[CaptureHandlers, InMemoryProfiles, InMemoryArchive]:
     store = store if store is not None else InMemoryProfiles()
     archive = archive if archive is not None else InMemoryArchive()
@@ -131,7 +131,7 @@ async def test_media_only_posts_become_media_notes() -> None:
 
 
 async def test_disallowed_channels_are_ignored() -> None:
-    handlers, store, archive = make_handlers(allowed={-999})
+    handlers, store, archive = make_handlers(allowed={"-999"})
     await enable(store, CHANNEL.id)
     context, _bot = tg.make_context()
 
@@ -333,7 +333,7 @@ async def test_a_lost_retraction_is_swallowed_and_logged() -> None:
 
 
 async def test_disallowed_channel_is_never_enabled() -> None:
-    handlers, store, _archive = make_handlers(allowed={-999})
+    handlers, store, _archive = make_handlers(allowed={"-999"})
     context, bot = tg.make_context()
 
     await handlers.on_my_chat_member(admin_change(CHANNEL, ChatMemberStatus.ADMINISTRATOR), context)
@@ -343,7 +343,7 @@ async def test_disallowed_channel_is_never_enabled() -> None:
 
 
 async def test_demotion_of_a_disallowed_channel_still_revokes_consent() -> None:
-    handlers, store, _archive = make_handlers(allowed={-999})
+    handlers, store, _archive = make_handlers(allowed={"-999"})
     await enable(store, CHANNEL.id)  # enabled back when it was allowed
     context, bot = tg.make_context()
 
@@ -364,7 +364,7 @@ async def test_non_admin_capture_command_is_refused() -> None:
     # admin gate coverage for /capture lives with the other admin tests;
     # here: the group-message path skips disallowed groups and tolerates
     # authorless messages (anonymous admins post with no from_user).
-    handlers, store, archive = make_handlers(allowed={-999})
+    handlers, store, archive = make_handlers(allowed={"-999"})
     await enable(store, tg.GROUP.id)
     context, _bot = tg.make_context()
     update = tg.command_update(tg.message(text="hello", from_user=tg.ALICE))

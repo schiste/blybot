@@ -534,7 +534,7 @@ class CommandService:
 
     def _repo_allowed(self, kind: str, scope: Scope) -> bool:
         """Whether this scope is under its per-command repo rate cap."""
-        return self.repo_limiter is None or self.repo_limiter.allow(kind, int(scope.channel))
+        return self.repo_limiter is None or self.repo_limiter.allow(kind, scope.channel)
 
     async def log_message(
         self, scope: Scope, *, is_author: bool, content: LogContent

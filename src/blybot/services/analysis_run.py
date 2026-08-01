@@ -86,7 +86,7 @@ class AnalysisService:
             return CommandResult(REPLY_NOT_ADMIN, ok=False)
         # Per-channel throttle: analyses cost inference calls and publish
         # publicly, so one busy channel cannot monopolise the deployment.
-        if not self.limiter.allow("analysis", int(scope.channel)):
+        if not self.limiter.allow("analysis", scope.channel):
             return CommandResult(REPLY_THROTTLED, ok=False)
         try:
             spec = command_action(command, recipe, tokens)

@@ -428,7 +428,7 @@ async def test_reminders_respect_the_allowlist_and_storage_outages() -> None:
     store, clock = InMemoryProfiles(), FakeClock()
     await enable(store)
     reminder = make_reminder(store, clock)
-    reminder.groups = GroupPolicy(allowed={-999})
+    reminder.groups = GroupPolicy(allowed={"-999"})
     await reminder.collect()
     clock.advance(timedelta(days=31))
     assert await reminder.collect() == []  # disallowed scope stays silent

@@ -338,7 +338,7 @@ async def test_joining_bots_are_not_welcomed() -> None:
 
 
 async def test_newcomers_in_unlisted_groups_are_ignored() -> None:
-    group_handlers, _, _ = make_group_handlers(allowed={-42})
+    group_handlers, _, _ = make_group_handlers(allowed={"-42"})
     context, bot = tg.make_context()
     join = tg.membership_update(tg.GROUP, user=tg.ALICE, joined=True, mine=False)
     await group_handlers.on_newcomer(join, context)
@@ -413,7 +413,7 @@ async def test_chat_picker_without_pending_message_expires_neutrally() -> None:
 
 async def test_chat_picker_rejects_unserved_groups() -> None:
     handlers, publisher = make_handlers(with_route=False)
-    handlers.groups.allowed.add(-999)
+    handlers.groups.allowed.add("-999")
     context, bot = tg.make_context()
     await handlers.on_dm(dm("private statement"), context)
     request_id = last_destination_request_id(bot)

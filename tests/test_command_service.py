@@ -86,7 +86,7 @@ def _capture_service(store: InMemoryProfiles, archive: InMemoryArchive) -> Captu
 def _service(
     *,
     store: InMemoryProfiles | None = None,
-    allowed: set[int] | None = None,
+    allowed: set[str] | None = None,
     page_suffix: str = "Logs",
     with_capture: bool = True,
     with_vault: bool = True,
@@ -124,7 +124,7 @@ async def test_capture_reports_when_capture_is_off_on_the_deployment() -> None:
 
 
 async def test_capture_refuses_a_scope_outside_the_allowlist() -> None:
-    service, _store, _capture = _service(allowed={999})
+    service, _store, _capture = _service(allowed={"999"})
     result = await service.capture(_SCOPE, is_admin=True, enabled=True)
     assert result.text == c.REPLY_NOT_ALLOWED
 
@@ -673,7 +673,7 @@ async def test_store_token_reports_a_vault_outage() -> None:
 
 def _issue_service(
     *,
-    allowed: set[int] | None = None,
+    allowed: set[str] | None = None,
     with_service: bool = True,
     limit: int = 10,
 ) -> tuple[CommandService, InMemoryProfiles, FakeRepoGateway]:
@@ -730,7 +730,7 @@ async def test_issue_needs_a_description_and_the_deployment_wiring() -> None:
 
 
 async def test_issue_and_repo_refuse_channels_outside_the_allowlist() -> None:
-    service, _store, _gateway = _issue_service(allowed={999})
+    service, _store, _gateway = _issue_service(allowed={"999"})
     assert (await service.file_issue(_SCOPE, description="x")).text == c.REPLY_NOT_ALLOWED
     assert (await service.repo_summary(_SCOPE)).text == c.REPLY_NOT_ALLOWED
 
@@ -867,7 +867,7 @@ async def test_action_reports_a_storage_outage() -> None:
 
 def _log_service(
     *,
-    allowed: set[int] | None = None,
+    allowed: set[str] | None = None,
     store: InMemoryProfiles | None = None,
     with_engine: bool = True,
     limit: int = 10,
@@ -916,7 +916,7 @@ async def test_log_publishes_and_returns_the_confirmation() -> None:
 
 
 async def test_log_refuses_a_channel_outside_the_allowlist() -> None:
-    service, _store = _log_service(allowed={999})
+    service, _store = _log_service(allowed={"999"})
     result = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
     assert result.text == c.REPLY_NOT_ALLOWED
     assert result.ok is False

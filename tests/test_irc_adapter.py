@@ -12,10 +12,17 @@ from typing import Any, cast
 
 import pytest
 
+import blybot.services.commands as sub
 from blybot.adapters.irc.author_mask import IrcAuthorMasker
 from blybot.adapters.irc.capabilities import IRC_CAPABILITIES
 from blybot.adapters.irc.connection import IrcConnection
-from blybot.adapters.irc.gateway import IrcGateway, IrcSession
+from blybot.adapters.irc.gateway import (
+    REPLY_CAPTURE_USAGE,
+    REPLY_HELP,
+    IrcGateway,
+    IrcSession,
+)
+from blybot.adapters.irc.ops import ChannelOps, strip_prefix
 from blybot.adapters.irc.protocol import LINE_BYTES, parse_line, privmsg_lines
 from blybot.adapters.irc.scope import irc_target, nick_scope, scope_of
 from blybot.adapters.irc.transport import IrcTransport
@@ -249,7 +256,12 @@ def _gateway(store: InMemoryProfiles | None = None) -> tuple[IrcGateway, InMemor
         directory=directory,
         groups=groups,
         commands=CommandService(
-            directory=directory, groups=groups, page_url_for=str, counters=Counters()
+            directory=directory,
+            groups=groups,
+            page_url_for=str,
+            counters=Counters(),
+            capture_service=capture,
+            capabilities=IRC_CAPABILITIES,
         ),
         clock=clock,
         nick="blybot",
@@ -349,3 +361,291 @@ async def test_session_run_registers_then_dispatches_until_eof() -> None:
     await IrcSession(channel=conn, gateway=gateway, nick="blybot", channels=("#chan",)).run()
     assert [m.text for m in archive.messages] == ["one", "two"]
     assert b"JOIN #chan\r\n" in writer.written
+
+
+# --- operator tracking (#21) --------------------------------------------------
+
+
+def test_names_prefixes_split_into_nick_and_authority() -> None:
+    """Servers stack prefixes and disagree about which they use."""
+    assert strip_prefix("@alice") == ("alice", True)
+    assert strip_prefix("~owner") == ("owner", True)
+    assert strip_prefix("&admin") == ("admin", True)
+    assert strip_prefix("@+both") == ("both", True)  # stacked
+    assert strip_prefix("+voiced") == ("voiced", False)  # voice is not authority
+    assert strip_prefix("%halfop") == ("halfop", False)
+    assert strip_prefix("plain") == ("plain", False)
+
+
+def test_names_reply_is_the_authoritative_snapshot() -> None:
+    ops = ChannelOps()
+    ops.grant("#chan", "stale")
+    ops.replace("#chan", ["@alice", "+bob", "carol"])
+    assert ops.is_op("#chan", "alice")
+    assert not ops.is_op("#chan", "bob")
+    assert not ops.is_op("#chan", "stale")  # the snapshot replaces, not merges
+
+
+def test_operator_status_is_case_insensitive_like_the_protocol() -> None:
+    """A re-cased nick must not escape a de-op, nor a re-cased channel."""
+    ops = ChannelOps()
+    ops.grant("#Chan", "Alice")
+    assert ops.is_op("#chan", "alice")
+    assert ops.is_op("#CHAN", "ALICE")
+    ops.revoke("#chan", "ALICE")
+    assert not ops.is_op("#Chan", "Alice")
+
+
+def test_leaving_the_network_or_renaming_drops_every_grant() -> None:
+    """A freed nick can be claimed by someone else, so it keeps nothing."""
+    ops = ChannelOps()
+    ops.grant("#a", "alice")
+    ops.grant("#b", "alice")
+    ops.forget("Alice")
+    assert not ops.is_op("#a", "alice")
+    assert not ops.is_op("#b", "alice")
+
+
+def test_forgetting_a_channel_drops_only_that_channel() -> None:
+    ops = ChannelOps()
+    ops.grant("#a", "alice")
+    ops.grant("#b", "alice")
+    ops.forget_channel("#A")
+    assert not ops.is_op("#a", "alice")
+    assert ops.is_op("#b", "alice")
+
+
+def test_mode_changes_grant_and_revoke_in_order() -> None:
+    ops = ChannelOps()
+    ops.apply_mode("#chan", ["+oo", "alice", "bob"])
+    assert ops.is_op("#chan", "alice")
+    assert ops.is_op("#chan", "bob")
+    ops.apply_mode("#chan", ["+o-o", "carol", "alice"])  # mixed in one line
+    assert ops.is_op("#chan", "carol")
+    assert not ops.is_op("#chan", "alice")
+
+
+def test_mode_pairs_arguments_past_flags_that_are_not_authority() -> None:
+    """`+vo bob alice` must op alice, not bob: `v` consumes its own argument."""
+    ops = ChannelOps()
+    ops.apply_mode("#chan", ["+vo", "bob", "alice"])
+    assert ops.is_op("#chan", "alice")
+    assert not ops.is_op("#chan", "bob")
+
+
+def test_mode_ignores_no_argument_channel_flags() -> None:
+    ops = ChannelOps()
+    ops.apply_mode("#chan", ["+mo", "alice"])  # +m takes nothing
+    assert ops.is_op("#chan", "alice")
+
+
+def test_a_mode_line_we_cannot_pair_soundly_is_discarded_whole() -> None:
+    """Mis-pairing would op the WRONG nick — the one failure that matters."""
+    ops = ChannelOps()
+    ops.apply_mode("#chan", ["+o"])  # truncated: no argument at all
+    assert not ops.is_op("#chan", "alice")
+    ops.apply_mode("#chan", ["+o", "alice", "unexpected-extra"])  # too many arguments
+    assert not ops.is_op("#chan", "alice")
+    ops.apply_mode("#chan", [])  # nothing at all
+    assert not ops.is_op("#chan", "alice")
+
+
+def test_setting_a_limit_consumes_an_argument_but_clearing_it_does_not() -> None:
+    ops = ChannelOps()
+    ops.apply_mode("#chan", ["+lo", "50", "alice"])
+    assert ops.is_op("#chan", "alice")
+    ops.apply_mode("#chan", ["-l+o", "bob"])  # -l carries no argument
+    assert ops.is_op("#chan", "bob")
+
+
+# --- command routing (#21) ----------------------------------------------------
+
+
+def _op_gateway(store: InMemoryProfiles | None = None) -> IrcGateway:
+    gateway, _archive = _gateway(store)
+    gateway.ops.grant("#chan", "chanop")
+    return gateway
+
+
+async def test_an_unknown_verb_is_answered_with_silence() -> None:
+    """A bot that answers every stray `!foo` is noise in a busy channel."""
+    gateway = _op_gateway()
+    assert await gateway.run_command("#chan", "chanop", "nonsense") is None
+    assert await gateway.run_command("#chan", "chanop", "") is None
+
+
+async def test_a_non_operator_is_refused_by_the_neutral_service() -> None:
+    gateway = _op_gateway()
+    reply = await gateway.run_command("#chan", "randomer", "capture on")
+    assert reply == sub.REPLY_NOT_ADMIN
+    # ...and the refusal is the SAME text Telegram and Discord give.
+
+
+async def test_an_operator_can_toggle_capture() -> None:
+    scope = scope_of("#chan")
+    store = InMemoryProfiles(profiles={scope: GroupProfile(scope=scope)})
+    gateway = _op_gateway(store)
+    reply = await gateway.run_command("#chan", "chanop", "capture on")
+    assert reply == sub.REPLY_CAPTURE_ENABLED
+    assert store.profiles[scope].capture_enabled
+
+    assert await gateway.run_command("#chan", "chanop", "capture") == REPLY_CAPTURE_USAGE
+    assert await gateway.run_command("#chan", "chanop", "capture maybe") == REPLY_CAPTURE_USAGE
+
+
+async def test_help_lists_the_surface_without_needing_op() -> None:
+    gateway = _op_gateway()
+    assert await gateway.run_command("#chan", "anyone", "help") == REPLY_HELP
+
+
+async def test_every_dispatched_verb_reaches_the_neutral_service() -> None:
+    """Each entry is one service call; none of them may raise on a bare run."""
+    gateway = _op_gateway()
+    for command in (
+        "settings",
+        "reset",
+        "setpage Project:Somewhere",
+        "setrepo owner/repo",
+        "revoke",
+        "llm show",
+        "events on",
+        "rule list",
+        "rules",
+        "action list",
+        "issue something is broken",
+        "repo",
+    ):
+        reply = await gateway.run_command("#chan", "chanop", command)
+        assert reply, f"{command!r} produced no reply"
+
+
+async def test_the_token_command_refuses_and_never_echoes_what_was_typed() -> None:
+    """By the time this runs the secret is already public: warn, don't repeat."""
+    gateway = _op_gateway()
+    reply = await gateway.run_command("#chan", "chanop", "settoken ghp_supersecretvalue")
+    assert reply == sub.REPLY_PAT_NO_PRIVATE_CHANNEL
+    assert "ghp_supersecretvalue" not in (reply or "")
+    assert "revoke" in (reply or "").lower()  # tells them what to do about it
+
+
+async def test_the_token_refusal_does_not_depend_on_the_deployment() -> None:
+    """A non-admin is still refused as a non-admin; anyone else gets the
+    capability refusal even where repo actions are not wired at all."""
+    gateway = _op_gateway()
+    assert await gateway.run_command("#chan", "randomer", "settoken x") == sub.REPLY_NOT_ADMIN
+
+
+# --- session-level membership + reply routing (#21) ---------------------------
+
+
+def _session(gateway: IrcGateway) -> tuple[IrcSession, _RecordingChannel]:
+    channel = _RecordingChannel()
+    return (
+        IrcSession(channel=cast("Any", channel), gateway=gateway, nick="blybot", channels=()),
+        channel,
+    )
+
+
+async def _feed(session: IrcSession, *raws: str) -> None:
+    for raw in raws:
+        line = parse_line(raw)
+        assert line is not None, raw
+        await session.handle(line)
+
+
+async def test_the_session_learns_operators_from_the_names_reply() -> None:
+    """A restart re-learns from NAMES, so no identity is ever persisted."""
+    gateway, _archive = _gateway()
+    session, _channel = _session(gateway)
+    await _feed(session, ":srv 353 blybot = #chan :@alice bob +carol")
+    assert gateway.ops.is_op("#chan", "alice")
+    assert not gateway.ops.is_op("#chan", "bob")
+
+
+async def test_the_session_follows_mode_kick_part_quit_and_nick() -> None:
+    gateway, _archive = _gateway()
+    session, _channel = _session(gateway)
+    await _feed(
+        session,
+        ":srv 353 blybot = #chan :@alice @bob @carol @dave",
+        ":srv MODE #chan -o alice",
+        ":op!u@h KICK #chan bob :bye",
+        ":carol!u@h PART #chan :leaving",
+        ":dave!u@h QUIT :connection reset",
+    )
+    for gone in ("alice", "bob", "carol", "dave"):
+        assert not gateway.ops.is_op("#chan", gone), gone
+
+
+async def test_a_rename_drops_the_old_nicks_authority() -> None:
+    """The old name is freed and someone else may claim it."""
+    gateway, _archive = _gateway()
+    session, _channel = _session(gateway)
+    await _feed(session, ":srv 353 blybot = #chan :@alice", ":alice!u@h NICK :alice_away")
+    assert not gateway.ops.is_op("#chan", "alice")
+    assert not gateway.ops.is_op("#chan", "alice_away")  # not carried over either
+
+
+async def test_the_bot_leaving_forgets_the_whole_channel() -> None:
+    gateway, _archive = _gateway()
+    session, _channel = _session(gateway)
+    await _feed(session, ":srv 353 blybot = #chan :@alice", ":blybot!u@h PART #chan :bye")
+    assert not gateway.ops.is_op("#chan", "alice")
+
+
+async def test_a_malformed_membership_line_changes_nothing() -> None:
+    """A peer can send anything; a short line must not throw or mis-apply."""
+    gateway, _archive = _gateway()
+    session, _channel = _session(gateway)
+    await _feed(
+        session,
+        ":srv 353 blybot = #chan :@alice",
+        ":srv 353 blybot :truncated",  # too few params to name a channel
+        ":srv MODE",  # no params at all
+        ":op!u@h KICK #chan",  # no nick to kick
+        "QUIT :no prefix, so nobody to forget",
+        ":alice!u@h PART",  # no channel named
+    )
+    assert gateway.ops.is_op("#chan", "alice")  # untouched by any of them
+
+
+async def test_a_command_reply_goes_to_the_channel_not_the_caller() -> None:
+    """On IRC this is the consent model: the people being archived must see
+    the announcement, and there is no ephemeral reply to hide it in."""
+    scope = scope_of("#chan")
+    store = InMemoryProfiles(profiles={scope: GroupProfile(scope=scope)})
+    gateway, archive = _gateway(store)
+    session, channel = _session(gateway)
+    await _feed(session, ":srv 353 blybot = #chan :@chanop")
+    await _feed(session, ":chanop!u@h PRIVMSG #chan :blybot: capture on")
+
+    assert channel.sent, "the toggle produced no channel announcement"
+    announcement = " ".join(line.split(" :", 1)[1] for line in channel.sent)
+    assert announcement == sub.REPLY_CAPTURE_ENABLED
+    assert all(line.startswith("PRIVMSG #chan :") for line in channel.sent)
+    assert archive.messages == []  # the command itself is not archived
+
+
+async def test_an_unrecognised_command_is_archived_as_ordinary_chatter() -> None:
+    """Addressing the bot with nonsense is still just someone talking.
+
+    Only a RECOGNISED command is withheld from the archive; dropping every
+    line that happens to start with the bot's name would leave holes in a
+    log the channel was told was being kept.
+    """
+    scope = scope_of("#chan")
+    store = InMemoryProfiles(profiles={scope: GroupProfile(scope=scope, capture_enabled=True)})
+    gateway, archive = _gateway(store)
+    session, channel = _session(gateway)
+    await _feed(session, ":n!u@h PRIVMSG #chan :blybot: what do you think?")
+    assert channel.sent == []  # silence, not an error
+    assert [m.text for m in archive.messages] == ["blybot: what do you think?"]
+
+
+async def test_a_long_reply_is_split_across_protocol_lines() -> None:
+    gateway, _archive = _gateway()
+    session, channel = _session(gateway)
+    await _feed(session, ":n!u@h PRIVMSG #chan :!help")
+    assert channel.sent  # help needs no op
+    for line in channel.sent:
+        assert len(f"{line}\r\n".encode()) <= LINE_BYTES

@@ -564,10 +564,19 @@ describe the expected shape, nothing works yet.
 | `message_delete` | yes | yes | **no** | unbuilt |
 | `id_can_change` | yes | no | no | unbuilt |
 | `rich_choices` | yes | yes | **no** | unbuilt |
+| `confidential_input` | yes | yes | **no** | unbuilt |
 
 Telegram supports every gate the core knows about, so on Telegram the
 gates never change behavior — they exist for the platforms (Discord, IRC,
 and later ones) that do not.
+
+`confidential_input` is the newest gate and the one with teeth. Every
+platform that accepts a repo token has some way to not leave the secret
+lying in a chat log: Telegram pastes into a DM and deletes the message,
+Discord uses a modal so it never becomes a message at all. IRC has
+neither, so `store_token` **refuses** rather than degrading — the degraded
+version of that flow is "type your credential into a log file". The
+refusal lives in the neutral service, so no adapter decides it.
 
 IRC is the useful stress test: it is the first adapter that says **no** to
 most of the matrix. `durable_dm=False` gates digest subscriptions off
@@ -689,14 +698,23 @@ be public — the channel, not the admin, is the audience, and an ephemeral
 message is not permanent either. `CommandResult.ok` is what lets one
 adapter make that split: announce on success, refuse privately.
 
+IRC inverts it again, and this is the clearest illustration that *the
+neutral rule is fixed while the mechanism that preserves it is not*. IRC
+has no ephemeral reply at all, so every answer is a channel PRIVMSG.
+That makes the announcement free — it is structurally impossible to
+enable capture quietly — while removing the private-refusal half. The
+property "the people being archived are told" holds on all three
+platforms; the machinery that delivers it is different every time, and on
+Discord it is the exact opposite of the platform's own default.
+
 ### 22.6 Authorization model (issue #27)
 
 Authorization is **checked live at the moment of the privileged action and
 never stored**. Each platform proves it its own way — Telegram
 `getChatMember`, Discord `guild_permissions.administrator` off the
-interaction, IRC channel ops when that adapter lands — but the rule is the
-same everywhere, and the neutral services take `is_admin` as an argument
-rather than deciding it.
+interaction, IRC channel-operator status — but the rule is the same
+everywhere, and the neutral services take `is_admin` as an argument rather
+than deciding it.
 
 - **Single-step commands.** Every Telegram admin handler passes through
   `_admin_chat` (allowlist → self-service enabled → live `getChatMember`);
@@ -720,6 +738,37 @@ rather than deciding it.
 - **Least privilege.** Discord requests exactly one privileged intent
   (message content); members/presence are never requested. See OPERATIONS
   for the invite scopes and the permissions an operator should *not* grant.
+
+#### The IRC trust model
+
+IRC has no permission API, so authority is **channel-operator status**,
+learned by watching the protocol: the `NAMES` reply the server sends on
+JOIN is the authoritative snapshot, and `MODE` / `KICK` / `PART` / `QUIT`
+/ `NICK` keep it current. Voice (`+`) and halfop (`%`) are deliberately
+not authority; `@`, `&` and `~` are.
+
+Three properties make this acceptable rather than merely convenient:
+
+- **Nothing is persisted.** The tracker is in-memory and holds raw nicks,
+  so it lives in the adapter and never crosses the pseudonymizing boundary
+  (R6). A restart re-learns from `NAMES`, which means there is no stored
+  identity to leak and no stale grant that survives a redeploy.
+- **It fails closed.** An unknown nick is not an op. A `MODE` line whose
+  flag/argument pairing cannot be reconciled — which flags take arguments
+  is network-specific — is discarded whole rather than applied, because
+  mis-pairing would grant authority to *the wrong nick*. The cost of the
+  conservative choice is that an operator occasionally re-ops; the cost of
+  the permissive one is an outsider with the admin surface.
+- **Nicks are not identities.** A nick that parts, quits, or renames loses
+  every grant immediately, because on IRC the name is the only handle and
+  a freed one can be claimed by someone else. The same reasoning is why
+  `durable_dm` is False: a queued digest addressed to a nick could reach a
+  stranger.
+
+The trust boundary is therefore explicitly *the channel's operators*, not
+individual people — the bot cannot tell one human from another on IRC and
+does not try. An operator who ops an untrusted user has delegated the
+bot's admin surface to them, exactly as they have delegated the channel.
 
 ---
 

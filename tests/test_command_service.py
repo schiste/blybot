@@ -641,6 +641,24 @@ async def test_store_token_validates_against_the_bound_repo_then_encrypts() -> N
     assert store.tokens[_SCOPE] == _GOOD_PAT
 
 
+async def test_store_token_refuses_where_there_is_no_private_input() -> None:
+    """Refuse rather than degrade: the degraded flow is "type your
+    credential into a log file". Gated on the capability, so every platform
+    without a confidential input gets it without any adapter deciding."""
+    service, store, _gateway = _repo_service()
+    service.capabilities = replace(TELEGRAM_CAPABILITIES, confidential_input=False)
+    await service.set_repo(_SCOPE, is_admin=True, repo="org/repo")
+
+    refused = await service.store_token(_SCOPE, is_admin=True, token=_GOOD_PAT)
+    assert refused.text == c.REPLY_PAT_NO_PRIVATE_CHANNEL
+    assert refused.ok is False
+    assert store.tokens == {}  # the secret never reaches the vault
+
+    # A non-admin is still answered as a non-admin, not handed the hint.
+    outsider = await service.store_token(_SCOPE, is_admin=False, token=_GOOD_PAT)
+    assert outsider.text == c.REPLY_NOT_ADMIN
+
+
 async def test_store_token_needs_a_repo_a_secret_and_the_wiring() -> None:
     service, store, _gateway = _repo_service()
     unbound = await service.store_token(_SCOPE, is_admin=True, token=_GOOD_PAT)

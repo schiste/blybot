@@ -26,4 +26,5 @@ DISCORD_CAPABILITIES: Final = PlatformCapabilities(
     message_delete=True,
     id_can_change=False,
     rich_choices=True,
+    confidential_input=True,  # a modal: the secret never becomes a message
 )

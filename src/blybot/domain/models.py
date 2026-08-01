@@ -168,6 +168,16 @@ class PlatformCapabilities:
     message_delete: bool = False
     id_can_change: bool = False  # supergroup-migration-style id changes
     rich_choices: bool = False
+    # Whether the platform offers ANY way for a user to hand the bot a
+    # secret without leaving it sitting in a chat log. Telegram has one
+    # (paste into DM, bot deletes the message); Discord has a better one (a
+    # modal, which never becomes a message at all). IRC has none: a channel
+    # line is public, a private message still lands in the sender's client
+    # log and usually a bouncer, and ``message_delete=False`` rules out
+    # cleaning up after either. Where this is False the token-entry command
+    # must refuse rather than degrade, because the degraded version is
+    # "type your credential into a log file".
+    confidential_input: bool = False
 
     def __post_init__(self) -> None:
         if self.max_message_chars <= 0:

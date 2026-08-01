@@ -157,6 +157,24 @@ def test_capabilities_report_a_positive_message_cap(case: TransportCase) -> None
     assert transport.capabilities.max_message_chars > 0
 
 
+def test_a_platform_that_can_delete_nothing_cannot_take_a_secret(
+    case: TransportCase,
+) -> None:
+    """``confidential_input`` implies a way to not leave the secret lying around.
+
+    Every private input the bot has is one of two shapes: the secret never
+    becomes a message (a modal), or it becomes one and is deleted. A
+    platform claiming a confidential input while advertising neither a
+    private DM it can open nor message deletion is claiming something it
+    cannot deliver, and the token flow would trust it.
+    """
+    capabilities = case[0].capabilities
+    if capabilities.confidential_input:
+        assert capabilities.message_delete or capabilities.rich_choices, (
+            "confidential_input needs either deletion or a modal-style input"
+        )
+
+
 # --- Telegram-specific: the SDK-error → send-taxonomy mapping -----------------
 
 

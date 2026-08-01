@@ -181,6 +181,49 @@ bot account, no token. Point the instance at a server and it connects.
 3. **Deploy.** `~/blybot/deploy-instance.sh start <name>` starts a
    `<name>-irc` job; no `PLATFORM` line is needed.
 
+#### Commands and who may run them
+
+There is no slash-command registry, so the bot is addressed by name or by
+`!`: `blybot: capture on` and `!capture on` are the same thing. `!help`
+lists the surface.
+
+**Authority is channel-operator status** (`@`). The bot learns who holds
+it from the `NAMES` reply on join and follows `MODE`/`KICK`/`PART`/`QUIT`/
+`NICK` live. Voice (`+`) and halfop (`%`) are *not* authority. Nothing is
+stored: a restart re-learns from the server, so there is no persisted
+identity and no grant that outlives a redeploy.
+
+Operator-only: `capture on|off`, `setpage`, `settings`, `reset`,
+`setrepo`, `revoke`, `llm`, `events`, `rule`, `rules`, `action`.
+Open to anyone: `issue`, `repo`, `help`.
+
+The practical consequence for an operator: **the trust boundary is the
+channel's op list, not individual people.** The bot cannot tell one human
+from another on IRC and does not try. Opping someone hands them the bot's
+admin surface, exactly as it hands them the channel.
+
+It fails closed by design. An unknown nick is not an op, and a `MODE` line
+the bot cannot parse unambiguously is ignored rather than guessed at — so
+the worst case is an operator having to re-op, never an outsider gaining
+the admin surface. If a legitimate op is refused, `!settings` will say so;
+re-opping them (`/mode #chan +o nick`) resyncs it.
+
+#### Capture consent on IRC
+
+Same rule as everywhere: nothing is archived until an operator runs
+`capture on` in that channel, and the confirmation *is* the notice to the
+channel. IRC makes this structurally easy — there is no ephemeral reply,
+so every answer the bot gives is a normal channel message and capture
+**cannot** be enabled quietly.
+
+Note the one asymmetry with Discord: there, refusals are private and only
+the announcement is public. Here everything is public, so a non-op who
+tries `capture on` gets a visible refusal. That is noisier but not a leak.
+
+Authors are recorded only as per-channel pseudonymous labels (HMAC of the
+nick), computed at the adapter boundary — the raw nick never reaches the
+archive, and the same person is unlinkable across two channels.
+
 #### What IRC does NOT do
 
 IRC declines most of the capability matrix, and the core gates those
@@ -190,6 +233,13 @@ features off automatically — nothing is half-working:
   durable address: after a disconnect someone else can take it, so a
   queued digest could be delivered to a stranger. This is a privacy gate,
   not a missing feature.
+- **Repo tokens cannot be handed over.** `confidential_input=False`, so
+  `settoken` refuses. IRC has no private input the bot can clean up
+  after: a channel line is public, and a private message still lands in
+  the sender's client log and usually a bouncer. `setrepo` and `issue`
+  therefore only work on a channel whose repo needs no token. If someone
+  types a real token anyway, the bot will not echo it — but it is already
+  public, and the reply says to revoke it.
 - **No threads.** Every scope is a bare channel.
 - **No message deletion**, so no requester-hiding cleanup.
 - **No buttons or deep links** — everything is plain text.
@@ -602,12 +652,22 @@ fails otherwise.
 
 ## Privacy invariants for operators
 
-The bot stores no Telegram user identifier anywhere, with one documented
-exception: an opt-in digest subscription durably records the subscriber's
-private chat id (and nothing else about them) so the digest can reach them
-— erased on their `/unsubscribe`, and present only on capture-enabled
-deployments. Everything else holds the original line, and the *operator
-environment* must too: keep env files at `0600` (run.sh refuses to start
+The bot stores no chat-platform user identifier anywhere, with one
+documented exception: an opt-in digest subscription durably records the
+subscriber's private chat id (and nothing else about them) so the digest
+can reach them — erased on their `/unsubscribe`, and present only on
+capture-enabled deployments, which excludes IRC.
+
+IRC adds one thing worth stating plainly because it *looks* like an
+exception and is not. The bot keeps a live list of channel-operator nicks
+in memory, because IRC has no permission API to ask. It is never written
+to disk or to the database, it is re-learned from the server on every
+restart, and it never crosses into the neutral services — the archive
+sees only the per-channel HMAC pseudonym, exactly as on the other
+platforms.
+
+Everything else holds the original line, and the *operator environment*
+must too: keep env files at `0600` (run.sh refuses to start
 otherwise), never copy logs elsewhere without checking them (they are
 identifier-free, but belt and braces), and remember that everything
 published on the wiki is permanent — takedowns are a wiki-side

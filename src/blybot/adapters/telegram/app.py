@@ -178,7 +178,7 @@ class Lifecycle:
         log_event("shutdown", "ok")
 
 
-def build_application(  # noqa: PLR0913 -- one handler bundle per concern
+def build_application(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
     token: str,
     group_handlers: GroupHandlers,
     private_handlers: PrivateHandlers,
@@ -306,7 +306,7 @@ def build_application(  # noqa: PLR0913 -- one handler bundle per concern
     return application
 
 
-def run_polling(  # noqa: PLR0913 -- one handler bundle per concern
+def run_polling(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
     token: str,
     group_handlers: GroupHandlers,
     private_handlers: PrivateHandlers,

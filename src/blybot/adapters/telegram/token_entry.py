@@ -83,7 +83,7 @@ class TokenEntryHandler:
         log_event("token_entry_opened", "ok")
         await self._reply(context, dm, REPLY_PAT_PROMPT.format(repo=settings.repo))
 
-    async def accept_token(  # noqa: PLR0913 -- the flattened message facts
+    async def accept_token(  # noqa: PLR0913, PLR0917 -- the flattened message facts
         self,
         context: ContextTypes.DEFAULT_TYPE,
         dm: Scope,

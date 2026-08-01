@@ -199,9 +199,9 @@ def test_every_platform_package_exposes_transport_and_capabilities() -> None:
             (name, value) for name, value in vars(module).items() if name.endswith("_CAPABILITIES")
         ]
         assert caps, f"{platform}.transport exposes no *_CAPABILITIES constant"
-        assert all(
-            isinstance(value, PlatformCapabilities) for _, value in caps
-        ), f"{platform}.transport's *_CAPABILITIES is not a PlatformCapabilities"
+        assert all(isinstance(value, PlatformCapabilities) for _, value in caps), (
+            f"{platform}.transport's *_CAPABILITIES is not a PlatformCapabilities"
+        )
 
         transports = [
             value

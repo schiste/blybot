@@ -30,6 +30,10 @@ from blybot.adapters.discord.gateway import (
 from blybot.adapters.discord.transport import DiscordTransport
 from blybot.adapters.github.gateway import GitHubRepoGateway
 from blybot.adapters.github.issues import GitHubIssueTracker
+from blybot.adapters.irc.author_mask import IrcAuthorMasker
+from blybot.adapters.irc.capabilities import IRC_CAPABILITIES
+from blybot.adapters.irc.connection import IrcConnection
+from blybot.adapters.irc.gateway import IrcGateway, IrcSession
 from blybot.adapters.llm.liftwing import LiftWingClient
 from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
@@ -98,6 +102,8 @@ def main() -> int:
     configure_logging()
     if config.platform == "discord":
         return run_discord(config)
+    if config.platform == "irc":
+        return run_irc(config)
     return run_telegram(config)
 
 
@@ -755,6 +761,108 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
     )
     discord_run(client, config.discord_bot_token, release_clients)
     return 0
+
+
+def run_irc(config: Config) -> int:
+    """Build the IRC object graph and run the session until the peer closes.
+
+    The narrowest of the three roots, because IRC's capabilities admit the
+    least: no durable DMs means no digest subscriptions, no message
+    deletion means no requester-hiding, and no threads means every scope is
+    a bare channel. What it does get is capture and the neutral analysis
+    pipeline behind it — the reason the adapter is worth having.
+    """
+    counters = Counters()
+    clock = SystemClock()
+    group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
+
+    store: ToolsDbStore | None = None
+    archive: ToolsDbArchive | None = None
+    if config.profile_encryption_key:
+        runner = PymysqlRunner(
+            host=config.toolsdb_host,
+            database=config.toolsdb_name,
+            cnf_path=Path(config.toolsdb_cnf),
+        )
+        store = ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
+        if config.archive_pseudonym_key:
+            archive = ToolsDbArchive(runner=runner)
+
+    directory = ChannelDirectory(
+        store=store,
+        default_log_page=config.log_target_page,
+        default_consent=config.consent_mode,
+        default_repo="",
+        page_suffix=config.wiki_page_suffix,
+    )
+    capture_service: CaptureService | None = None
+    masker: IrcAuthorMasker | None = None
+    if store is not None and archive is not None:
+        capture_service = CaptureService(
+            store=store,
+            archive=archive,
+            limiter=SlidingWindowLimiter(
+                clock=clock, limit=config.capture_max_per_minute, window=timedelta(minutes=1)
+            ),
+            clock=clock,
+            counters=counters,
+            max_chars=IRC_CAPABILITIES.max_message_chars,
+            retention_window=timedelta(days=config.capture_retention_days),
+        )
+        masker = IrcAuthorMasker(key=config.archive_pseudonym_key)
+
+    commands = CommandService(
+        directory=directory,
+        groups=group_policy,
+        page_url_for=config.page_url,
+        counters=counters,
+        capture_service=capture_service,
+        vault=store,
+        capabilities=IRC_CAPABILITIES,
+        default_lang=config.llm_default_lang,
+    )
+    gateway = IrcGateway(
+        directory=directory,
+        groups=group_policy,
+        commands=commands,
+        clock=clock,
+        nick=config.irc_nick,
+        capture=capture_service,
+        masker=masker,
+    )
+    asyncio.run(_irc_main(config, gateway, store, archive))
+    return 0
+
+
+async def _irc_main(
+    config: Config,
+    gateway: IrcGateway,
+    store: ToolsDbStore | None,
+    archive: ToolsDbArchive | None,
+) -> None:
+    """Bootstrap storage, dial the server, and run the session."""
+    if store is not None:
+        try:
+            await store.bootstrap()
+            if archive is not None:
+                await archive.bootstrap()
+        except StorageError:
+            log_event("storage_bootstrap", "error")
+    reader, writer = await asyncio.open_connection(
+        config.irc_server, config.irc_port, ssl=config.irc_tls or None
+    )
+    connection = IrcConnection(reader=reader, writer=writer)
+    session = IrcSession(
+        channel=connection,
+        gateway=gateway,
+        nick=config.irc_nick,
+        channels=config.irc_channels,
+        password=config.irc_password,
+    )
+    try:
+        await session.run()
+    finally:
+        await connection.close()
 
 
 if __name__ == "__main__":

@@ -25,12 +25,14 @@ _REQUIRED_KEYS: Final = (
     "USER_AGENT",
 )
 
-# The bot-token key each platform reads; the selected platform's token is
-# required, the other platform's is not (a Discord deployment needs no
-# Telegram token, and vice versa).
-_PLATFORM_TOKEN_KEYS: Final = {
+# The one key each platform cannot run without; only the selected
+# platform's is required (a Discord deployment needs no Telegram token,
+# and vice versa). IRC authenticates by nick rather than a bot token, so
+# its indispensable setting is the server to dial.
+_PLATFORM_REQUIRED_KEYS: Final = {
     "telegram": "TELEGRAM_BOT_TOKEN",
     "discord": "DISCORD_BOT_TOKEN",
+    "irc": "IRC_SERVER",
 }
 
 DEFAULT_BOT_NAME: Final = "Blybot"
@@ -72,12 +74,19 @@ class Config:
     platform: str
     telegram_bot_token: str = field(repr=False)
     discord_bot_token: str = field(repr=False)
+    irc_server: str
+    irc_port: int
+    irc_tls: bool
+    irc_nick: str
+    irc_channels: tuple[str, ...]
+    # PASS for a password-protected server; a credential, so kept out of repr.
+    irc_password: str = field(repr=False)
     wiki_api_url: str
     wiki_username: str
     wiki_botpassword: str = field(repr=False)
     log_target_page: str
     dm_target_base: str
-    allowed_group_ids: frozenset[int]
+    allowed_group_ids: frozenset[str]
     session_ttl: timedelta
     burst_debounce: timedelta
     timestamp_granularity: TimestampGranularity
@@ -137,7 +146,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     source = os.environ if env is None else env
 
     platform = _parse_platform(source.get("PLATFORM", "telegram"))
-    required = (*_REQUIRED_KEYS, _PLATFORM_TOKEN_KEYS[platform])
+    required = (*_REQUIRED_KEYS, _PLATFORM_REQUIRED_KEYS[platform])
     missing = [key for key in required if not source.get(key)]
     if missing:
         msg = f"missing required configuration keys: {', '.join(sorted(missing))}"
@@ -156,6 +165,16 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         platform=platform,
         telegram_bot_token=source.get("TELEGRAM_BOT_TOKEN", ""),
         discord_bot_token=source.get("DISCORD_BOT_TOKEN", ""),
+        irc_server=source.get("IRC_SERVER", ""),
+        irc_port=_parse_positive_int(source, "IRC_PORT", 6697),
+        irc_tls=_parse_irc_tls(source.get("IRC_TLS", "on")),
+        irc_nick=source.get("IRC_NICK", DEFAULT_BOT_NAME.lower()),
+        irc_channels=tuple(
+            name.strip().lower()
+            for name in source.get("IRC_CHANNELS", "").split(",")
+            if name.strip()
+        ),
+        irc_password=source.get("IRC_PASSWORD", ""),
         wiki_api_url=source.get("WIKI_API_URL", DEFAULT_WIKI_API_URL),
         wiki_username=source["WIKI_USERNAME"],
         wiki_botpassword=source["WIKI_BOTPASSWORD"],
@@ -208,9 +227,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
 
 
 def _parse_platform(raw: str) -> str:
-    """The chat platform to run: ``telegram`` (default) or ``discord``."""
-    if raw not in _PLATFORM_TOKEN_KEYS:
-        allowed = ", ".join(sorted(_PLATFORM_TOKEN_KEYS))
+    """The chat platform to run: ``telegram`` (default), ``discord`` or ``irc``."""
+    if raw not in _PLATFORM_REQUIRED_KEYS:
+        allowed = ", ".join(sorted(_PLATFORM_REQUIRED_KEYS))
         msg = f"PLATFORM must be one of: {allowed}"
         raise ConfigurationError(msg)
     return raw
@@ -237,6 +256,16 @@ def _parse_newcomer_welcome(raw: str) -> bool:
     raise ConfigurationError(msg)
 
 
+def _parse_irc_tls(raw: str) -> bool:
+    """TLS is on unless explicitly switched off — a typo must not downgrade it."""
+    if raw.lower() == "on":
+        return True
+    if raw.lower() == "off":
+        return False
+    msg = "IRC_TLS must be one of: on, off"
+    raise ConfigurationError(msg)
+
+
 def _parse_consent_mode(raw: str) -> ConsentMode:
     try:
         mode = ConsentMode(raw)
@@ -251,12 +280,23 @@ def _parse_consent_mode(raw: str) -> ConsentMode:
     return mode
 
 
-def _parse_group_ids(raw: str) -> frozenset[int]:
+def _parse_group_ids(raw: str) -> frozenset[str]:
+    """Parse the allowlist into opaque channel strings.
+
+    Telegram and Discord ids are integers, so they are validated as such
+    and then stored as their canonical decimal string — the form a
+    :class:`Scope`'s ``channel`` takes. IRC channel names (``#name``) pass
+    through unchanged.
+    """
+    entries = [part.strip() for part in raw.split(",") if part.strip()]
+    numeric = [part for part in entries if not part.startswith("#")]
     try:
-        return frozenset(int(part) for part in raw.split(",") if part.strip())
+        for part in numeric:
+            int(part)
     except ValueError as exc:
-        msg = "ALLOWED_GROUP_IDS must be a comma-separated list of integers"
+        msg = "ALLOWED_GROUP_IDS must be integer chat ids and/or #irc-channels"
         raise ConfigurationError(msg) from exc
+    return frozenset(entries)
 
 
 def _parse_cleanup_seconds(

@@ -79,6 +79,46 @@ def test_discord_platform_missing_token_is_reported() -> None:
         load_config(env)
 
 
+def test_irc_platform_requires_only_the_server() -> None:
+    env = dict(REQUIRED)
+    del env["TELEGRAM_BOT_TOKEN"]  # an IRC deployment needs no Telegram token
+    env |= {"PLATFORM": "irc", "IRC_SERVER": "irc.libera.chat"}
+    config = load_config(env)
+    assert config.platform == "irc"
+    assert config.irc_server == "irc.libera.chat"
+    assert config.irc_port == 6697  # TLS by default
+    assert config.irc_tls is True
+    assert config.irc_nick == "blybot"
+    assert config.irc_channels == ()
+    assert config.telegram_bot_token == ""
+
+
+def test_irc_platform_missing_server_is_reported() -> None:
+    env = dict(REQUIRED)
+    del env["TELEGRAM_BOT_TOKEN"]
+    env["PLATFORM"] = "irc"
+    with pytest.raises(ConfigurationError, match="IRC_SERVER"):
+        load_config(env)
+
+
+def test_irc_channels_are_split_and_trimmed() -> None:
+    env = dict(REQUIRED) | {"IRC_CHANNELS": "#wikipedia-fr, #wikimedia-tech ,"}
+    assert load_config(env).irc_channels == ("#wikipedia-fr", "#wikimedia-tech")
+
+
+def test_irc_tls_can_be_switched_off_explicitly() -> None:
+    env = dict(REQUIRED) | {"IRC_TLS": "OFF", "IRC_PORT": "6667"}
+    config = load_config(env)
+    assert config.irc_tls is False
+    assert config.irc_port == 6667
+
+
+def test_a_typo_in_irc_tls_does_not_silently_downgrade_the_connection() -> None:
+    env = dict(REQUIRED) | {"IRC_TLS": "false"}
+    with pytest.raises(ConfigurationError, match="IRC_TLS must be one of"):
+        load_config(env)
+
+
 def test_unknown_platform_is_rejected() -> None:
     env = dict(REQUIRED) | {"PLATFORM": "slack"}
     with pytest.raises(ConfigurationError, match="PLATFORM must be one of"):
@@ -88,7 +128,7 @@ def test_unknown_platform_is_rejected() -> None:
 def test_group_allowlist_is_parsed() -> None:
     env = dict(REQUIRED) | {"ALLOWED_GROUP_IDS": "-100123, -100456"}
     config = load_config(env)
-    assert config.allowed_group_ids == frozenset({-100123, -100456})
+    assert config.allowed_group_ids == frozenset({"-100123", "-100456"})
 
 
 def test_invalid_group_allowlist_is_rejected() -> None:
@@ -254,4 +294,5 @@ def test_every_credential_field_is_marked_non_repr() -> None:
         "github_token",
         "profile_encryption_key",
         "archive_pseudonym_key",
+        "irc_password",
     }

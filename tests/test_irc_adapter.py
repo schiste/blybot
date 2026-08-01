@@ -649,3 +649,81 @@ async def test_a_long_reply_is_split_across_protocol_lines() -> None:
     assert channel.sent  # help needs no op
     for line in channel.sent:
         assert len(f"{line}\r\n".encode()) <= LINE_BYTES
+
+
+# --- flood pacing + concurrent read/write on one socket (#67) -----------------
+
+
+def _paced(payload: bytes = b"") -> tuple[IrcConnection, Any, list[float]]:
+    """A connection whose clock and sleeps are recorded rather than real."""
+    reader, writer = _pipe(payload)
+    slept: list[float] = []
+    now = [0.0]
+
+    async def sleep(delay: float) -> None:
+        slept.append(delay)
+        now[0] += delay
+
+    conn = IrcConnection(
+        reader=reader,
+        writer=cast("Any", writer),
+        burst=2,
+        min_interval=2.0,
+        sleep=sleep,
+        monotonic=lambda: now[0],
+    )
+    return conn, writer, slept
+
+
+async def test_a_burst_is_allowed_then_lines_are_paced() -> None:
+    """IRC servers kill a client that floods, with no warning and no
+    retry-after — so a multi-line digest must not go out back-to-back."""
+    conn, writer, slept = _paced()
+    for index in range(4):
+        await conn.send_line(f"PRIVMSG #chan :line {index}")
+
+    assert len(writer.written) == 4  # every line still goes out...
+    assert slept == [2.0, 2.0]  # ...the burst goes free, then one per interval
+
+
+async def test_the_allowance_refills_while_the_bot_is_quiet() -> None:
+    conn, _writer, slept = _paced()
+    await conn.send_line("one")
+    await conn.send_line("two")  # burst spent
+    conn.monotonic = lambda: 10.0  # ten seconds of silence
+    await conn.send_line("three")
+    assert slept == []  # refilled: no wait needed
+
+
+async def test_pacing_never_lets_two_writers_interleave_a_line() -> None:
+    """The transport and the session share one socket; a half-written line
+    would be a protocol error, not just garbled output."""
+    conn, writer, _slept = _paced()
+    await asyncio.gather(
+        *(conn.send_line(f"PRIVMSG #chan :{name}") for name in ("alpha", "beta", "gamma"))
+    )
+    lines = b"".join(writer.written).decode().split("\r\n")[:-1]
+    assert sorted(lines) == [
+        "PRIVMSG #chan :alpha",
+        "PRIVMSG #chan :beta",
+        "PRIVMSG #chan :gamma",
+    ]
+
+
+async def test_a_delivery_loop_can_write_while_the_session_reads() -> None:
+    """#67's core claim: background collectors share the session's socket."""
+    scope = scope_of("#chan")
+    store = InMemoryProfiles(profiles={scope: GroupProfile(scope=scope, capture_enabled=True)})
+    gateway, archive = _gateway(store)
+    reader, writer = _pipe(b":n!u@h PRIVMSG #chan :inbound\r\n")
+    conn = IrcConnection(reader=reader, writer=cast("Any", writer))
+    session = IrcSession(channel=conn, gateway=gateway, nick="blybot", channels=("#chan",))
+    transport = IrcTransport(channel=conn)
+
+    async def deliver() -> None:
+        await transport.send(OutboundMessage(scope=scope, text="outbound digest"))
+
+    await asyncio.gather(session.run(), deliver())
+
+    assert [m.text for m in archive.messages] == ["inbound"]  # the read side worked
+    assert b"PRIVMSG #chan :outbound digest\r\n" in b"".join(writer.written)

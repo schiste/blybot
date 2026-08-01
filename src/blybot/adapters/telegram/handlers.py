@@ -36,13 +36,14 @@ from blybot.adapters.telegram._common import (
     send_threaded,
     thread_of,
 )
-from blybot.domain.models import ConsentMode, LogContent, LogMedia, Scope
+from blybot.domain.models import LogContent, LogMedia, Scope
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 from blybot.observability import Counters, log_event
+from blybot.services import commands as cmd
 from blybot.services.feedback import BUG_ACTION
 from blybot.services.feedback import CONFIRMATION_TEMPLATE as BUG_CONFIRMATION
 from blybot.services.publish import CONFIRMATION_TEMPLATE as PUBLISH_CONFIRMATION
-from blybot.services.publish import NothingToPublishError, PublishedLog, log_action
+from blybot.services.publish import PublishedLog
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -322,61 +323,38 @@ class GroupHandlers:
         if target is None:
             await reply(REPLY_LOGMEDIA_USAGE if include_media else REPLY_USAGE)
             return
-        settings = await self.directory.resolve(scope)
-        if (decline := self._log_decline(settings, message, target)) is not None:
-            await reply(decline)
+        # The per-USER cap stays here permanently: it keys on the raw Telegram
+        # user id, which must never cross inward (the R6 boundary). The
+        # per-scope guards, consent policy and publish pipeline are shared.
+        if not self._within_user_rate_limit(message):
+            self.counters.increment("log_throttled")
+            await reply(REPLY_THROTTLED)
             return
-
         try:
             content = await _log_content_from_message(
                 context.bot, target, include_media=include_media
             )
-            outcome = await self.engine.run(
-                scope,
-                log_action(settings.log_page),
-                payload=content,
-            )
-        except NothingToPublishError:
-            self.counters.increment("log_declined_media")
-            await reply(REPLY_MEDIA_DECLINED)
         except TelegramError:
             log_event("telegram_media", "error")
             await reply(REPLY_MEDIA_FETCH_FAILED)
-        except WikiWriteError:
-            await reply(REPLY_WIKI_ERROR)
-        else:
-            log_event("log_command", "ok")
-            for confirmation in outcome.messages:
-                await reply(confirmation.text)
-            if include_media and isinstance(outcome.payload, PublishedLog):
-                await self._send_media_review_dm(context.bot, message, outcome.payload)
+            return
+        result = await self.commands.log_message(
+            scope, is_author=_same_author(message, target), content=content
+        )
+        await reply(REPLY_MEDIA_DECLINED if result.text == cmd.REPLY_LOG_NOTHING else result.text)
+        if result.ok and include_media and isinstance(result.payload, PublishedLog):
+            await self._send_media_review_dm(context.bot, message, result.payload)
 
-    def _log_decline(
-        self, settings: ChannelSettings, command: Message, target: Message
-    ) -> str | None:
-        """The reply to send if this /log must be declined, else None to publish.
+    def _within_user_rate_limit(self, message: Message) -> bool:
+        """Whether this SENDER is under their personal /log cap.
 
-        Recording the throttle/consent reason is a side effect here; the
-        rate-limit check also consumes a limiter token, so this runs in
-        strict order and only once the earlier guards pass.
+        The one piece of the /log guards that cannot move into the neutral
+        service: it keys on the raw Telegram user id, which the architecture
+        guard forbids passing inward. The per-scope cap lives in
+        CommandService alongside the rest.
         """
-        if settings.degraded:
-            # Fail closed: the group's consent policy and target page are
-            # unknown right now; publishing on defaults could violate both.
-            return REPLY_CONFIG_UNAVAILABLE
-        if self.directory.self_service_enabled and not settings.page_explicit:
-            # A self-service group must choose its own page — never leak
-            # its logs onto the shared operator default.
-            return REPLY_NO_LOG_PAGE
-        if settings.consent_mode is ConsentMode.AUTHOR_ONLY and not _same_author(command, target):
-            # N1 hook: ConsentMode.CONFIRM would branch here into a
-            # DM-confirmation flow; configuration rejects it until built.
-            self.counters.increment("log_declined_consent")
-            return REPLY_AUTHOR_ONLY
-        if not self._within_rate_limits(command, command.chat.id):
-            self.counters.increment("log_throttled")
-            return REPLY_THROTTLED
-        return None
+        user = message.from_user
+        return user is None or self.limiter.allow("user", user.id)
 
     async def on_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Greet once when added to a group (R3)."""
@@ -425,12 +403,6 @@ class GroupHandlers:
             log_event("chat_migration", "error")
             return
         log_event("chat_migration", "ok" if applied else "ignored")
-
-    def _within_rate_limits(self, message: Message, chat_id: int) -> bool:
-        if not self.limiter.allow("group", chat_id):
-            return False
-        user = message.from_user
-        return user is None or self.limiter.allow("user", user.id)
 
     async def on_issue(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """File an anonymous issue in the group's bound repository."""

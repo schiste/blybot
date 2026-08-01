@@ -132,6 +132,7 @@ def make_handlers(
                 else None
             ),
             repo_limiter=limiter,
+            engine=engine,
         ),
         capabilities=capabilities,
         archive=archive,
@@ -438,7 +439,7 @@ async def test_author_only_mode_blocks_logging_others() -> None:
     await handlers.on_log(log_command(target, sender=tg.BOB), context)
     assert isinstance(publisher, FakePublisher)
     assert publisher.wrote_nothing
-    assert tg.sent_texts(bot) == [h.REPLY_AUTHOR_ONLY]
+    assert tg.sent_texts(bot) == [cmd.REPLY_LOG_AUTHOR_ONLY]
 
 
 async def test_author_only_mode_allows_logging_your_own_message() -> None:
@@ -465,7 +466,7 @@ async def test_wiki_failure_reports_neutrally() -> None:
     handlers, _, _ = make_handlers(publisher=FailingPublisher())
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_WIKI_ERROR]
+    assert tg.sent_texts(bot) == [cmd.REPLY_LOG_WIKI_ERROR]
 
 
 async def test_greets_once_on_joining_a_group(  # R3
@@ -615,7 +616,7 @@ async def test_consent_policy_is_resolved_per_group() -> None:
 
     assert isinstance(publisher, FakePublisher)
     assert publisher.wrote_nothing
-    assert h.REPLY_AUTHOR_ONLY in tg.sent_texts(bot)
+    assert cmd.REPLY_LOG_AUTHOR_ONLY in tg.sent_texts(bot)
 
 
 async def test_log_publishes_to_the_group_configured_page() -> None:
@@ -774,7 +775,7 @@ async def test_log_fails_closed_when_configuration_is_unreachable() -> None:
     await handlers.on_log(log_command(tg.message(text="x")), context)
     assert isinstance(publisher, FakePublisher)
     assert publisher.wrote_nothing
-    assert h.REPLY_CONFIG_UNAVAILABLE in tg.sent_texts(bot)
+    assert cmd.REPLY_LOG_CONFIG_UNAVAILABLE in tg.sent_texts(bot)
 
 
 async def test_repo_is_rate_limited_too() -> None:
@@ -878,7 +879,7 @@ async def test_log_without_a_page_refuses_on_a_self_service_group() -> None:
     await handlers.on_log(log_command(tg.message(text="x")), context)
     assert isinstance(publisher, FakePublisher)
     assert publisher.wrote_nothing
-    assert tg.sent_texts(bot) == [h.REPLY_NO_LOG_PAGE]
+    assert tg.sent_texts(bot) == [cmd.REPLY_LOG_NO_PAGE]
 
 
 async def test_topic_page_publishes_while_general_without_a_page_refuses() -> None:
@@ -900,4 +901,4 @@ async def test_topic_page_publishes_while_general_without_a_page_refuses() -> No
     # In General (no group-default page): refused.
     context, bot = tg.make_context()
     await handlers.on_log(log_command(tg.message(text="x")), context)
-    assert tg.sent_texts(bot) == [h.REPLY_NO_LOG_PAGE]
+    assert tg.sent_texts(bot) == [cmd.REPLY_LOG_NO_PAGE]

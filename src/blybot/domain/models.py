@@ -182,9 +182,18 @@ class CommandResult:
     A frozen value each transport adapter renders into its native reply:
     the command's business logic lives once in a neutral service, and the
     adapter only maps its trigger to a call and sends ``text`` back. A
-    later increment adds structured ``choices`` for platforms whose
-    :class:`PlatformCapabilities` advertise ``rich_choices``; for now the
-    ready-to-send message is the whole result.
+    Structured ``choices`` for platforms advertising ``rich_choices`` remain
+    unbuilt on purpose: nothing needs them yet, and Telegram's one picker is
+    a native chat-request button that generic choices cannot express. Adding
+    the field before a consumer exists would be the same dead-config mistake
+    ``chat_picker`` was (#45).
+
+    ``payload`` carries the pipeline's own result when an adapter needs more
+    than prose to finish the job — Telegram's ``/logmedia`` review DM needs
+    the :class:`~blybot.services.publish.PublishedLog` to know which files
+    were uploaded. It is deliberately ``object``: the neutral service does
+    not care what a platform does with it, and typing it would drag a
+    service type into the domain.
 
     ``ok`` marks whether the command actually did its thing (vs. a refusal,
     usage hint, or transient failure) so an adapter may decorate a *success*
@@ -194,6 +203,7 @@ class CommandResult:
 
     text: str
     ok: bool = True
+    payload: object = None
 
     def __post_init__(self) -> None:
         if not self.text:

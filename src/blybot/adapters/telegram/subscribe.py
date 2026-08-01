@@ -15,16 +15,6 @@ from typing import TYPE_CHECKING, Final
 
 from blybot.adapters.telegram._common import dm_scope
 from blybot.domain.ports import StorageError
-from blybot.domain.subscriptions import Subscription
-from blybot.observability import log_event
-from blybot.services.subscriptions import (
-    MAX_SUBS_PER_USER,
-    SubscriptionCapReachedError,
-    SubscriptionParseError,
-    admit_subscription,
-    mint_sub_id,
-    parse_subscription,
-)
 
 if TYPE_CHECKING:
     from telegram import Update
@@ -32,6 +22,7 @@ if TYPE_CHECKING:
 
     from blybot.domain.models import PlatformCapabilities, Scope
     from blybot.domain.ports import ProfileStore, SubscriptionStore
+    from blybot.services.commands import CommandService
     from blybot.services.subscriptions import SubscriptionBinding
 
 REPLY_STORAGE_DOWN: Final = "That's temporarily unavailable — please try again later."
@@ -47,16 +38,6 @@ REPLY_SUBSCRIBE_PROMPT: Final = (
 REPLY_NO_PENDING: Final = (
     "Tap a subscribe link an admin shared for the chat you want, then run /subscribe."
 )
-REPLY_SUBSCRIBED: Final = (
-    "Subscribed [{sub_id}]: {schedule} {recipe} ({lang}) — it arrives here. "
-    "/mysubs to review, /unsubscribe {sub_id} to stop."
-)
-REPLY_UNSUB_USAGE: Final = "Usage: /unsubscribe <id> — see your ids with /mysubs"
-REPLY_UNSUBSCRIBED: Final = "Unsubscribed."
-REPLY_NO_SUCH_SUB: Final = "No subscription with that id is yours."
-REPLY_NO_SUBS: Final = "You have no digest subscriptions. Tap a subscribe link to start one."
-REPLY_SUBS_HEADER: Final = "Your digest subscriptions:"
-REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this platform."
 
 
 @dataclass(eq=False)
@@ -65,13 +46,12 @@ class SubscriptionHandlers:
 
     profiles: ProfileStore
     subscriptions: SubscriptionStore
+    commands: CommandService
     binding: SubscriptionBinding
     default_lang: str
     # Subscriptions deliver via durable DMs; admission is gated on the
     # platform advertising that capability.
     capabilities: PlatformCapabilities
-    # Per-subscriber ceiling enforced at /subscribe admission (#23).
-    max_subs_per_user: int = MAX_SUBS_PER_USER
 
     async def redeem_link(self, context: ContextTypes.DEFAULT_TYPE, dm: Scope, code: str) -> None:
         """Resolve a tapped ``sub_<code>`` link and arm the /subscribe prompt."""
@@ -92,45 +72,16 @@ class SubscriptionHandlers:
         if chat is None:
             return
         dm = dm_scope(chat.id)
-        if not self.capabilities.durable_dm:
-            await _reply(context, dm, REPLY_SUBS_UNAVAILABLE)
-            return
+        # Telegram's own step: a shared link armed which scope this DM is
+        # about. Discord takes the channel the command ran in instead.
         source = self.binding.pending_target(dm)
         if source is None:
             await _reply(context, dm, REPLY_NO_PENDING)
             return
-        try:
-            schedule, recipe, lang = parse_subscription(
-                " ".join(context.args or []), self.default_lang
-            )
-        except SubscriptionParseError as error:
-            await _reply(context, dm, str(error))
-            return
-        subscription = Subscription(
-            sub_id=mint_sub_id(),
-            dm=dm,
-            scope=source,
-            schedule=schedule,
-            recipe=recipe,
-            lang=lang,
-        )
-        try:
-            await admit_subscription(self.subscriptions, subscription, self.max_subs_per_user)
-        except SubscriptionCapReachedError as error:
-            await _reply(context, dm, str(error))
-            return
-        except StorageError:
-            await _reply(context, dm, REPLY_STORAGE_DOWN)
-            return
-        self.binding.close_entry(dm)
-        log_event("subscription_add", "ok")
-        await _reply(
-            context,
-            dm,
-            REPLY_SUBSCRIBED.format(
-                sub_id=subscription.sub_id, schedule=schedule.token, recipe=recipe, lang=lang
-            ),
-        )
+        result = await self.commands.subscribe(source, dm, options=" ".join(context.args or []))
+        if result.ok:
+            self.binding.close_entry(dm)
+        await _reply(context, dm, result.text)
 
     async def on_unsubscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Remove one of the caller's subscriptions by id."""
@@ -138,16 +89,8 @@ class SubscriptionHandlers:
         if chat is None:
             return
         dm = dm_scope(chat.id)
-        sub_id = ((context.args or [""])[0]).strip()
-        if not sub_id:
-            await _reply(context, dm, REPLY_UNSUB_USAGE)
-            return
-        try:
-            removed = await self.subscriptions.remove(dm, sub_id)
-        except StorageError:
-            await _reply(context, dm, REPLY_STORAGE_DOWN)
-            return
-        await _reply(context, dm, REPLY_UNSUBSCRIBED if removed else REPLY_NO_SUCH_SUB)
+        result = await self.commands.unsubscribe(dm, subscription_id=(context.args or [""])[0])
+        await _reply(context, dm, result.text)
 
     async def on_mysubs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """List the caller's subscriptions."""
@@ -155,17 +98,8 @@ class SubscriptionHandlers:
         if chat is None:
             return
         dm = dm_scope(chat.id)
-        try:
-            subs = await self.subscriptions.list_for_user(dm)
-        except StorageError:
-            await _reply(context, dm, REPLY_STORAGE_DOWN)
-            return
-        if not subs:
-            await _reply(context, dm, REPLY_NO_SUBS)
-            return
-        lines = [REPLY_SUBS_HEADER]
-        lines += [f"[{s.sub_id}] {s.schedule.token} {s.recipe} ({s.lang})" for s in subs]
-        await _reply(context, dm, "\n".join(lines))
+        result = await self.commands.list_subscriptions(dm)
+        await _reply(context, dm, result.text)
 
 
 async def _reply(context: ContextTypes.DEFAULT_TYPE, dm: Scope, text: str) -> None:

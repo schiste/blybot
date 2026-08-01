@@ -246,6 +246,7 @@ self-hosted runner) is an adapter drop-in, not a refactor.
 ```python
 class PromptRunner(Protocol):
     async def run(self, request: PromptRequest) -> PromptResult: ...
+
     # PromptRequest: model, system, user_content, max_tokens, temperature
     # PromptResult:  content, finish_reason, prompt_tokens, completion_tokens
 ```

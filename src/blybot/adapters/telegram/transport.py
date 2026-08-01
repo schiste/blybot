@@ -42,6 +42,7 @@ TELEGRAM_CAPABILITIES: Final = PlatformCapabilities(
     message_delete=True,
     id_can_change=True,
     rich_choices=True,
+    confidential_input=True,  # paste into DM, then the bot deletes the message
 )
 
 

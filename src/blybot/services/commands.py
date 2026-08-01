@@ -146,6 +146,12 @@ REPLY_REPO_BOUND: Final = (
 REPLY_PAT_OFF_DEPLOY: Final = "Repo tokens aren't enabled on this deployment; ask the operator."
 REPLY_PAT_NO_REPO: Final = "No repository is bound at this scope; run /setrepo here first."
 REPLY_PAT_MISSING: Final = "No token supplied."
+REPLY_PAT_NO_PRIVATE_CHANNEL: Final = (
+    "⚠️ This platform has no private way to hand me a token — anything you type stays in a "
+    "chat log I can't delete, so I won't accept one here. If you just typed a real token, "
+    "treat it as public and revoke it now. Repo features need a platform with a private "
+    "input (Telegram or Discord)."
+)
 REPLY_PAT_INVALID: Final = (
     "GitHub rejected that token for the bound repository — check the repository "
     "access and the Issues permission, then try again."
@@ -459,6 +465,12 @@ class CommandService:
         """
         if not is_admin:
             return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        if self.capabilities is not None and not self.capabilities.confidential_input:
+            # Refuse rather than degrade: the degraded version of this flow
+            # is "type your credential into a log file". Checked before the
+            # deployment check so the answer does not depend on whether the
+            # operator happens to have repo actions wired.
+            return CommandResult(REPLY_PAT_NO_PRIVATE_CHANNEL, ok=False)
         actions, vault = self.repo_actions, self.vault
         if actions is None or vault is None:
             return CommandResult(REPLY_PAT_OFF_DEPLOY, ok=False)

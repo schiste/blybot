@@ -32,4 +32,8 @@ IRC_CAPABILITIES: Final = PlatformCapabilities(
     durable_dm=False,
     # Channel names are stable; nothing like a supergroup migration.
     id_can_change=False,
+    # No modal, no deletable DM: a channel line is public, and a private
+    # message still lands in the sender's client log and usually a bouncer.
+    # This is what makes the bot refuse to be handed a repo token here.
+    confidential_input=False,
 )

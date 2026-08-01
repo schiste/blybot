@@ -7,13 +7,14 @@
 #                                       of every instance
 #
 # An "instance" is one base config $HOME/<name>.env holding the shared
-# settings plus whatever bot tokens you have. Each platform that has a token
-# (TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN) runs as its OWN continuous job
-# `<name>-<platform>` — isolated process, memory, and logs — while sharing
-# this repo checkout, the venv, the wiki account, and the ToolsDB (whose rows
-# are platform-tagged). Deploying an instance always (re)deploys every
-# platform it has a token for; you never hand-create per-platform jobs, and
-# removing a token retires that platform's job on the next deploy.
+# settings plus whatever platform credentials you have. Each platform whose
+# enabling key is set (TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN, IRC_SERVER)
+# runs as its OWN continuous job `<name>-<platform>` — isolated process,
+# memory, and logs — while sharing this repo checkout, the venv, the wiki
+# account, and the ToolsDB (whose rows are platform-tagged). Deploying an
+# instance always (re)deploys every platform it is configured for; you never
+# hand-create per-platform jobs, and clearing a key retires that platform's
+# job on the next deploy.
 #
 # See docs/OPERATIONS.md for the full runbook.
 
@@ -26,12 +27,15 @@ IMAGE="python3.13"
 JOBS_DIR="${TOOL_HOME}/.blybot-jobs" # derived per-platform envs + wrappers
 
 # Every platform the app supports; the deploy fans out one job per platform
-# whose bot-token key below is set in the base env.
-PLATFORMS="telegram discord"
-token_key() {
+# whose enabling key below is set in the base env. IRC needs no account and
+# no token, so a server address is what switches it on — this must stay in
+# step with _PLATFORM_REQUIRED_KEYS in src/blybot/config.py.
+PLATFORMS="telegram discord irc"
+enable_key() {
     case "$1" in
     telegram) echo "TELEGRAM_BOT_TOKEN" ;;
     discord) echo "DISCORD_BOT_TOKEN" ;;
+    irc) echo "IRC_SERVER" ;;
     *) return 1 ;;
     esac
 }
@@ -69,7 +73,7 @@ reinstall() {
 }
 
 # (Re)deploy every platform job for one base instance. Idempotent: a platform
-# with a token is (re)started; a platform without one has its job removed.
+# that is configured is (re)started; one that is not has its job removed.
 deploy_base() {
     local name="$1"
     local base_env="${TOOL_HOME}/${name}.env"
@@ -84,10 +88,10 @@ deploy_base() {
     toolforge jobs delete "${name}" >/dev/null 2>&1 || true
 
     for platform in ${PLATFORMS}; do
-        key="$(token_key "${platform}")"
+        key="$(enable_key "${platform}")"
         job="${name}-${platform}"
         if ! grep -qE "^${key}=.+" "${base_env}"; then
-            # No token for this platform: make sure any stale job is gone.
+            # Not configured for this platform: drop any stale job.
             toolforge jobs delete "${job}" >/dev/null 2>&1 || true
             continue
         fi
@@ -118,7 +122,7 @@ deploy_base() {
         started="${started} ${platform}"
     done
 
-    [ -n "${started}" ] || die "${base_env} has no bot token yet (set TELEGRAM_BOT_TOKEN and/or DISCORD_BOT_TOKEN)"
+    [ -n "${started}" ] || die "${base_env} configures no platform yet (set TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN and/or IRC_SERVER)"
 }
 
 case "${1:-}" in
@@ -139,7 +143,7 @@ update)
     for env_file in "${TOOL_HOME}"/*.env; do
         [ -e "${env_file}" ] || continue
         name="$(basename "${env_file}" .env)"
-        echo "redeploying instance '${name}' (every platform with a token)..."
+        echo "redeploying instance '${name}' (every configured platform)..."
         (deploy_base "${name}") || echo "skipped '${name}' (not startable yet)"
     done
     ;;

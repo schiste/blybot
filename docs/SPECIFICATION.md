@@ -590,8 +590,19 @@ line: the true payload budget shrinks with the target's name length, and
 the transport re-splits by encoded bytes anyway (§22.3).
 
 What IRC *does* get is the whole point of the exercise: capture, the
-neutral analysis pipeline behind it, and the wiki sinks — none of which
-needed a line of IRC-specific logic.
+neutral analysis pipeline behind it, the wiki sinks, and every background
+collector its capabilities admit (scheduled analyses, repo notifications,
+the capture reminder) — none of which needed a line of IRC-specific
+logic.
+
+One thing IRC *does* need that no other platform does: **outbound
+pacing**. Servers kill a client that sends too fast, with no warning and
+no retry-after — the socket simply closes, which the delivery loop can
+only observe as a transient error after the fact. So the connection
+paces every write through a token bucket (a short burst, then one line
+per interval). This is transport mechanics rather than policy, so it
+lives in the adapter; the neutral delivery loop is unchanged and still
+reasons only about the abstract send taxonomy.
 
 ### 22.2 The two edges
 

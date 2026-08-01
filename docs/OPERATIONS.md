@@ -216,6 +216,10 @@ channel. IRC makes this structurally easy — there is no ephemeral reply,
 so every answer the bot gives is a normal channel message and capture
 **cannot** be enabled quietly.
 
+`CAPTURE_REANNOUNCE_DAYS` works here as on the other platforms: set it and
+every capture-enabled channel gets a periodic reminder, so consent does
+not quietly age out as membership turns over.
+
 Note the one asymmetry with Discord: there, refusals are private and only
 the announcement is public. Here everything is public, so a non-op who
 tries `capture on` gets a visible refusal. That is noisier but not a leak.
@@ -245,9 +249,23 @@ features off automatically — nothing is half-working:
 - **No buttons or deep links** — everything is plain text.
 
 What does work is the whole point of the exercise: capture, the neutral
-analysis pipeline behind it, and the wiki sinks — none of which needed a
-line of IRC-specific logic. Messages are split at the 512-byte protocol
-line limit, so long wiki-bound replies arrive as several lines.
+analysis pipeline behind it, the wiki sinks, scheduled analyses
+(`action`), repo notifications and the capture reminder — none of which
+needed a line of IRC-specific logic.
+
+#### Why the bot answers slowly
+
+Outbound lines are **paced**. IRC servers kill a client that sends too
+fast ("excess flood"), and unlike an HTTP 429 there is no warning and no
+retry-after — the socket just closes. So the bot allows a short burst and
+then roughly one line every two seconds.
+
+A long reply is split at the 512-byte protocol line limit, so `settings`
+or a scheduled digest arrives as several lines over several seconds. That
+is deliberate. If your network is more permissive and you want it
+snappier, the knobs are `burst` and `min_interval` on `IrcConnection` —
+currently code-level defaults rather than env vars, because getting them
+wrong disconnects the bot rather than merely slowing it.
 
 ## Per-instance prerequisites
 

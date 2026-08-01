@@ -33,9 +33,14 @@ THIRD_PARTY_IO = (
 # Every chat platform and the import prefixes of its SDK. The core (domain +
 # services) may import NONE of these; an adapter package may import only its
 # OWN platform's SDK. Adding a platform here generalizes every rule below to it.
+# A platform with no SDK maps to an empty tuple: IRC's line protocol is
+# hand-rolled, so there is nothing to ban imports of — but it still has to
+# be registered here, because this dict is also the roster of brand names
+# the domain must never mention.
 PLATFORM_SDKS: dict[str, tuple[str, ...]] = {
     "telegram": ("telegram",),
     "discord": ("discord", "discord.py"),
+    "irc": (),
 }
 
 # The platform identity access that must never cross inward past its own
@@ -176,6 +181,17 @@ def test_core_imports_no_platform_sdk() -> None:
     forbidden = _all_platform_sdks()
     for layer in ("domain", "services"):
         assert violations(SRC / layer, forbidden) == []
+
+
+def test_every_discovered_platform_is_registered() -> None:
+    """A new adapter package must declare its SDK prefixes (empty tuple if none).
+
+    Without this, dropping in ``adapters/slack/`` would silently escape the
+    brand-leak and foreign-SDK rules, which are both driven by
+    :data:`PLATFORM_SDKS` rather than by what is on disk.
+    """
+    unregistered = sorted(set(platform_packages()) - set(PLATFORM_SDKS))
+    assert unregistered == [], f"platform adapters missing from PLATFORM_SDKS: {unregistered}"
 
 
 def test_each_platform_adapter_imports_only_its_own_sdk() -> None:

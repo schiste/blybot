@@ -12,6 +12,16 @@ Two layers, as in the Discord adapter:
 Commands arrive as ordinary channel text, so they are addressed to the bot
 by prefix (``blybot: help``) or by the ``!`` shorthand — IRC has no
 slash-command registry to route them for us.
+
+**Command routing is not wired yet** (issue #21). :meth:`addressed_command`
+recognizes an addressed line and :attr:`IrcGateway.commands` is injected,
+but nothing dispatches to the service: every admin command would otherwise
+be callable by any nick in the channel, since IRC carries no permission
+model the way Telegram's ``get_chat_member`` or Discord's
+``guild_permissions`` do. Establishing the channel-op check is #21's whole
+job, and shipping the routing before it would open exactly the hole the
+admin gate exists to close. Capture ingestion below needs no such gate: it
+is switched on per channel by an operator, not by a chat command.
 """
 
 from __future__ import annotations

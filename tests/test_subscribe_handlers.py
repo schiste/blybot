@@ -10,8 +10,13 @@ from telegram import Update
 from blybot.adapters.telegram import subscribe as sub
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
 from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
-from blybot.domain.models import GroupProfile, PlatformCapabilities, Schedule, Scope
+from blybot.domain.models import ConsentMode, GroupProfile, PlatformCapabilities, Schedule, Scope
 from blybot.domain.subscriptions import Subscription
+from blybot.observability import Counters
+from blybot.services import commands as cmd
+from blybot.services.commands import CommandService
+from blybot.services.directory import ChannelDirectory
+from blybot.services.policy import GroupPolicy
 from blybot.services.subscriptions import SubscriptionBinding
 from tests import tg
 from tests.fakes import FakeClock, InMemoryProfiles, InMemorySubscriptions
@@ -35,6 +40,20 @@ def make(
         profiles=profiles,
         subscriptions=subs,
         binding=binding,
+        commands=CommandService(
+            directory=ChannelDirectory(
+                store=profiles,
+                default_log_page="Project:Log",
+                default_consent=ConsentMode.IMMEDIATE,
+                default_repo="",
+                page_suffix="Logs",
+            ),
+            groups=GroupPolicy(allowed=set()),
+            page_url_for=str,
+            counters=Counters(),
+            subscriptions=subs,
+            capabilities=capabilities,
+        ),
         default_lang="en",
         capabilities=capabilities,
     )
@@ -48,7 +67,7 @@ async def test_subscribe_refused_without_durable_dm() -> None:
     binding.open_entry(dmscope(777), gscope(-100))
     context, bot = tg.make_context()
     await handlers.on_subscribe(dm(), context)
-    assert tg.sent_texts(bot) == [sub.REPLY_SUBS_UNAVAILABLE]
+    assert tg.sent_texts(bot) == [cmd.REPLY_SUBS_NO_DURABLE_DM]
     assert subs.subs == {}  # admission gated: nothing created
 
 
@@ -114,24 +133,24 @@ async def test_subscribe_reports_storage_outage() -> None:
     subs.fail = True
     context, bot = tg.make_context()
     await handlers.on_subscribe(dm(), context)
-    assert tg.sent_texts(bot) == [sub.REPLY_STORAGE_DOWN]
+    assert tg.sent_texts(bot) == [cmd.REPLY_STORAGE_DOWN]
 
 
 async def test_unsubscribe_usage_removes_and_reports_missing() -> None:
     handlers, _profiles, subs, _binding = make()
     context, bot = tg.make_context(args=[])
     await handlers.on_unsubscribe(dm(), context)
-    assert tg.sent_texts(bot) == [sub.REPLY_UNSUB_USAGE]
+    assert tg.sent_texts(bot) == [cmd.REPLY_UNSUB_USAGE]
 
     await subs.add(_a_sub("s1", dm=tg.PRIVATE.id))
     context, bot = tg.make_context(args=["s1"])
     await handlers.on_unsubscribe(dm(), context)
-    assert tg.sent_texts(bot) == [sub.REPLY_UNSUBSCRIBED]
+    assert tg.sent_texts(bot) == [cmd.REPLY_UNSUBSCRIBED]
     assert subs.subs == {}
 
     context, bot = tg.make_context(args=["ghost"])
     await handlers.on_unsubscribe(dm(), context)
-    assert tg.sent_texts(bot) == [sub.REPLY_NO_SUCH_SUB]
+    assert tg.sent_texts(bot) == [cmd.REPLY_NO_SUCH_SUB]
 
 
 async def test_unsubscribe_reports_storage_outage() -> None:
@@ -139,20 +158,20 @@ async def test_unsubscribe_reports_storage_outage() -> None:
     subs.fail = True
     context, bot = tg.make_context(args=["s1"])
     await handlers.on_unsubscribe(dm(), context)
-    assert tg.sent_texts(bot) == [sub.REPLY_STORAGE_DOWN]
+    assert tg.sent_texts(bot) == [cmd.REPLY_STORAGE_DOWN]
 
 
 async def test_mysubs_lists_or_says_none() -> None:
     handlers, _profiles, subs, _binding = make()
     context, bot = tg.make_context()
     await handlers.on_mysubs(dm(), context)
-    assert tg.sent_texts(bot) == [sub.REPLY_NO_SUBS]
+    assert tg.sent_texts(bot) == [cmd.REPLY_NO_SUBS]
 
     await subs.add(_a_sub("s1", dm=tg.PRIVATE.id))
     context, bot = tg.make_context()
     await handlers.on_mysubs(dm(), context)
     listing = tg.sent_texts(bot)[0]
-    assert sub.REPLY_SUBS_HEADER in listing
+    assert cmd.REPLY_SUBS_HEADER in listing
     assert "[s1] daily@08:00 summarize (en)" in listing
 
 
@@ -161,7 +180,7 @@ async def test_mysubs_reports_storage_outage() -> None:
     subs.fail = True
     context, bot = tg.make_context()
     await handlers.on_mysubs(dm(), context)
-    assert tg.sent_texts(bot) == [sub.REPLY_STORAGE_DOWN]
+    assert tg.sent_texts(bot) == [cmd.REPLY_STORAGE_DOWN]
 
 
 @pytest.mark.parametrize("method", ["on_subscribe", "on_unsubscribe", "on_mysubs"])
@@ -187,7 +206,7 @@ async def test_subscribe_refuses_past_the_per_user_cap() -> None:
     """Issue #23: the same cap the neutral admission enforces, reached through
     the real Telegram handler."""
     handlers, _profiles, subs, binding = make()
-    handlers.max_subs_per_user = 2
+    handlers.commands.max_subs_per_user = 2
 
     for _ in range(2):
         binding.open_entry(dmscope(777), gscope(-100))

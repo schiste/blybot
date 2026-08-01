@@ -90,7 +90,13 @@ def make_admin_handlers() -> AdminHandlers:
         page_url_for=group_handlers.page_url_for,
         binding=TokenBinding(clock=FakeClock()),
         commands=CommandService(
-            directory=group_handlers.directory,
+            directory=ChannelDirectory(
+                store=InMemoryProfiles(),
+                default_log_page="Log",
+                default_consent=ConsentMode.IMMEDIATE,
+                default_repo="",
+                page_suffix="",
+            ),
             groups=groups,
             page_url_for=group_handlers.page_url_for,
             counters=counters,
@@ -386,6 +392,18 @@ def _subscription_handlers() -> SubscriptionHandlers:
         profiles=InMemoryProfiles(),
         subscriptions=InMemorySubscriptions(),
         binding=SubscriptionBinding(clock=FakeClock()),
+        commands=CommandService(
+            directory=ChannelDirectory(
+                store=InMemoryProfiles(),
+                default_log_page="Log",
+                default_consent=ConsentMode.IMMEDIATE,
+                default_repo="",
+                page_suffix="",
+            ),
+            groups=GroupPolicy(allowed=set()),
+            page_url_for=str,
+            counters=Counters(),
+        ),
         default_lang="en",
         capabilities=TELEGRAM_CAPABILITIES,
     )

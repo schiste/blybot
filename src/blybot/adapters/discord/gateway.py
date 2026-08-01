@@ -43,17 +43,10 @@ from discord import app_commands
 from blybot.adapters.discord.scope import dm_scope, scope_of
 from blybot.domain.models import CapturedMessage, CommandResult, LogContent
 from blybot.domain.ports import StorageError, WikiWriteError
-from blybot.domain.subscriptions import Subscription
-from blybot.observability import log_event
 from blybot.services import commands as cmd
 from blybot.services.subscriptions import (
     MAX_SUBS_PER_USER,
-    SubscriptionCapReachedError,
-    SubscriptionParseError,
-    admit_subscription,
-    mint_sub_id,
     mint_subscribe_code,
-    parse_subscription,
 )
 from blybot.services.transcribe import record_dm_line
 
@@ -104,15 +97,6 @@ REPLY_TRANSCRIBE_FAILED: Final = (
 )
 REPLY_ANALYSES_UNAVAILABLE: Final = "On-demand analyses aren't available on this deployment."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
-REPLY_SUBSCRIBED: Final = (
-    "Subscribed [{sub_id}]: {schedule} {recipe} ({lang}) — digests arrive in your DMs. "
-    "/mysubs to review, /unsubscribe {sub_id} to stop."
-)
-REPLY_NO_SUBS: Final = "You have no digest subscriptions. Use /subscribe in a channel to start one."
-REPLY_SUBS_HEADER: Final = "Your digest subscriptions:"
-REPLY_UNSUB_USAGE: Final = "Usage: /unsubscribe <id> — see your ids with /mysubs"
-REPLY_UNSUBSCRIBED: Final = "Unsubscribed."
-REPLY_NO_SUCH_SUB: Final = "No subscription with that id is yours."
 
 
 @dataclass(eq=False)
@@ -438,68 +422,33 @@ class DiscordGateway:
     ) -> str:
         """Create a durable DM digest subscription to this channel.
 
-        Discord has no deep links, so a channel becomes subscribable the
-        first time anyone subscribes to it — minting the ``subscribe_code``
-        the neutral scheduler requires — rather than via an admin-shared
-        link.
+        Discord has no deep links, so a channel becomes subscribable the first
+        time anyone subscribes to it — minting the ``subscribe_code`` the
+        neutral scheduler requires — rather than via an admin-shared link.
+        That mint is the only Discord-specific step; everything after it is
+        the shared :class:`CommandService`.
         """
-        subscriptions = self.subscriptions
-        if subscriptions is None:
+        if self.commands.subscriptions is None:
             return REPLY_SUBS_UNAVAILABLE
-        try:
-            schedule, recipe, lang = parse_subscription(options, self.default_lang)
-        except SubscriptionParseError as error:
-            return str(error)
         scope = scope_of(channel_id, thread_id)
-        subscription = Subscription(
-            sub_id=mint_sub_id(),
-            dm=dm_scope(dm_channel_id),
-            scope=scope,
-            schedule=schedule,
-            recipe=recipe,
-            lang=lang,
-        )
         try:
             await self._ensure_subscribable(scope)
-            await admit_subscription(subscriptions, subscription, self.max_subs_per_user)
-        except SubscriptionCapReachedError as error:
-            return str(error)
         except StorageError:
             return REPLY_STORAGE_DOWN
-        log_event("subscription_add", "ok")
-        return REPLY_SUBSCRIBED.format(
-            sub_id=subscription.sub_id, schedule=schedule.token, recipe=recipe, lang=lang
-        )
+        result = await self.commands.subscribe(scope, dm_scope(dm_channel_id), options=options)
+        return result.text
 
     async def mysubs_command(self, dm_channel_id: int) -> str:
         """List the caller's DM digest subscriptions."""
-        subscriptions = self.subscriptions
-        if subscriptions is None:
-            return REPLY_SUBS_UNAVAILABLE
-        dm = dm_scope(dm_channel_id)
-        try:
-            subs = await subscriptions.list_for_user(dm)
-        except StorageError:
-            return REPLY_STORAGE_DOWN
-        if not subs:
-            return REPLY_NO_SUBS
-        lines = [REPLY_SUBS_HEADER]
-        lines += [f"[{s.sub_id}] {s.schedule.token} {s.recipe} ({s.lang})" for s in subs]
-        return "\n".join(lines)
+        result = await self.commands.list_subscriptions(dm_scope(dm_channel_id))
+        return result.text
 
     async def unsubscribe_command(self, dm_channel_id: int, subscription_id: str) -> str:
         """Remove one of the caller's subscriptions by id."""
-        subscriptions = self.subscriptions
-        if subscriptions is None:
-            return REPLY_SUBS_UNAVAILABLE
-        sub_id = subscription_id.strip()
-        if not sub_id:
-            return REPLY_UNSUB_USAGE
-        try:
-            removed = await subscriptions.remove(dm_scope(dm_channel_id), sub_id)
-        except StorageError:
-            return REPLY_STORAGE_DOWN
-        return REPLY_UNSUBSCRIBED if removed else REPLY_NO_SUCH_SUB
+        result = await self.commands.unsubscribe(
+            dm_scope(dm_channel_id), subscription_id=subscription_id
+        )
+        return result.text
 
     async def _ensure_subscribable(self, scope: Scope) -> None:
         profile = await self.directory.profile_of(scope)

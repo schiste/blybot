@@ -7,7 +7,16 @@ native trigger to a neutral call and renders the returned
 on|off``, ``setpage``, ``settings``, ``reset``, ``revoke``, ``llm`` (#43),
 the repo-notification surface — ``events on|off``, ``rule
 add|remove|clear`` and ``rules`` (#40) — the ``setrepo``/token flow (#43),
-and the bound-repo commands ``issue`` and ``repo`` (#42).
+the bound-repo commands ``issue`` and ``repo`` (#42), the anonymous
+``log`` publish path (#44), and the DM digest surface — ``subscribe``,
+``mysubs`` and ``unsubscribe`` (#32).
+
+Every inbound command an adapter serves now resolves here. What stays in an
+adapter is the trigger mapping and whatever its platform can do that no
+other can: Telegram's per-*user* rate cap (it keys on a raw user id, which
+must not cross inward), its deep-link and pending-message handshake, its
+``/logmedia`` media fetch and review DM; Discord's modal, context menu, and
+subscribable-code mint.
 
 Most commands are admin-gated; ``issue`` and ``repo`` deliberately are not,
 since filing anonymously is the one repo action any member may take.
@@ -37,6 +46,7 @@ from typing import TYPE_CHECKING, Final
 
 from blybot.domain.models import CommandResult, ConsentMode
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
+from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
 from blybot.services.actions import (
     MAX_ACTIONS,
@@ -60,12 +70,26 @@ from blybot.services.rules import (
     describe_rule,
     parse_rule,
 )
+from blybot.services.subscriptions import (
+    MAX_SUBS_PER_USER,
+    SubscriptionCapReachedError,
+    SubscriptionParseError,
+    admit_subscription,
+    mint_sub_id,
+    parse_subscription,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from blybot.domain.models import LlmSettings, LogContent, Scope
-    from blybot.domain.ports import ActionStore, Clock, RepoActions, TokenVault
+    from blybot.domain.models import LlmSettings, LogContent, PlatformCapabilities, Scope
+    from blybot.domain.ports import (
+        ActionStore,
+        Clock,
+        RepoActions,
+        SubscriptionStore,
+        TokenVault,
+    )
     from blybot.observability import Counters
     from blybot.services.capture import CaptureService
     from blybot.services.directory import ChannelDirectory, ChannelSettings
@@ -146,6 +170,17 @@ REPLY_LOG_AUTHOR_ONLY: Final = (
 REPLY_LOG_NOTHING: Final = "There's nothing publishable in that message."
 REPLY_LOG_OFF_DEPLOY: Final = "Publishing isn't enabled on this deployment; ask the operator."
 REPLY_LOG_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see details in the logs."
+REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
+REPLY_SUBS_NO_DURABLE_DM: Final = "Digest subscriptions aren't available on this platform."
+REPLY_SUBSCRIBED: Final = (
+    "Subscribed [{sub_id}]: {schedule} {recipe} ({lang}) — digests arrive in your DMs. "
+    "/mysubs to review, /unsubscribe {sub_id} to stop."
+)
+REPLY_SUBS_HEADER: Final = "Your digest subscriptions:"
+REPLY_NO_SUBS: Final = "You have no digest subscriptions."
+REPLY_UNSUB_USAGE: Final = "Usage: /unsubscribe <id> — see your ids with /mysubs"
+REPLY_UNSUBSCRIBED: Final = "Unsubscribed."
+REPLY_NO_SUCH_SUB: Final = "No subscription with that id is yours."
 REPLY_ACTION_USAGE: Final = (
     "Usage:\n"
     "/action add <schedule> <recipe> [key=value …]\n"
@@ -268,6 +303,12 @@ class CommandService:
     # in which case /action fails closed to the off-deployment result.
     actions: ActionStore | None = None
     clock: Clock | None = None
+    # The DM digest surface (#32): the store, the platform's durable-DM
+    # capability, and the per-subscriber cap (#23).
+    subscriptions: SubscriptionStore | None = None
+    capabilities: PlatformCapabilities | None = None
+    default_lang: str = "en"
+    max_subs_per_user: int = MAX_SUBS_PER_USER
     # /log publishes through the action engine; None on a deployment that
     # never publishes (the engine is always built, so this is for tests).
     engine: ActionEngine | None = None
@@ -530,7 +571,12 @@ class CommandService:
             return CommandResult(REPLY_LOG_WIKI_ERROR, ok=False)
         log_event("log_command", "ok")
         text = "\n".join(message.text for message in outcome.messages)
-        return CommandResult(text or REPLY_LOG_NOTHING, ok=bool(outcome.messages))
+        # The pipeline's payload rides along: Telegram's /logmedia review DM
+        # needs the PublishedLog to know which files were uploaded, and
+        # rebuilding that in the adapter would mean re-running the publish.
+        return CommandResult(
+            text or REPLY_LOG_NOTHING, ok=bool(outcome.messages), payload=outcome.payload
+        )
 
     def _log_decline(
         self, scope: Scope, settings: ChannelSettings, *, is_author: bool
@@ -555,6 +601,78 @@ class CommandService:
             self.counters.increment("log_throttled")
             return REPLY_THROTTLED
         return None
+
+    async def subscribe(self, source: Scope, dm: Scope, *, options: str) -> CommandResult:
+        """Create a durable DM digest subscription to ``source`` (any member).
+
+        How an adapter learns ``source`` differs — Telegram redeems a shared
+        link into a pending target, Discord takes the channel the command ran
+        in — but parsing, the per-user cap, and the confirmation are the same
+        everywhere. Gated on ``durable_dm``: a platform without durable direct
+        messages has nowhere to deliver.
+        """
+        store = self.subscriptions
+        if store is None:
+            return CommandResult(REPLY_SUBS_UNAVAILABLE, ok=False)
+        if self.capabilities is not None and not self.capabilities.durable_dm:
+            return CommandResult(REPLY_SUBS_NO_DURABLE_DM, ok=False)
+        try:
+            schedule, recipe, lang = parse_subscription(options, self.default_lang)
+        except SubscriptionParseError as error:
+            return CommandResult(str(error), ok=False)
+        subscription = Subscription(
+            sub_id=mint_sub_id(),
+            dm=dm,
+            scope=source,
+            schedule=schedule,
+            recipe=recipe,
+            lang=lang,
+        )
+        try:
+            await admit_subscription(store, subscription, self.max_subs_per_user)
+        except SubscriptionCapReachedError as error:
+            return CommandResult(str(error), ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        log_event("subscription_add", "ok")
+        return CommandResult(
+            REPLY_SUBSCRIBED.format(
+                sub_id=subscription.sub_id, schedule=schedule.token, recipe=recipe, lang=lang
+            )
+        )
+
+    async def list_subscriptions(self, dm: Scope) -> CommandResult:
+        """List the caller's DM digest subscriptions."""
+        store = self.subscriptions
+        if store is None:
+            return CommandResult(REPLY_SUBS_UNAVAILABLE, ok=False)
+        try:
+            subs = await store.list_for_user(dm)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        if not subs:
+            return CommandResult(REPLY_NO_SUBS, ok=False)
+        lines = [REPLY_SUBS_HEADER]
+        lines += [f"[{s.sub_id}] {s.schedule.token} {s.recipe} ({s.lang})" for s in subs]
+        return CommandResult("\n".join(lines))
+
+    async def unsubscribe(self, dm: Scope, *, subscription_id: str) -> CommandResult:
+        """Remove one of the caller's subscriptions by id."""
+        store = self.subscriptions
+        if store is None:
+            return CommandResult(REPLY_SUBS_UNAVAILABLE, ok=False)
+        sub_id = subscription_id.strip()
+        if not sub_id:
+            return CommandResult(REPLY_UNSUB_USAGE, ok=False)
+        try:
+            removed = await store.remove(dm, sub_id)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        return (
+            CommandResult(REPLY_UNSUBSCRIBED)
+            if removed
+            else CommandResult(REPLY_NO_SUCH_SUB, ok=False)
+        )
 
     async def action(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
         """Add, remove, or list this scope's scheduled analyses (admins only).

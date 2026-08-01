@@ -9,9 +9,11 @@ for.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any, cast
 
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
 from blybot.domain.models import (
     ConsentMode,
     LlmSettings,
@@ -38,6 +40,7 @@ from tests.fakes import (
     InMemoryActions,
     InMemoryArchive,
     InMemoryProfiles,
+    InMemorySubscriptions,
     SuffixTransform,
 )
 
@@ -985,3 +988,39 @@ async def test_log_with_a_silent_sink_reports_nothing_published() -> None:
     result = await service.log_message(_SCOPE, is_author=True, content=LogContent(text="x"))
     assert result.text == c.REPLY_LOG_NOTHING
     assert result.ok is False
+
+
+async def test_subscribe_needs_a_platform_with_durable_dms() -> None:
+    """IRC has no durable DM, so there is nowhere to deliver a digest —
+    the gate belongs in the neutral service, not in each adapter (#32)."""
+    subs = InMemorySubscriptions()
+    service = CommandService(
+        directory=_directory(InMemoryProfiles()),
+        groups=GroupPolicy(allowed=set()),
+        page_url_for=str,
+        counters=Counters(),
+        subscriptions=subs,
+        capabilities=replace(TELEGRAM_CAPABILITIES, durable_dm=False),
+    )
+    result = await service.subscribe(_SCOPE, Scope("neutral", "777"), options="")
+    assert result.text == c.REPLY_SUBS_NO_DURABLE_DM
+    assert result.ok is False
+    assert subs.subs == {}
+
+
+async def test_the_subscription_surface_is_off_without_a_store() -> None:
+    """A deployment with no subscription store fails closed on all three."""
+    service = CommandService(
+        directory=_directory(InMemoryProfiles()),
+        groups=GroupPolicy(allowed=set()),
+        page_url_for=str,
+        counters=Counters(),
+    )
+    dm = Scope("neutral", "777")
+    results = [
+        await service.subscribe(_SCOPE, dm, options=""),
+        await service.list_subscriptions(dm),
+        await service.unsubscribe(dm, subscription_id="abcd"),
+    ]
+    assert [r.text for r in results] == [c.REPLY_SUBS_UNAVAILABLE] * 3
+    assert not any(r.ok for r in results)

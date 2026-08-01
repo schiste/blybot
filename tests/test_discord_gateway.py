@@ -18,6 +18,7 @@ import pytest
 
 from blybot.adapters.discord import gateway as gw
 from blybot.adapters.discord.author_mask import DiscordAuthorMasker
+from blybot.adapters.discord.capabilities import DISCORD_CAPABILITIES
 from blybot.adapters.discord.gateway import (
     DiscordGateway,
     DiscordGatewayClient,
@@ -110,6 +111,9 @@ def _make_gateway(
         vault=vault,
         llm_defaults=llm_defaults,
         llm_max_tokens_ceiling=4096,
+        subscriptions=subscriptions,
+        capabilities=DISCORD_CAPABILITIES,
+        default_lang=default_lang,
     )
     return DiscordGateway(
         directory=directory,
@@ -472,7 +476,7 @@ def _subs_gateway(
 
 async def test_subscribe_reports_when_unavailable() -> None:
     gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
-    assert await gateway.subscribe_command(_CHANNEL, None, 321, "") == gw.REPLY_SUBS_UNAVAILABLE
+    assert await gateway.subscribe_command(_CHANNEL, None, 321, "") == cmd.REPLY_SUBS_UNAVAILABLE
 
 
 async def test_subscribe_surfaces_a_parse_error() -> None:
@@ -503,22 +507,22 @@ async def test_subscribe_keeps_an_existing_code() -> None:
 async def test_subscribe_reports_storage_down() -> None:
     gateway, _store, _subs = _subs_gateway(subs=InMemorySubscriptions(fail=True))
     reply = await gateway.subscribe_command(_CHANNEL, None, 321, "")
-    assert reply == gw.REPLY_STORAGE_DOWN
+    assert reply == cmd.REPLY_STORAGE_DOWN
 
 
 async def test_mysubs_reports_when_unavailable() -> None:
     gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
-    assert await gateway.mysubs_command(321) == gw.REPLY_SUBS_UNAVAILABLE
+    assert await gateway.mysubs_command(321) == cmd.REPLY_SUBS_UNAVAILABLE
 
 
 async def test_mysubs_reports_storage_down() -> None:
     gateway, _store, _subs = _subs_gateway(subs=InMemorySubscriptions(fail=True))
-    assert await gateway.mysubs_command(321) == gw.REPLY_STORAGE_DOWN
+    assert await gateway.mysubs_command(321) == cmd.REPLY_STORAGE_DOWN
 
 
 async def test_mysubs_reports_no_subscriptions() -> None:
     gateway, _store, _subs = _subs_gateway()
-    assert await gateway.mysubs_command(321) == gw.REPLY_NO_SUBS
+    assert await gateway.mysubs_command(321) == cmd.REPLY_NO_SUBS
 
 
 async def test_mysubs_lists_the_callers_subscriptions() -> None:
@@ -534,18 +538,18 @@ async def test_mysubs_lists_the_callers_subscriptions() -> None:
     )
     gateway, _store, _subs = _subs_gateway(subs=subs)
     reply = await gateway.mysubs_command(321)
-    assert gw.REPLY_SUBS_HEADER in reply
+    assert cmd.REPLY_SUBS_HEADER in reply
     assert "[abcd] daily@08:00 summarize (en)" in reply
 
 
 async def test_unsubscribe_reports_when_unavailable() -> None:
     gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
-    assert await gateway.unsubscribe_command(321, "abcd") == gw.REPLY_SUBS_UNAVAILABLE
+    assert await gateway.unsubscribe_command(321, "abcd") == cmd.REPLY_SUBS_UNAVAILABLE
 
 
 async def test_unsubscribe_shows_usage_for_a_blank_id() -> None:
     gateway, _store, _subs = _subs_gateway()
-    assert await gateway.unsubscribe_command(321, "  ") == gw.REPLY_UNSUB_USAGE
+    assert await gateway.unsubscribe_command(321, "  ") == cmd.REPLY_UNSUB_USAGE
 
 
 async def test_unsubscribe_removes_a_matching_subscription() -> None:
@@ -560,13 +564,13 @@ async def test_unsubscribe_removes_a_matching_subscription() -> None:
         lang="en",
     )
     gateway, _store, _subs = _subs_gateway(subs=subs)
-    assert await gateway.unsubscribe_command(321, "abcd") == gw.REPLY_UNSUBSCRIBED
-    assert await gateway.unsubscribe_command(321, "abcd") == gw.REPLY_NO_SUCH_SUB  # already gone
+    assert await gateway.unsubscribe_command(321, "abcd") == cmd.REPLY_UNSUBSCRIBED
+    assert await gateway.unsubscribe_command(321, "abcd") == cmd.REPLY_NO_SUCH_SUB  # already gone
 
 
 async def test_unsubscribe_reports_storage_down() -> None:
     gateway, _store, _subs = _subs_gateway(subs=InMemorySubscriptions(fail=True))
-    assert await gateway.unsubscribe_command(321, "abcd") == gw.REPLY_STORAGE_DOWN
+    assert await gateway.unsubscribe_command(321, "abcd") == cmd.REPLY_STORAGE_DOWN
 
 
 # --- helpers on the shell ----------------------------------------------------
@@ -932,7 +936,7 @@ async def test_mysubs_slash_command_reports_no_subscriptions() -> None:
     client = build_gateway_client(gateway)
     interaction = _dm_interaction(SimpleNamespace(id=_CHANNEL))
     await _command(client, "mysubs").callback(interaction)
-    assert interaction.response.sent == [(gw.REPLY_NO_SUBS, True)]
+    assert interaction.response.sent == [(cmd.REPLY_NO_SUBS, True)]
 
 
 async def test_unsubscribe_slash_command_reports_unknown_id() -> None:
@@ -944,7 +948,7 @@ async def test_unsubscribe_slash_command_reports_unknown_id() -> None:
     client = build_gateway_client(gateway)
     interaction = _dm_interaction(SimpleNamespace(id=_CHANNEL))
     await _command(client, "unsubscribe").callback(interaction, "nope")
-    assert interaction.response.sent == [(gw.REPLY_NO_SUCH_SUB, True)]
+    assert interaction.response.sent == [(cmd.REPLY_NO_SUCH_SUB, True)]
 
 
 def test_run_starts_the_client() -> None:
@@ -1218,7 +1222,7 @@ async def test_subscribe_refuses_past_the_per_user_cap() -> None:
     directory = _directory(store)
     groups = GroupPolicy(allowed=set())
     gateway = _make_gateway(directory, groups, subscriptions=subs)
-    gateway.max_subs_per_user = 2
+    gateway.commands.max_subs_per_user = 2
 
     for _ in range(2):
         assert "Subscribed" in await gateway.subscribe_command(_CHANNEL, None, 321, "")
@@ -1637,3 +1641,15 @@ async def test_a_routed_dm_is_transcribed_through_the_client_shell() -> None:
     await client.on_message(cast("discord.Message", dm_message))
     assert len(sent) == 1  # the pseudonym disclosure
     assert "first point" in publisher.started[0][2]
+
+
+async def test_subscribe_reports_a_storage_failure_while_minting_the_code() -> None:
+    """The subscribable-code mint is Discord's own pre-step; its outage is
+    reported before the neutral service is ever reached."""
+    gateway, store, _archive, _capture = _capture_gateway()
+    subs = InMemorySubscriptions()
+    gateway.commands.subscriptions = subs
+    gateway.commands.capabilities = DISCORD_CAPABILITIES
+    store.fail_upserts = True
+    assert await gateway.subscribe_command(_CHANNEL, None, 321, "") == gw.REPLY_STORAGE_DOWN
+    assert subs.subs == {}

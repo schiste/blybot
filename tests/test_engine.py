@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
-from blybot.domain.models import ActionSpec, OutboundMessage, Scope, StepSpec
+from blybot.domain.models import (
+    ActionContext,
+    ActionSpec,
+    OutboundMessage,
+    Scope,
+    StepSpec,
+)
 from blybot.domain.ports import ActionError
 from blybot.observability import Counters
 from blybot.services.actions import parse_action
@@ -119,7 +126,7 @@ async def test_chain_order_is_the_spec_order() -> None:
             StepSpec(name="prompt", params=(("tag", "+1"),)),
             StepSpec(name="prompt", params=(("tag", "+2"),)),
         ),
-        sink=StepSpec(name="wiki_section"),
+        sinks=(StepSpec(name="wiki_section"),),
     )
     sink = FakeSink()
     engine, _counters = make_engine(sink=sink)
@@ -156,3 +163,65 @@ async def test_provided_payloads_skip_source_resolution_entirely() -> None:
     )
     # Would raise "unknown source" without a provided payload; with one it runs.
     await engine.run(SCOPE, spec_for(), NOW, payload="direct")
+
+
+async def test_every_sink_receives_the_payload_and_their_messages_concatenate() -> None:
+    """One summary, several destinations: publish AND fan out (#70)."""
+    wiki = FakeSink(messages=(OutboundMessage(scope=SCOPE, text="published"),))
+    subscribers = FakeSink(
+        messages=(
+            OutboundMessage(scope=Scope("telegram", "11"), text="digest"),
+            OutboundMessage(scope=Scope("telegram", "22"), text="digest"),
+        )
+    )
+    spec = replace(
+        spec_for(),
+        sinks=(StepSpec(name="wiki_section"), StepSpec(name="subscriber_dm")),
+    )
+    engine = ActionEngine(
+        sources={"archive_window": FakeSource(payload="hello")},
+        transforms={"prompt": SuffixTransform()},
+        sinks={"wiki_section": wiki, "subscriber_dm": subscribers},
+        counters=Counters(),
+        clock=FakeClock(),
+    )
+
+    outcome = await engine.run(SCOPE, spec, NOW)
+
+    # Both sinks saw the same final payload...
+    assert [payload for _context, payload in wiki.delivered] == ["hello+t"]
+    assert [payload for _context, payload in subscribers.delivered] == ["hello+t"]
+    # ...and their messages arrive in spec order.
+    assert [message.text for message in outcome.messages] == ["published", "digest", "digest"]
+
+
+async def test_a_sink_is_handed_its_own_step_not_the_specs() -> None:
+    """With several sinks, `context.spec` cannot say which params are mine."""
+    seen: list[StepSpec] = []
+
+    class _StepRecordingSink:
+        async def deliver(
+            self, context: ActionContext, step: StepSpec, payload: object
+        ) -> tuple[OutboundMessage, ...]:
+            del context, payload
+            seen.append(step)
+            return ()
+
+    spec = replace(
+        spec_for(),
+        sinks=(
+            StepSpec(name="wiki_section", params=(("page", "Meta:One"),)),
+            StepSpec(name="subscriber_dm", params=(("page", "Meta:Two"),)),
+        ),
+    )
+    engine = ActionEngine(
+        sources={"archive_window": FakeSource(payload="hello")},
+        transforms={"prompt": SuffixTransform()},
+        sinks={"wiki_section": _StepRecordingSink(), "subscriber_dm": _StepRecordingSink()},
+        counters=Counters(),
+        clock=FakeClock(),
+    )
+
+    await engine.run(SCOPE, spec, NOW)
+
+    assert [step.param("page") for step in seen] == ["Meta:One", "Meta:Two"]

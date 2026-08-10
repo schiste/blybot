@@ -126,7 +126,7 @@ async def test_run_requires_a_template_and_builds_prompt_recipes() -> None:
 
 async def test_action_errors_reach_the_admin_verbatim() -> None:
     class ExplodingSink:
-        async def deliver(self, context: object, payload: object) -> tuple[()]:
+        async def deliver(self, context: object, _step: object, payload: object) -> tuple[()]:
             del context, payload
             msg = "The analysis failed and nothing was published — try again later."
             raise ActionError(msg)

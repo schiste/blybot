@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -135,7 +136,7 @@ def test_parse_action_routes_params_to_their_steps() -> None:
     assert transform.param("model") == "large"
     assert transform.param("lang") == "fr"
     assert transform.param("temp") == "0.4"
-    assert spec.sink == StepSpec(name="wiki_section", params=(("page", "Meta:Log"),))
+    assert spec.sinks == (StepSpec(name="wiki_section", params=(("page", "Meta:Log"),)),)
     assert spec.last_run == NOW  # primed: never fires for slots before creation
 
 
@@ -227,3 +228,42 @@ def test_stats_narrative_recipe_chains_stats_into_the_prompt() -> None:
     spec = parse_action("daily@06:00 stats_narrative")
     assert [step.name for step in spec.transforms] == ["stats", "prompt"]
     assert spec.transforms[1].param("template") == "stats_narrative"
+
+
+def test_a_legacy_single_sink_row_still_loads(  # D1 / #70
+) -> None:
+    """Stored actions are JSON in a live profile row.
+
+    Before an action could have several sinks the key was a bare
+    ``"sink"`` object. An upgrade must not orphan a scope's configuration,
+    so that shape still loads — as a one-element tuple.
+    """
+    spec = parse_action("daily@06:00 summarize page=Meta:Log")
+    document = json.loads(dumps_actions((spec,)))
+    legacy = document[0]
+    legacy["sink"] = legacy.pop("sinks")[0]  # rewind to the old shape
+
+    (loaded,) = loads_actions(json.dumps(document))
+
+    assert loaded == spec
+    assert loaded.sinks == (StepSpec(name="wiki_section", params=(("page", "Meta:Log"),)),)
+
+
+def test_several_sinks_survive_a_round_trip() -> None:
+    spec = replace(
+        parse_action("daily@06:00 summarize"),
+        sinks=(StepSpec(name="wiki_section"), StepSpec(name="subscriber_dm")),
+    )
+    assert loads_actions(dumps_actions((spec,))) == (spec,)
+
+
+def test_describe_lists_every_sink() -> None:
+    spec = replace(
+        parse_action("daily@06:00 summarize"),
+        action_id="ab12",
+        sinks=(StepSpec(name="wiki_section"), StepSpec(name="subscriber_dm")),
+    )
+    assert describe_action(spec) == (
+        "[ab12] daily@06:00: archive_window → prompt(template=summarize) "
+        "→ wiki_section → subscriber_dm"
+    )

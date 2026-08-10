@@ -78,7 +78,7 @@ async def test_a_parse_error_comes_back_verbatim() -> None:
 
 async def test_action_errors_reach_the_caller_verbatim() -> None:
     class ExplodingSink:
-        async def deliver(self, context: object, payload: object) -> tuple[()]:
+        async def deliver(self, context: object, _step: object, payload: object) -> tuple[()]:
             del context, payload
             msg = "No target page is set for this chat."
             raise ActionError(msg)

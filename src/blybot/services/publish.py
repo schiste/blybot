@@ -177,7 +177,7 @@ def log_action(page: str) -> ActionSpec:
         trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="log"),
         source=StepSpec(name="provided"),
         transforms=(StepSpec(name="log_publish", params=(("page", page),)),),
-        sink=StepSpec(name="chat_confirm"),
+        sinks=(StepSpec(name="chat_confirm"),),
     )
 
 
@@ -212,7 +212,9 @@ class LogPublishTransform:
 class ChatConfirmSink:
     """The ``chat_confirm`` sink: a one-line confirmation for the scope."""
 
-    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+    async def deliver(
+        self, context: ActionContext, _step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
         """Render the published-log confirmation with its section URL."""
         if not isinstance(payload, PublishedLog):
             msg = "the confirmation sink needs a published log to confirm"

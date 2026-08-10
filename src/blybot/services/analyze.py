@@ -363,13 +363,12 @@ class WikiSectionSink:
     edit_summary: str
     bot_name: str
 
-    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+    async def deliver(
+        self, context: ActionContext, step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
         """Render with trusted markup (fields sanitized) and publish."""
         report = _as_report(payload)
-        page = await self.resolve_page(
-            context.scope,
-            context.spec.sink.param("page") or None,
-        )
+        page = await self.resolve_page(context.scope, step.param("page") or None)
         heading = f"{context.now:%Y-%m-%d} — {_title(report)}"
         body = self._render(report)
         await self.publisher.start_discussion(page, heading, body, self.edit_summary)
@@ -411,7 +410,9 @@ class ChatReplySink:
 
     max_chars: int
 
-    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+    async def deliver(
+        self, context: ActionContext, _step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
         """Render the report as one bounded chat message."""
         report = _as_report(payload)
         if isinstance(report, StatsReport):

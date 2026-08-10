@@ -14,13 +14,14 @@ from blybot.domain.models import (
     ConsentMode,
     GroupProfile,
     LlmSettings,
+    OutboundMessage,
     PromptResult,
     Scope,
     StatsReport,
     StepSpec,
     Transcript,
 )
-from blybot.domain.ports import ActionError, PromptError
+from blybot.domain.ports import ActionError, PromptError, Sink
 from blybot.observability import Counters
 from blybot.services.actions import command_action, parse_action
 from blybot.services.analyze import (
@@ -43,6 +44,11 @@ from tests.fakes import (
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=UTC)
 SCOPE = Scope("telegram", "-1")
+
+
+async def _deliver(sink: Sink, ctx: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+    """Deliver through ``sink``, handing it the step its spec assigns it."""
+    return await sink.deliver(ctx, ctx.spec.sinks[0], payload)
 
 
 def msg(message_id: int, text: str = "hello", **extra: object) -> CapturedMessage:
@@ -404,7 +410,7 @@ async def test_wiki_sink_sanitizes_items_and_confirms_with_the_url() -> None:
     publisher = FakePublisher()
     sink = make_wiki_sink(publisher)
 
-    (confirmation,) = await sink.deliver(context(), analysis_report())
+    (confirmation,) = await _deliver(sink, context(), analysis_report())
 
     ((page, heading, body, summary),) = publisher.started
     assert page == "Meta:Resolved log"  # resolved from the scope
@@ -425,7 +431,7 @@ async def test_wiki_sink_honors_the_page_parameter_and_sampling_note() -> None:
         now=NOW,
     )
 
-    await sink.deliver(spec_context, analysis_report(sampled=True))
+    await _deliver(sink, spec_context, analysis_report(sampled=True))
 
     ((page, _heading, body, _summary),) = publisher.started
     assert page == "Meta:Elsewhere"
@@ -447,7 +453,7 @@ async def test_wiki_sink_renders_stats_reports_too() -> None:
         until=NOW,
     )
 
-    await sink.deliver(context("stats", "stats"), stats)
+    await _deliver(sink, context("stats", "stats"), stats)
 
     ((_page, heading, body, _summary),) = publisher.started
     assert heading == "2026-07-25 — Activity statistics"
@@ -455,18 +461,18 @@ async def test_wiki_sink_renders_stats_reports_too() -> None:
     assert "busiest hour" not in body  # empty-window fields are omitted
 
     with pytest.raises(ActionError, match="analysis or stats report"):
-        await sink.deliver(context(), "not a report")
+        await _deliver(sink, context(), "not a report")
 
 
 async def test_chat_reply_sink_renders_and_bounds_the_reply() -> None:
     sink = ChatReplySink(max_chars=4096)
 
-    (message,) = await sink.deliver(context(), analysis_report())
+    (message,) = await _deliver(sink, context(), analysis_report())
     assert message.scope == SCOPE
     assert "• point {{one}}" in message.text
 
     huge = analysis_report(items=tuple(f"item {i} " + "x" * 590 for i in range(10)))
-    (bounded,) = await sink.deliver(context(), huge)
+    (bounded,) = await _deliver(sink, context(), huge)
     # Capped at the injected platform cap (4096) with an ellipsis.
     assert bounded.text.endswith("…")
     assert len(bounded.text) == 4097
@@ -482,7 +488,7 @@ async def test_chat_reply_sink_renders_and_bounds_the_reply() -> None:
         since=NOW - timedelta(hours=1),
         until=NOW,
     )
-    (stats_message,) = await sink.deliver(context("stats", "stats"), stats)
+    (stats_message,) = await _deliver(sink, context("stats", "stats"), stats)
     assert "• messages: 1" in stats_message.text
 
 

@@ -543,7 +543,10 @@ class ActionSpec:
     trigger: TriggerSpec
     source: StepSpec
     transforms: tuple[StepSpec, ...] = ()
-    sink: StepSpec = field(default_factory=lambda: StepSpec(name="reply"))
+    # More than one destination: a summary may be published to the wiki AND
+    # fanned out to subscribers. Every sink receives the same final payload
+    # and their messages are concatenated in order.
+    sinks: tuple[StepSpec, ...] = (StepSpec(name="reply"),)
     last_run: datetime | None = None
 
 

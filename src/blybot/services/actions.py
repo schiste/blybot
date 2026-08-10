@@ -91,14 +91,14 @@ def parse_action(text: str, now_iso: str | None = None) -> ActionSpec:
         msg = f"Usage: /action add <schedule> <recipe> [key=value …]. Recipes: {_RECIPE_HELP}"
         raise ActionParseError(msg)
     schedule = parse_schedule(tokens[0])
-    source, transforms, sink = _resolve_recipe(tokens[1])
+    source, transforms, sinks = _resolve_recipe(tokens[1])
     params = _parse_params(tokens[2:])
     return ActionSpec(
         action_id=_mint_id(),
         trigger=TriggerSpec(kind=TriggerKind.SCHEDULE, schedule=schedule),
         source=_with_params(source, params, _SOURCE_KEYS),
         transforms=tuple(_with_params(step, params, _TRANSFORM_KEYS) for step in transforms),
-        sink=_with_params(sink, params, _SINK_KEYS),
+        sinks=tuple(_with_params(step, params, _SINK_KEYS) for step in sinks),
         last_run=_parse_instant(now_iso),
     )
 
@@ -113,14 +113,14 @@ def command_action(command: str, recipe: str, arg_tokens: list[str]) -> ActionSp
     tokens = list(arg_tokens)
     if tokens and _WINDOW_SUGAR_RE.match(tokens[0]):
         tokens[0] = f"window={tokens[0]}"
-    source, transforms, sink = _resolve_recipe(recipe)
+    source, transforms, sinks = _resolve_recipe(recipe)
     params = _parse_params(tokens)
     return ActionSpec(
         action_id=_mint_id(),
         trigger=TriggerSpec(kind=TriggerKind.COMMAND, command=command),
         source=_with_params(source, params, _SOURCE_KEYS),
         transforms=tuple(_with_params(step, params, _TRANSFORM_KEYS) for step in transforms),
-        sink=_with_params(sink, params, _SINK_KEYS),
+        sinks=tuple(_with_params(step, params, _SINK_KEYS) for step in sinks),
     )
 
 
@@ -131,7 +131,9 @@ def describe_action(spec: ActionSpec) -> str:
         if spec.trigger.schedule is not None
         else f"/{spec.trigger.command}"
     )
-    steps = " → ".join(_describe_step(step) for step in (spec.source, *spec.transforms, spec.sink))
+    steps = " → ".join(
+        _describe_step(step) for step in (spec.source, *spec.transforms, *spec.sinks)
+    )
     return f"[{spec.action_id}] {trigger}: {steps}"
 
 
@@ -154,7 +156,9 @@ def _parse_time(value: str) -> dict[str, int]:
     raise ActionParseError(msg)
 
 
-def _resolve_recipe(recipe: str) -> tuple[StepSpec, tuple[StepSpec, ...], StepSpec]:
+def _resolve_recipe(
+    recipe: str,
+) -> tuple[StepSpec, tuple[StepSpec, ...], tuple[StepSpec, ...]]:
     name, sep, template = recipe.partition(":")
     transforms: tuple[StepSpec, ...]
     if name == "prompt" and sep and template:
@@ -173,7 +177,7 @@ def _resolve_recipe(recipe: str) -> tuple[StepSpec, tuple[StepSpec, ...], StepSp
     else:
         msg = f"Unknown recipe {recipe!r}. Recipes: {_RECIPE_HELP}"
         raise ActionParseError(msg)
-    return StepSpec(name="archive_window"), transforms, StepSpec(name="wiki_section")
+    return StepSpec(name="archive_window"), transforms, (StepSpec(name="wiki_section"),)
 
 
 def _parse_params(tokens: list[str]) -> dict[str, str]:
@@ -237,7 +241,7 @@ def _action_to_dict(spec: ActionSpec) -> dict[str, Any]:
         "trigger": trigger,
         "source": _step_to_dict(spec.source),
         "transforms": [_step_to_dict(step) for step in spec.transforms],
-        "sink": _step_to_dict(spec.sink),
+        "sinks": [_step_to_dict(step) for step in spec.sinks],
     }
     if spec.last_run is not None:
         data["last_run"] = spec.last_run.isoformat()
@@ -263,9 +267,21 @@ def _action_from_dict(item: dict[str, Any]) -> ActionSpec:
         ),
         source=_step_from_dict(item["source"]),
         transforms=tuple(_step_from_dict(step) for step in item["transforms"]),
-        sink=_step_from_dict(item["sink"]),
+        sinks=_sinks_from_dict(item),
         last_run=_parse_instant(item.get("last_run")),
     )
+
+
+def _sinks_from_dict(item: dict[str, Any]) -> tuple[StepSpec, ...]:
+    """Read the sink list, accepting rows written before actions had several.
+
+    Stored actions are JSON in a live profile row, so an upgrade must not
+    orphan a scope's configuration: a legacy ``"sink"`` object still loads
+    as a one-element tuple.
+    """
+    if "sinks" in item:
+        return tuple(_step_from_dict(step) for step in item["sinks"])
+    return (_step_from_dict(item["sink"]),)
 
 
 def _step_from_dict(item: dict[str, Any]) -> StepSpec:

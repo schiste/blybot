@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from datetime import datetime
 
-    from blybot.domain.models import ActionSpec, Scope
+    from blybot.domain.models import ActionSpec, OutboundMessage, Scope
     from blybot.domain.ports import Clock, Sink, Source, Transform
     from blybot.observability import Counters
 
@@ -63,7 +63,7 @@ class ActionEngine:
             (step, self._resolve(self.transforms, step.name, "transform"))
             for step in spec.transforms
         ]
-        sink = self._resolve(self.sinks, spec.sink.name, "sink")
+        sink_chain = [(step, self._resolve(self.sinks, step.name, "sink")) for step in spec.sinks]
 
         context = ActionContext(scope=scope, spec=spec, now=now or self.clock.now())
         if source is not None:
@@ -75,9 +75,11 @@ class ActionEngine:
         if payload is None:
             self.counters.increment("actions_empty")
             return RunOutcome(payload=None)
-        messages = await sink.deliver(context, payload)
+        messages: list[OutboundMessage] = []
+        for step, sink in sink_chain:
+            messages.extend(await sink.deliver(context, step, payload))
         self.counters.increment("actions_run")
-        return RunOutcome(payload=payload, messages=messages)
+        return RunOutcome(payload=payload, messages=tuple(messages))
 
     @staticmethod
     def _resolve(registry: Mapping[str, _ComponentT], name: str, kind: str) -> _ComponentT:

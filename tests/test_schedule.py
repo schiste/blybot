@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
-from blybot.domain.models import ActionContext, OutboundMessage, Scope, TriggerKind
+from blybot.domain.models import ActionContext, OutboundMessage, Scope, StepSpec, TriggerKind
 from blybot.observability import Counters
 from blybot.services.actions import parse_action
 from blybot.services.engine import ActionEngine
@@ -240,7 +240,9 @@ class StampProbeSink:
     store: InMemoryActions
     stamped: list[datetime | None] = field(default_factory=list)
 
-    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+    async def deliver(
+        self, context: ActionContext, _step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
         del context, payload
         (stored,) = self.store.actions[Scope("telegram", "-1")]
         self.stamped.append(stored.last_run)

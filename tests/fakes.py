@@ -347,7 +347,9 @@ class FakeSink:
     fail: bool = False
     delivered: list[tuple[ActionContext, object]] = field(default_factory=list)
 
-    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+    async def deliver(
+        self, context: ActionContext, _step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
         if self.fail:
             msg = "sink exploded"
             raise RuntimeError(msg)

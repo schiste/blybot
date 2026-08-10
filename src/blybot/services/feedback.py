@@ -33,7 +33,7 @@ BUG_ACTION: Final = ActionSpec(
     trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="bug"),
     source=StepSpec(name="provided"),
     transforms=(),
-    sink=StepSpec(name="issue_tracker"),
+    sinks=(StepSpec(name="issue_tracker"),),
 )
 
 _TITLE_LIMIT: Final = 64
@@ -75,7 +75,9 @@ class FeedbackService:
         title, body = compose_issue(text, _BODY_PREAMBLE)
         return await self.tracker.open_issue(title=title, body=body)
 
-    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+    async def deliver(
+        self, context: ActionContext, _step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
         """File the payload text as an issue; confirm with its URL.
 
         The confirmation carries the caller's scope verbatim — for /bug

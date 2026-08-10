@@ -45,7 +45,7 @@ REPO_DIGEST_ACTION: Final = ActionSpec(
     trigger=TriggerSpec(kind=TriggerKind.COMMAND, command="repo_poll"),
     source=StepSpec(name="repo_events"),
     transforms=(StepSpec(name="rule_match"),),
-    sink=StepSpec(name="chat_message"),
+    sinks=(StepSpec(name="chat_message"),),
 )
 
 
@@ -138,7 +138,9 @@ class RuleMatchTransform:
 class ChatMessagesSink:
     """The generic ``chat_message`` sink: one message per payload line."""
 
-    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
+    async def deliver(
+        self, context: ActionContext, _step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
         """Wrap each line in an :class:`OutboundMessage` for the run's scope."""
         if not (isinstance(payload, tuple) and all(isinstance(line, str) for line in payload)):
             msg = "the chat sink needs a tuple of message lines to send"

@@ -92,8 +92,15 @@ class Sink(Protocol):
     layer to send — services never touch Telegram directly.
     """
 
-    async def deliver(self, context: ActionContext, payload: object) -> tuple[OutboundMessage, ...]:
-        """Publish ``payload``; return any chat messages to send."""
+    async def deliver(
+        self, context: ActionContext, step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
+        """Publish ``payload``; return any chat messages to send.
+
+        Takes its own ``step`` for the same reason :class:`Transform` does:
+        an action may have several sinks, so ``context.spec`` cannot tell a
+        sink which parameters are its own.
+        """
         ...
 
 

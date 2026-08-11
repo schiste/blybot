@@ -225,7 +225,11 @@ class SubscriptionScheduler:
             return []
         now = self.clock.now()
         messages: list[OutboundMessage] = []
-        for sub in subs[: self.max_per_tick]:
+        # Inherited subscriptions are delivered by the channel's own action,
+        # through the subscriber_dm sink — running them here as well would
+        # send the digest twice, on two different cadences.
+        due = [sub for sub in subs if not sub.inherited]
+        for sub in due[: self.max_per_tick]:
             try:
                 messages.extend(await self._run_one(sub, now))
             except Exception:

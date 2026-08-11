@@ -39,6 +39,13 @@ class Subscription:
     recipe: str  # digest recipe: summarize | talking_points | stats
     lang: str
     last_run: datetime | None = None
+    # An *inherited* subscription carries no schedule of its own: it means
+    # "send me whatever this channel's owner configured", and is delivered
+    # by that channel's action rather than by the subscription scheduler
+    # (#71). `schedule`/`recipe`/`lang` are then placeholders the owner's
+    # action overrides. Passing any option to `subscribe` makes it an
+    # override instead, with its own independent run.
+    inherited: bool = False
 
     def __post_init__(self) -> None:
         if not self.sub_id:

@@ -718,7 +718,72 @@ property "the people being archived are told" holds on all three
 platforms; the machinery that delivers it is different every time, and on
 Discord it is the exact opposite of the platform's own default.
 
-### 22.6 Authorization model (issue #27)
+### 22.6 The cross-platform bridge (issue #76)
+
+A **full mirror**: every message in a bridged channel is relayed to the
+others, attributed as `alice (discord)`.
+
+This is a third role, and structurally unlike the other two. Manual
+logging and digests are **reducers** — many messages in, one anonymized
+artifact out, on a delay. The bridge is a **relay**: one message in, one
+out per linked channel, immediately, with identity preserved. It uses the
+`Transport` seam and none of the `Source → Transform → Sink` engine,
+which is built around polling an archive window.
+
+**R6 is not amended.** R6 forbids a display name reaching *Meta* and
+reaching *disk*. A relay does neither: it is chat-to-chat, and the
+unified topology below means nothing is ever queued to storage. The
+stricter "no display names anywhere" claim lived only in the
+`domain/models.py` docstring; `domain/bridge.py` carries the opposite
+contract explicitly, and an architecture guard asserts the reachability —
+the archive, profile store, wiki publisher and capture layer may not so
+much as import the type. An inbound message forks once and the two halves
+never meet: `CapturedMessage` carries an HMAC label inward,
+`RelayMessage` carries the real name sideways.
+
+**One process, and why.** A relay needs the process that *receives* a
+message to reach the platform that must *send* it. A separate bridging
+job cannot: Telegram's `getUpdates` is exclusive to one poller, and a
+second IRC connection collides on the nick. So `PLATFORM=unified` hosts
+every configured adapter in one process. That trades the per-platform
+isolation the default deployment has, which is why it is **opt-in** and
+why the isolated entry points are untouched.
+
+**A bridge is a set of scopes, not a graph of pairwise links.** Fan-out is
+"my group except me", so `A → B → C → A` is unrepresentable rather than
+merely guarded. Membership is stored per scope and resolved per message,
+so a `bridge join` takes effect on the next message rather than the next
+restart. The remaining loop — a relayed line fed back as fresh input by a
+bouncer echo or a second bot instance — is fenced on **who wrote it**.
+Sniffing the text for an attribution prefix was the first attempt and is
+wrong: display names contain spaces, so no anchored pattern separates
+`Alice Smith (discord): hi` from `I saw alice (discord): hi`.
+
+**Consent is two-sided by construction.** A scope joins only because an
+admin ran `bridge join` *in that scope*, and its own stored `bridge_id`
+is the record — no verb writes another channel's row. Capture consent
+does not transfer: agreeing to `/capture on` is not agreeing to appear in
+an IRC channel watched by different people. Joining and leaving are
+announced in the other channels, because everyone being mirrored has to
+learn that an audience appeared, and a channel that stops being mirrored
+must not keep believing it still is.
+
+**The mirror stays complete; latency is what gives.** A busy Discord
+channel outruns IRC's pacing. Rather than drop, the relay queues per
+platform and makes the lag *visible* — announcing when it falls behind
+and when it catches up, once per transition. A ceiling far above that
+threshold exists only so a pathological flood sheds the backlog instead
+of killing the process, and says plainly that the mirror is incomplete
+for that period.
+
+**Deliberately not relayed:** attachments travel as markers
+(`[image]`, `[file: notes.pdf]`), not re-uploads — re-hosting another
+platform's files means storage, expiry and a copyright question the wiki
+context makes real. Edits and deletions do not propagate: IRC has
+neither, and a half-propagating edit is worse than none. A relayed
+message is a snapshot.
+
+### 22.7 Authorization model (issue #27)
 
 Authorization is **checked live at the moment of the privileged action and
 never stored**. Each platform proves it its own way — Telegram

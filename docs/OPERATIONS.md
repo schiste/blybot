@@ -61,6 +61,11 @@ instance with none fails fast with
 single-platform run — `python -m blybot`; the Toolforge deploy overrides it
 per job from the keys present, so you normally leave it unset.)
 
+**The one exception is `PLATFORM=unified`**, which runs every configured
+platform in a single process. It is required for cross-platform bridging
+and gives up the isolation described above — see "Bridging channels across
+platforms" below before setting it.
+
 ### Discord setup runbook
 
 1. **Create the application + bot.** At
@@ -110,6 +115,8 @@ The slash commands the gateway registers:
 - **on-demand analyses** — `/summarize`, `/stats`, `/talkingpoints`
   (deferred first: a chunked run outlives Discord's 3-second deadline), and
   `/action add|remove|list` to schedule recurring ones;
+- **bridging** — `/bridge new|join <code>|leave|show`, admin-only and
+  answered **publicly** (the channel is the audience, as with `/capture`);
 - **durable-DM digests** — `/subscribe [schedule] [recipe] [lang:xx]`,
   `/mysubs`, `/unsubscribe <id>`.
 
@@ -194,7 +201,8 @@ stored: a restart re-learns from the server, so there is no persisted
 identity and no grant that outlives a redeploy.
 
 Operator-only: `capture on|off`, `setpage`, `settings`, `reset`,
-`setrepo`, `revoke`, `llm`, `events`, `rule`, `rules`, `action`.
+`setrepo`, `revoke`, `llm`, `events`, `rule`, `rules`, `action`,
+`bridge new|join <code>|leave|show`.
 Open to anyone: `issue`, `repo`, `help`.
 
 The practical consequence for an operator: **the trust boundary is the
@@ -266,6 +274,86 @@ is deliberate. If your network is more permissive and you want it
 snappier, the knobs are `burst` and `min_interval` on `IrcConnection` —
 currently code-level defaults rather than env vars, because getting them
 wrong disconnects the bot rather than merely slowing it.
+
+## Bridging channels across platforms
+
+A **full mirror**: every message in a bridged channel is relayed to the
+others, attributed as `alice (discord)`.
+
+### Turning it on
+
+Bridging needs `PLATFORM=unified` in the base env, which runs every
+configured platform in **one process**. That is not a preference — a relay
+has to reach a transport the receiving process owns, and separate jobs
+cannot do that (Telegram's long-polling is exclusive to one poller, and a
+second IRC connection collides on the nick).
+
+**Read this before switching.** Unified mode gives up the per-platform
+isolation the default deployment has. Today one platform's crash cannot
+touch the others; under `PLATFORM=unified` it takes all of them down
+together. That is the price of a mirror, and it is why nothing infers it.
+
+`deploy-instance.sh` then starts a single `<name>` job and retires the
+per-platform ones. Switching back is symmetric: remove the line, redeploy.
+
+### Linking two channels
+
+In the first channel, an admin runs `bridge new` and gets a code. In the
+second, an admin runs `bridge join <code>`. Repeat for a third.
+
+Consent is **two-sided by design**: a channel only ever joins because one
+of *its own* admins ran the command there. No admin can opt in a channel
+they do not administer, and agreeing to `/capture on` is emphatically not
+agreeing to appear in an IRC channel watched by different people.
+
+Both events are announced in every channel already in the bridge, because
+people being mirrored need to know when a new audience appears — and when
+one leaves. `bridge leave` is unilateral and equally announced; `bridge
+show` says what a channel is currently bridged to.
+
+### What relays and what does not
+
+| | |
+|---|---|
+| ordinary messages | ✅ relayed with the sender's display name |
+| attachments | as a marker (`[image]`, `[file: notes.pdf]`), **not** re-uploaded |
+| bot commands | never — a command is addressed to the bot, not said to the channel |
+| edits and deletions | **not propagated**; a relayed message is a snapshot |
+
+Attachments are markers because re-hosting another platform's files means
+storage, expiry and a copyright question the wiki context makes real.
+Edits do not propagate because IRC has no mechanism for them, and a
+half-propagating edit is worse than none.
+
+### When the relay falls behind
+
+A busy Discord channel outruns IRC's pacing. **The bridge never drops** —
+the mirror stays complete — so what gives is latency, and it is announced:
+
+> ⏳ The relay to irc is running behind (20 messages queued); mirrored
+> messages will arrive late until it catches up.
+
+...and again when it recovers. Each transition announces **once**, not per
+message. Read these as information, not errors: they exist so people can
+self-moderate rather than be quietly mirrored late.
+
+There is a hard ceiling far above that threshold. It is an out-of-memory
+guard, not a drop policy, and reaching it says plainly that the mirror was
+incomplete for that period. If you ever see that message, raise
+`IRC_SEND_BURST`/`IRC_SEND_INTERVAL` (see "Why the bot answers slowly")
+before anything else.
+
+### Libera and bridges
+
+Libera's bot policy has a requirement specific to bridges: **at least one
+administrator must be connected directly to Libera**, not merely reachable
+on the far side of the bridge. That is an obligation on you, not something
+the bot can satisfy.
+
+Their policy also recommends interactive bots hold **voice** in the
+channels they serve, which additionally exempts them from some flood
+mitigation — the reason raising the pacing defaults is defensible once the
+bot is voiced.
 
 ## Per-instance prerequisites
 
@@ -675,6 +763,14 @@ documented exception: an opt-in digest subscription durably records the
 subscriber's private chat id (and nothing else about them) so the digest
 can reach them — erased on their `/unsubscribe`, and present only on
 capture-enabled deployments, which excludes IRC.
+
+The **bridge** adds a second thing worth stating plainly. A relayed
+message carries a real display name across platforms — that is what makes
+a mirror readable. It is not a new exception to the rule above: nothing is
+written to Meta and nothing is written to disk, because the relay is
+chat-to-chat and in-memory. But it *is* a genuine change in what a channel
+is: a bridged channel is readable by people on another platform, which is
+why linking requires an admin on each side and is announced in both.
 
 IRC adds one thing worth stating plainly because it *looks* like an
 exception and is not. The bot keeps a live list of channel-operator nicks

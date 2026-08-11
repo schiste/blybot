@@ -718,6 +718,47 @@ property "the people being archived are told" holds on all three
 platforms; the machinery that delivers it is different every time, and on
 Discord it is the exact opposite of the platform's own default.
 
+### 22.5.1 Where a scheduled summary goes (issue #69)
+
+A channel's owner configures the recurring summary's **cadence** (already
+possible: `action add daily@09:00 summarize`) and now its **destination**:
+
+| `delivery=` | wiki page | channel notice | DM to subscribers |
+|---|---|---|---|
+| `wiki` *(default)* | ✅ | ✅ | — |
+| `wiki+subs` | ✅ | ✅ | ✅ |
+| `subs` | — | — | ✅ |
+
+The default reproduces today's behaviour exactly, so every stored action
+keeps working. The channel notice was never a new feature:
+`WikiSectionSink` has always returned a `"Published: … → <url>"` message
+that the scheduler passes to the delivery loop.
+
+**Subscribers inherit or override.** A bare `subscribe` means "send me
+whatever this channel's owner configured", and is delivered by the
+channel's own action. Passing *any* option — schedule, recipe, or
+language — makes it an independent subscription with its own run, as
+before. The two must not overlap: an inherited subscription is skipped by
+the subscription scheduler, or the digest would go out twice on two
+cadences.
+
+One report is rendered and re-addressed, so inheriting subscribers share
+the channel's language. Wanting another means passing `lang:`, which is an
+override — N languages would otherwise mean N model runs per tick, which
+the per-scope token budget (C8) exists to prevent.
+
+**Gated on `durable_dm`,** so `wiki+subs` and `subs` are refused on IRC
+rather than silently degrading to `wiki`: an admin who asked for
+subscriber delivery would otherwise believe they had it.
+
+**Consent.** `REPLY_CAPTURE_ENABLED` tells a channel its messages are
+archived "for on-wiki summaries and statistics". Under `subs` the summary
+never reaches the wiki and goes to a private distribution list instead.
+That is *less* public, but it is not what the channel agreed to, and a
+private distribution list is a different data flow from a public page. An
+operator switching a scope into `subs` is changing the terms, and should
+say so in the channel.
+
 ### 22.6 The cross-platform bridge (issue #76)
 
 A **full mirror**: every message in a bridged channel is relayed to the

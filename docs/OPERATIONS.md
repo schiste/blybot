@@ -275,6 +275,45 @@ snappier, the knobs are `burst` and `min_interval` on `IrcConnection` —
 currently code-level defaults rather than env vars, because getting them
 wrong disconnects the bot rather than merely slowing it.
 
+## Where a channel's summary goes
+
+`action add <schedule> <recipe> [delivery=<mode>]` — the owner sets both
+the cadence and the destination.
+
+| mode | what happens |
+|---|---|
+| `wiki` *(default)* | publish to the wiki page, post the link in the channel |
+| `wiki+subs` | that, **plus** a DM to each subscriber who inherits |
+| `subs` | DM only — **nothing is published** |
+
+The default is what every action did before this existed, so nothing
+changes for an action you already configured.
+
+`wiki+subs` and `subs` need durable DMs and are therefore **refused on
+IRC**, with a message saying so rather than quietly falling back.
+
+### Inheriting vs. choosing your own
+
+A bare `subscribe` means "send me this channel's summary" — the owner's
+cadence, recipe and language govern, and it arrives when the channel's
+action runs. Passing **any** option (`subscribe weekly@mon.08:00 stats`,
+or just `subscribe lang:fr`) creates an independent subscription with its
+own schedule instead.
+
+A bare `subscribe` on a channel with no scheduled summary is refused: it
+would deliver nothing forever, and there would be no way to tell that
+from a quiet channel.
+
+### Before switching a channel to `subs`
+
+Capture announces that messages are archived *"for on-wiki summaries and
+statistics"*. Under `subs`, the summary never reaches the wiki — it goes
+to a private list of subscribers instead.
+
+That is less public, not more, but **it is not what the channel agreed
+to**, and a private distribution list is a different thing from a public
+page. Treat the switch as a change of terms: say so in the channel.
+
 ## Bridging channels across platforms
 
 A **full mirror**: every message in a bridged channel is relayed to the

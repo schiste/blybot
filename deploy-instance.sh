@@ -31,6 +31,12 @@ JOBS_DIR="${TOOL_HOME}/.blybot-jobs" # derived per-platform envs + wrappers
 # no token, so a server address is what switches it on — this must stay in
 # step with _PLATFORM_REQUIRED_KEYS in src/blybot/config.py.
 PLATFORMS="telegram discord irc"
+# Unified mode: one job running every configured platform in the same
+# process, which is what cross-platform bridging requires (a relay needs to
+# reach a transport the receiving process owns). Opt in with PLATFORM=unified
+# in the base env. It trades the per-platform isolation below — one crash
+# takes every platform down — so it is never inferred, only asked for.
+UNIFIED_PLATFORM="unified"
 enable_key() {
     case "$1" in
     telegram) echo "TELEGRAM_BOT_TOKEN" ;;
@@ -72,6 +78,36 @@ reinstall() {
     rm -f "${TOOL_HOME}/venv-update.out" "${TOOL_HOME}/venv-update.err"
 }
 
+# Write one job's derived env + wrapper and (re)start it. Shared by the
+# per-platform fan-out and by unified mode, which differ only in the job
+# name and the PLATFORM value forced into the derived env.
+deploy_job() {
+    local job="$1" base_env="$2" platform="$3"
+    local derived="${JOBS_DIR}/${job}.env"
+    local wrapper="${JOBS_DIR}/run-${job}.sh"
+    # Derived env = the base config with PLATFORM forced (any PLATFORM line
+    # in the base is dropped first, so the forced value always wins when
+    # run.sh sources the file).
+    # umask BEFORE the redirect, not chmod after: the shell creates the
+    # file at the redirect, so a later chmod leaves a window in which the
+    # bot token sits in a world-readable file on a shared multi-tenant
+    # host. The chmod stays for the re-deploy case, where the file
+    # already exists and umask no longer applies (#24).
+    (
+        umask 077
+        {
+            grep -vE '^PLATFORM=' "${base_env}"
+            echo "PLATFORM=${platform}"
+        } >"${derived}"
+    )
+    chmod 600 "${derived}"
+    printf '#!/bin/bash\nexport BLYBOT_CONFIG=%s\nexec %s/run.sh\n' "${derived}" "${REPO_DIR}" >"${wrapper}"
+    chmod +x "${wrapper}"
+    toolforge jobs delete "${job}" >/dev/null 2>&1 || true
+    toolforge jobs run "${job}" --command "${wrapper}" --image "${IMAGE}" --continuous --mem 768Mi
+    echo "started job '${job}' (logs: ${TOOL_HOME}/${job}.out and .err)"
+}
+
 # (Re)deploy every platform job for one base instance. Idempotent: a platform
 # that is configured is (re)started; one that is not has its job removed.
 deploy_base() {
@@ -80,12 +116,23 @@ deploy_base() {
     [ -f "${base_env}" ] || die "${base_env} not found; run: $0 init ${name}"
     chmod 600 "${base_env}"
 
-    local platform key job derived wrapper started=""
+    local platform key job started=""
     mkdir -p "${JOBS_DIR}"
     chmod 700 "${JOBS_DIR}"
 
     # Retire the legacy single-name job from the pre-fan-out layout.
     toolforge jobs delete "${name}" >/dev/null 2>&1 || true
+
+    if grep -qE "^PLATFORM=${UNIFIED_PLATFORM}$" "${base_env}"; then
+        ensure_venv
+        deploy_job "${name}" "${base_env}" "${UNIFIED_PLATFORM}"
+        echo "  ${name}: unified (every configured platform in one process)"
+        # Retire the per-platform jobs this instance may have had before.
+        for platform in ${PLATFORMS}; do
+            toolforge jobs delete "${name}-${platform}" >/dev/null 2>&1 || true
+        done
+        return 0
+    fi
 
     for platform in ${PLATFORMS}; do
         key="$(enable_key "${platform}")"
@@ -96,29 +143,7 @@ deploy_base() {
             continue
         fi
         ensure_venv
-        derived="${JOBS_DIR}/${job}.env"
-        wrapper="${JOBS_DIR}/run-${job}.sh"
-        # Derived env = the base config with PLATFORM forced to this job's
-        # platform (any PLATFORM line in the base is dropped first, so the
-        # forced value always wins when run.sh sources the file).
-        # umask BEFORE the redirect, not chmod after: the shell creates the
-        # file at the redirect, so a later chmod leaves a window in which the
-        # bot token sits in a world-readable file on a shared multi-tenant
-        # host. The chmod stays for the re-deploy case, where the file
-        # already exists and umask no longer applies (#24).
-        (
-            umask 077
-            {
-                grep -vE '^PLATFORM=' "${base_env}"
-                echo "PLATFORM=${platform}"
-            } >"${derived}"
-        )
-        chmod 600 "${derived}"
-        printf '#!/bin/bash\nexport BLYBOT_CONFIG=%s\nexec %s/run.sh\n' "${derived}" "${REPO_DIR}" >"${wrapper}"
-        chmod +x "${wrapper}"
-        toolforge jobs delete "${job}" >/dev/null 2>&1 || true
-        toolforge jobs run "${job}" --command "${wrapper}" --image "${IMAGE}" --continuous --mem 768Mi
-        echo "started job '${job}' (logs: ${TOOL_HOME}/${job}.out and .err)"
+        deploy_job "${job}" "${base_env}" "${platform}"
         started="${started} ${platform}"
     done
 

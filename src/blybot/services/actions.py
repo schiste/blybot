@@ -44,6 +44,20 @@ _RECIPE_HELP: Final = ", ".join((*_RECIPES, "stats_narrative", "prompt:<template
 # Which pipeline step each key=value parameter belongs to.
 _SOURCE_KEYS: Final = frozenset({"window"})
 _SINK_KEYS: Final = frozenset({"page"})
+# Where a scheduled summary goes. The default reproduces today's behaviour
+# exactly (publish, and post the link in the channel), so an action stored
+# before this existed keeps working unchanged.
+DELIVERY_WIKI: Final = "wiki"
+DELIVERY_WIKI_SUBS: Final = "wiki+subs"
+DELIVERY_SUBS: Final = "subs"
+_DELIVERY_SINKS: Final = {
+    DELIVERY_WIKI: (StepSpec(name="wiki_section"),),
+    DELIVERY_WIKI_SUBS: (StepSpec(name="wiki_section"), StepSpec(name="subscriber_dm")),
+    DELIVERY_SUBS: (StepSpec(name="subscriber_dm"),),
+}
+# The modes that put content in front of subscribers rather than (only) on
+# the wiki, and so need somewhere durable to deliver.
+DELIVERY_NEEDS_DURABLE_DM: Final = frozenset({DELIVERY_WIKI_SUBS, DELIVERY_SUBS})
 _TRANSFORM_KEYS: Final = frozenset({"model", "lang", "temp"})
 
 _TIME_RE: Final = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
@@ -93,6 +107,7 @@ def parse_action(text: str, now_iso: str | None = None) -> ActionSpec:
     schedule = parse_schedule(tokens[0])
     source, transforms, sinks = _resolve_recipe(tokens[1])
     params = _parse_params(tokens[2:])
+    sinks = _apply_delivery(sinks, params)
     return ActionSpec(
         action_id=_mint_id(),
         trigger=TriggerSpec(kind=TriggerKind.SCHEDULE, schedule=schedule),
@@ -115,6 +130,7 @@ def command_action(command: str, recipe: str, arg_tokens: list[str]) -> ActionSp
         tokens[0] = f"window={tokens[0]}"
     source, transforms, sinks = _resolve_recipe(recipe)
     params = _parse_params(tokens)
+    sinks = _apply_delivery(sinks, params)
     return ActionSpec(
         action_id=_mint_id(),
         trigger=TriggerSpec(kind=TriggerKind.COMMAND, command=command),
@@ -156,6 +172,15 @@ def _parse_time(value: str) -> dict[str, int]:
     raise ActionParseError(msg)
 
 
+def delivery_of(spec: ActionSpec) -> str:
+    """Name the delivery mode a spec's sinks represent."""
+    names = tuple(step.name for step in spec.sinks)
+    for mode, sinks in _DELIVERY_SINKS.items():
+        if names == tuple(step.name for step in sinks):
+            return mode
+    return DELIVERY_WIKI  # anything hand-built reads as the default
+
+
 def _resolve_recipe(
     recipe: str,
 ) -> tuple[StepSpec, tuple[StepSpec, ...], tuple[StepSpec, ...]]:
@@ -177,11 +202,23 @@ def _resolve_recipe(
     else:
         msg = f"Unknown recipe {recipe!r}. Recipes: {_RECIPE_HELP}"
         raise ActionParseError(msg)
-    return StepSpec(name="archive_window"), transforms, (StepSpec(name="wiki_section"),)
+    return StepSpec(name="archive_window"), transforms, _DELIVERY_SINKS[DELIVERY_WIKI]
+
+
+def _apply_delivery(default: tuple[StepSpec, ...], params: dict[str, str]) -> tuple[StepSpec, ...]:
+    """Swap the sink chain for the one the ``delivery=`` mode names."""
+    mode = params.pop("delivery", "")
+    if not mode:
+        return default
+    if mode not in _DELIVERY_SINKS:
+        modes = ", ".join(_DELIVERY_SINKS)
+        msg = f"Unknown delivery {mode!r}. Modes: {modes}"
+        raise ActionParseError(msg)
+    return _DELIVERY_SINKS[mode]
 
 
 def _parse_params(tokens: list[str]) -> dict[str, str]:
-    known = _SOURCE_KEYS | _SINK_KEYS | _TRANSFORM_KEYS
+    known = _SOURCE_KEYS | _SINK_KEYS | _TRANSFORM_KEYS | {"delivery"}
     params: dict[str, str] = {}
     for token in tokens:
         key, sep, value = token.partition("=")

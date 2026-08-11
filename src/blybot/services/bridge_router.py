@@ -22,6 +22,7 @@ from blybot.domain.models import OutboundMessage
 from blybot.domain.ports import (
     PermanentTransportError,
     RateLimited,
+    StorageError,
     TransientTransportError,
 )
 from blybot.observability import log_event
@@ -29,7 +30,7 @@ from blybot.observability import log_event
 if TYPE_CHECKING:
     from blybot.domain.bridge import RelayMessage
     from blybot.domain.models import Scope
-    from blybot.domain.ports import Transport
+    from blybot.domain.ports import ProfileStore, Transport
     from blybot.services.bridge import BridgeService
 
 
@@ -38,6 +39,11 @@ class BridgeRouter:
     """Fans a relayed message out and sends each copy on its own transport."""
 
     bridge: BridgeService
+    # Membership is stored per scope by its own admin (#81), so who a
+    # message mirrors into is a *lookup*, not startup configuration — a
+    # `bridge join` must take effect on the next message, not the next
+    # restart.
+    store: ProfileStore | None = None
     transports: dict[str, Transport] = field(default_factory=dict)
 
     def register(self, platform: str, transport: Transport) -> None:
@@ -62,8 +68,28 @@ class BridgeRouter:
         others. Each outcome is logged with the reason rather than
         swallowed.
         """
-        for outbound in self.bridge.relay(message):
+        targets = await self._targets(message.origin)
+        for outbound in self.bridge.relay(message, targets):
             await self._send(outbound, label="bridge_deliver")
+
+    async def _targets(self, origin: Scope) -> tuple[Scope, ...]:
+        """The other members of ``origin``'s bridge, or nothing.
+
+        A storage outage means the mirror pauses rather than the inbound
+        handler dying — the same failure posture as everything else that
+        reads this store.
+        """
+        if self.store is None:
+            return ()
+        try:
+            profile = await self.store.get(origin)
+            if profile is None or not profile.bridge_id:
+                return ()
+            members = await self.store.list_bridge_members(profile.bridge_id)
+        except StorageError:
+            log_event("bridge_deliver", "ignored", reason="storage")
+            return ()
+        return tuple(member.scope for member in members if member.scope != origin)
 
     async def _send(self, outbound: OutboundMessage, *, label: str) -> None:
         """Deliver one message on its platform's transport, swallowing failure."""

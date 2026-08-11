@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,6 +16,7 @@ from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
 from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
+from blybot.config import load_config
 from blybot.domain.models import Scope
 from blybot.domain.ports import ActionError
 from tests.test_config import REQUIRED
@@ -32,6 +34,21 @@ def test_missing_configuration_exits_2_without_echoing_values(
     assert "TELEGRAM_BOT_TOKEN" in err
 
 
+def _capturing(seen: dict[str, Any]) -> Any:
+    """Stand in for `build_polling_application`, recording its wiring.
+
+    Returns the (application, allowed) pair the root now unpacks; the
+    application only has to be something `run_alone` can be built from,
+    and these tests never run it.
+    """
+
+    def build(**kwargs: Any) -> tuple[Any, list[str]]:
+        seen.update(kwargs)
+        return SimpleNamespace(bot=object(), run_polling=lambda **_: None), []
+
+    return build
+
+
 async def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch) -> None:
     for key, value in REQUIRED.items():
         monkeypatch.setenv(key, value)
@@ -40,10 +57,9 @@ async def test_main_wires_the_full_object_graph(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     seen: dict[str, Any] = {}
 
-    def fake_run_polling(**kwargs: Any) -> None:
-        seen.update(kwargs)
+    fake_run_polling = _capturing(seen)
 
-    monkeypatch.setattr(entry, "run_polling", fake_run_polling)
+    monkeypatch.setattr(entry, "build_polling_application", fake_run_polling)
 
     assert entry.main() == 0
     assert seen["token"] == REQUIRED["TELEGRAM_BOT_TOKEN"]
@@ -76,7 +92,7 @@ async def test_valid_encryption_key_enables_self_service(
     monkeypatch.setenv("WIKI_PAGE_SUFFIX", "Telegram logs")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_dummy")  # builds the /bug tracker too
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(entry, "build_polling_application", _capturing(seen))
 
     assert entry.main() == 0
     directory = seen["group_handlers"].directory
@@ -103,7 +119,7 @@ async def test_pseudonym_key_enables_capture_wiring(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(entry, "build_polling_application", _capturing(seen))
 
     assert entry.main() == 0
     assert seen["capture_handlers"] is not None
@@ -126,7 +142,7 @@ async def test_capture_stays_off_without_the_pseudonym_key(
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.delenv("ARCHIVE_PSEUDONYM_KEY", raising=False)
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(entry, "build_polling_application", _capturing(seen))
 
     assert entry.main() == 0
     assert seen["capture_handlers"] is None
@@ -146,7 +162,7 @@ async def test_bootstrap_covers_both_stores(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(entry, "build_polling_application", _capturing(seen))
     booted: list[str] = []
 
     async def store_boot(_self: object) -> None:
@@ -179,7 +195,7 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(entry, "build_polling_application", _capturing(seen))
 
     assert entry.main() == 0
     handlers = seen["analysis_handlers"]
@@ -211,7 +227,7 @@ async def test_capture_wiring_schedules_actions_on_the_tick(
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(entry, "build_polling_application", _capturing(seen))
 
     assert entry.main() == 0
     lifecycle = seen["lifecycle"]
@@ -229,7 +245,7 @@ async def test_reannounce_cadence_wires_the_reminder(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("PROFILE_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("ARCHIVE_PSEUDONYM_KEY", "long-random-operator-key")
     seen: dict[str, Any] = {}
-    monkeypatch.setattr(entry, "run_polling", lambda **kwargs: seen.update(kwargs))
+    monkeypatch.setattr(entry, "build_polling_application", _capturing(seen))
 
     assert entry.main() == 0
     assert seen["lifecycle"].reminder is None  # default: reminders off
@@ -241,3 +257,30 @@ async def test_reannounce_cadence_wires_the_reminder(monkeypatch: pytest.MonkeyP
     assert rewired.reminder is not None
     assert rewired.reminder.cadence.days == 30
     await rewired.release()
+
+
+def test_the_unified_start_polls_on_the_callers_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two platforms in one process cannot both own the loop, so the
+    runtime's `start` is the async poller — not `run_polling` (#78)."""
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    polled: list[tuple[Any, list[str]]] = []
+
+    def fake_poll(application: Any, allowed: list[str]) -> Any:
+        polled.append((application, allowed))
+        return _closed()
+
+    monkeypatch.setattr(entry, "build_polling_application", _capturing({}))
+    monkeypatch.setattr(entry, "poll_until_cancelled", fake_poll)
+
+    runtime = entry.build_telegram(load_config())
+    runtime.start().close()
+
+    assert len(polled) == 1
+    assert runtime.platform == "telegram"
+    assert runtime.run_alone is not None  # ...but the isolated job still has its own
+
+
+async def _closed() -> None:  # pragma: no cover -- closed unstarted
+    return None

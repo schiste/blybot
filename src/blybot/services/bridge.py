@@ -16,7 +16,10 @@ platform SDK, no storage.
 **A bridge is a set of scopes, not a graph of pairwise links.** That is
 what makes relay loops structurally impossible rather than merely
 guarded: fan-out is "every scope in my group except me", so there is no
-A -> B -> C -> A path to traverse.
+A -> B -> C -> A path to traverse. Membership lives in the profile store,
+written one scope at a time by that scope's own admin (#81), so the
+targets are resolved per message by the router and handed here — this
+stays pure and synchronous.
 
 The remaining loop is a relayed line finding its way back in as fresh
 input — a bouncer echo, or a second bot instance. The fence for that is
@@ -44,7 +47,7 @@ from blybot.domain.models import OutboundMessage
 from blybot.observability import log_event
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from blybot.domain.bridge import RelayMessage
     from blybot.domain.models import Scope
@@ -58,39 +61,24 @@ _ATTRIBUTION: Final = "{author} ({platform}): {text}"
 class BridgeService:
     """Fans one message out to every other channel of its bridge."""
 
-    groups: Sequence[frozenset[Scope]]
     counters: Counters
     # The bot's own display name per platform, so its own relayed output is
     # never mistaken for someone talking. Defense in depth: the adapters
     # already skip their own messages, but that is each adapter's promise
     # rather than the bridge's guarantee.
     bot_authors: Mapping[str, str] = field(default_factory=dict)
-    _membership: dict[Scope, frozenset[Scope]] = field(default_factory=dict, init=False)
-
-    def __post_init__(self) -> None:
-        for group in self.groups:
-            for scope in group:
-                if scope in self._membership:
-                    # Two groups claiming one scope reintroduces exactly the
-                    # cycle the set-shaped topology exists to prevent.
-                    msg = f"scope {scope.key} belongs to more than one bridge"
-                    raise ValueError(msg)
-                self._membership[scope] = group
-
-    def targets(self, origin: Scope) -> tuple[Scope, ...]:
-        """Every scope this one mirrors into — its group, minus itself."""
-        group = self._membership.get(origin)
-        if group is None:
-            return ()
-        return tuple(sorted(group - {origin}, key=lambda scope: scope.key))
 
     def _is_own(self, message: RelayMessage) -> bool:
         """Whether this message was written by the bot on its own platform."""
         mine = self.bot_authors.get(message.origin.platform, "")
         return bool(mine) and mine.casefold() == message.author.casefold()
 
-    def relay(self, message: RelayMessage) -> tuple[OutboundMessage, ...]:
-        """Render ``message`` for every channel bridged to its origin."""
+    def relay(self, message: RelayMessage, targets: Sequence[Scope]) -> tuple[OutboundMessage, ...]:
+        """Render ``message`` for each of ``targets``.
+
+        ``targets`` is the origin's bridge minus itself, resolved by the
+        caller — which is where the store lives.
+        """
         if not message.text.strip():
             return ()  # a media-only or empty line has nothing to mirror
         if self._is_own(message):
@@ -99,7 +87,6 @@ class BridgeService:
             self.counters.increment("bridge_echo_ignored")
             log_event("bridge_relay", "ignored", reason="echo")
             return ()
-        targets = self.targets(message.origin)
         if not targets:
             return ()
         text = _ATTRIBUTION.format(
@@ -109,8 +96,3 @@ class BridgeService:
         )
         self.counters.increment("bridge_relayed")
         return tuple(OutboundMessage(scope=target, text=text) for target in targets)
-
-
-def build_groups(groups: Iterable[Iterable[Scope]]) -> tuple[frozenset[Scope], ...]:
-    """Normalize configured scope groups, dropping any with nothing to mirror."""
-    return tuple(frozen for group in groups if len(frozen := frozenset(group)) > 1)

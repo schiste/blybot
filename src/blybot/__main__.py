@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
     from blybot.config import Config
-    from blybot.domain.ports import Sink, Source, Transform
+    from blybot.domain.ports import Sink, Source, Transform, Transport
     from blybot.services.delivery import MessageCollector
 
 from blybot.adapters.discord.author_mask import DiscordAuthorMasker
@@ -40,12 +41,18 @@ from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.analyze import AnalysisHandlers
-from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
+from blybot.adapters.telegram.app import (
+    Lifecycle,
+    Maintenance,
+    build_polling_application,
+    poll_until_cancelled,
+)
+from blybot.adapters.telegram.bridge import BridgeHandlers
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
 from blybot.adapters.telegram.token_entry import TokenEntryHandler
-from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES, TelegramTransport
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
 from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
@@ -65,6 +72,8 @@ from blybot.services.analyze import (
     explicit_page_resolver,
 )
 from blybot.services.binding import TokenBinding
+from blybot.services.bridge import BridgeService
+from blybot.services.bridge_router import BridgeRouter
 from blybot.services.capture import CaptureReminder, CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.delivery import message_loop
@@ -92,6 +101,114 @@ from blybot.services.subscriptions import SubscriptionBinding, SubscriptionSched
 from blybot.services.transcribe import DmTranscriptionService
 
 
+def run_unified(config: Config) -> int:
+    """Run every configured platform in one process, bridged together (#78).
+
+    The bridge needs the process that *receives* a message to reach the
+    platform that must *send* it, and a separate bridging job cannot do
+    that — Telegram's getUpdates is exclusive to one poller and a second
+    IRC connection collides on the nick. So a mirror requires one process
+    hosting every adapter.
+
+    The cost is deliberate and documented: this trades the per-platform
+    isolation the default deployment has, where one platform's crash
+    cannot touch another's. That is why unified mode is opt-in rather
+    than the default.
+    """
+    counters = Counters()
+    router = BridgeRouter(
+        bridge=BridgeService(counters=counters, bot_authors=_bot_authors(config)),
+        store=_bridge_store(config),
+    )
+    builders = (
+        ("telegram", build_telegram),
+        ("discord", build_discord),
+        ("irc", build_irc),
+    )
+    runtimes = [build(config, router) for name, build in builders if _configured(config, name)]
+    if not runtimes:
+        print("configuration error: unified mode needs at least one platform", file=sys.stderr)
+        return 2
+    for runtime in runtimes:
+        if runtime.transport is not None:
+            router.register(runtime.platform, runtime.transport)
+    asyncio.run(_run_together(runtimes))
+    return 0
+
+
+def _bridge_store(config: Config) -> ToolsDbStore | None:
+    """The store the router reads bridge membership from, if configured."""
+    if not config.profile_encryption_key:
+        return None
+    runner = PymysqlRunner(
+        host=config.toolsdb_host,
+        database=config.toolsdb_name,
+        cnf_path=Path(config.toolsdb_cnf),
+    )
+    return ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
+
+
+def _bot_authors(config: Config) -> dict[str, str]:
+    """The bot's own display name per platform, for the relay echo fence."""
+    return {"irc": config.irc_nick, "telegram": config.bot_name, "discord": config.bot_name}
+
+
+def _configured(config: Config, platform: str) -> bool:
+    """Whether this deployment has what the platform needs to start."""
+    return bool(
+        {
+            "telegram": config.telegram_bot_token,
+            "discord": config.discord_bot_token,
+            "irc": config.irc_server,
+        }[platform]
+    )
+
+
+async def _run_together(runtimes: list[PlatformRuntime]) -> None:
+    """Run every platform until one stops, then unwind them all.
+
+    A platform ending is treated as the process ending. The alternative —
+    carrying on with a hole in the mirror — is worse: the remaining
+    channels would keep relaying to each other while silently dropping
+    everything bound for the platform that died.
+    """
+    tasks = [asyncio.ensure_future(runtime.start()) for runtime in runtimes]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            task.result()  # re-raise whatever ended the process
+    finally:
+        for runtime in runtimes:
+            if runtime.release is not None:
+                await runtime.release()
+
+
+@dataclass(eq=False)
+class PlatformRuntime:
+    """One platform, built and ready to run inside someone else's loop.
+
+    Splitting "build the graph" from "start the transport" is what lets a
+    single process host several platforms (#78): the isolated per-platform
+    jobs still call the blocking entry points, while the unified runtime
+    gathers the coroutines instead.
+    """
+
+    start: Callable[[], Coroutine[Any, Any, None]]
+    release: Callable[[], Awaitable[None]] | None = None
+    # Available before the platform is live where the SDK allows it, so the
+    # router can reach a platform as soon as it comes up.
+    transport: Transport | None = None
+    platform: str = ""
+    # Set where a platform's SDK offers a better *isolated* entry point than
+    # `start`. Telegram's `run_polling` installs the signal handlers that
+    # give a Toolforge SIGTERM a graceful shutdown; the unified runtime
+    # cannot use it (one loop, three platforms) and provides its own.
+    run_alone: Callable[[], None] | None = None
+
+
 def main() -> int:
     """Entry point: load config, then run the platform selected by ``PLATFORM``."""
     try:
@@ -101,6 +218,8 @@ def main() -> int:
         return 2
 
     configure_logging()
+    if config.platform == "unified":
+        return run_unified(config)
     if config.platform == "discord":
         return run_discord(config)
     if config.platform == "irc":
@@ -108,7 +227,9 @@ def main() -> int:
     return run_telegram(config)
 
 
-def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
+def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph once
+    config: Config, bridge: BridgeRouter | None = None
+) -> PlatformRuntime:
     """Build the Telegram object graph and start long polling."""
     counters = Counters()
     clock = SystemClock()
@@ -427,7 +548,7 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         subscription_scheduler=subscription_scheduler,
         poll_interval_seconds=config.events_poll_minutes * 60,
     )
-    run_polling(
+    application, allowed = build_polling_application(
         token=config.telegram_bot_token,
         group_handlers=group_handlers,
         private_handlers=private_handlers,
@@ -437,7 +558,27 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         analysis_handlers=analysis_handlers,
         subscription_handlers=subscription_handlers,
         capabilities=TELEGRAM_CAPABILITIES,
+        bridge_handlers=BridgeHandlers(router=bridge) if bridge is not None else None,
     )
+
+    def start() -> Coroutine[Any, Any, None]:
+        return poll_until_cancelled(application, allowed)
+
+    return PlatformRuntime(
+        start=start,
+        transport=TelegramTransport(application.bot),
+        platform="telegram",
+        run_alone=lambda: application.run_polling(allowed_updates=allowed),
+    )
+
+
+def run_telegram(config: Config) -> int:
+    """Build the Telegram object graph and start long polling."""
+    runtime = build_telegram(config)
+    # Always set for Telegram: `run_polling` installs the signal handlers a
+    # Toolforge SIGTERM needs, which the shared async path cannot provide.
+    assert runtime.run_alone is not None  # noqa: S101 -- structural, not a check
+    runtime.run_alone()
     return 0
 
 
@@ -481,21 +622,9 @@ async def _discord_startup(  # noqa: PLR0913 -- setup-hook wiring enumerates its
     log_startup()
 
 
-def discord_run(
-    client: DiscordGatewayClient, token: str, release: Callable[[], Coroutine[Any, Any, None]]
-) -> None:
-    """Start the gateway (blocks for the process lifetime), releasing clients after.
-
-    ``client.run`` owns the event loop and returns only when the bot stops,
-    so the HTTP clients are closed afterwards on a fresh loop.
-    """
-    try:
-        client.run(token)
-    finally:
-        asyncio.run(release())
-
-
-def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
+def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
+    config: Config, bridge: BridgeRouter | None = None
+) -> PlatformRuntime:
     """Build the Discord object graph and start the gateway client.
 
     Reuses every neutral service (directory, capture, engine, subscription
@@ -760,12 +889,33 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
             archive=archive,
             heartbeat_interval=_DISCORD_HEARTBEAT_SECONDS,
         ),
+        bridge=bridge,
     )
-    discord_run(client, config.discord_bot_token, release_clients)
+    token = config.discord_bot_token
+
+    def start() -> Coroutine[Any, Any, None]:
+        return client.start(token)
+
+    return PlatformRuntime(
+        start=start,
+        release=release_clients,
+        # Unlike IRC, the client object exists before it connects, so the
+        # router can be handed the transport up front.
+        transport=DiscordTransport(client),
+        platform="discord",
+    )
+
+
+def run_discord(config: Config) -> int:
+    """Build the Discord object graph and start the gateway."""
+    runtime = build_discord(config)
+    asyncio.run(_run_alone(runtime))
     return 0
 
 
-def run_irc(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
+def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
+    config: Config, bridge: BridgeRouter | None = None
+) -> PlatformRuntime:
     """Build the IRC object graph and run the session until the peer closes.
 
     The narrowest of the three roots, because IRC's capabilities admit the
@@ -936,6 +1086,7 @@ def run_irc(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the 
         nick=config.irc_nick,
         capture=capture_service,
         masker=masker,
+        bridge=bridge,
     )
 
     async def release_clients() -> None:
@@ -944,18 +1095,34 @@ def run_irc(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the 
         if llm_client is not None:
             await llm_client.aclose()
 
-    asyncio.run(
-        _irc_main(
+    def start() -> Coroutine[Any, Any, None]:
+        return _irc_main(
             config,
             gateway,
             store,
             archive,
             collectors=tuple(collectors),
             counters=counters,
-            release=release_clients,
+            bridge=bridge,
         )
-    )
+
+    return PlatformRuntime(start=start, release=release_clients, platform="irc")
+
+
+def run_irc(config: Config) -> int:
+    """Build the IRC object graph and run the session until the peer closes."""
+    runtime = build_irc(config)
+    asyncio.run(_run_alone(runtime))
     return 0
+
+
+async def _run_alone(runtime: PlatformRuntime) -> None:
+    """Run one platform, releasing its HTTP clients on the way out."""
+    try:
+        await runtime.start()
+    finally:
+        if runtime.release is not None:
+            await runtime.release()
 
 
 async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph once
@@ -966,7 +1133,7 @@ async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph on
     *,
     collectors: tuple[tuple[MessageCollector, str], ...] = (),
     counters: Counters | None = None,
-    release: Callable[[], Awaitable[None]] | None = None,
+    bridge: BridgeRouter | None = None,
 ) -> None:
     """Bootstrap storage, dial the server, and run the session and its loops.
 
@@ -1003,6 +1170,10 @@ async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph on
         password=config.irc_password,
     )
     transport = IrcTransport(channel=connection)
+    if bridge is not None:
+        # Only now can IRC be relayed *to*: the transport needs a live
+        # socket, unlike Telegram's bot or the Discord client.
+        bridge.register("irc", transport)
     poll_interval = config.events_poll_minutes * 60
     background = [
         asyncio.create_task(message_loop(transport, collector, poll_interval, label))
@@ -1022,8 +1193,6 @@ async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph on
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)
         await connection.close()
-        if release is not None:
-            await release()
 
 
 if __name__ == "__main__":

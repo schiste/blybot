@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
 from blybot.domain.bridge import RelayMessage
-from blybot.domain.models import Scope
+from blybot.domain.models import GroupProfile, Scope
 from blybot.domain.ports import (
     PermanentTransportError,
     RateLimited,
@@ -16,6 +16,7 @@ from blybot.domain.ports import (
 from blybot.observability import Counters
 from blybot.services.bridge import BridgeService
 from blybot.services.bridge_router import BridgeRouter
+from tests.fakes import InMemoryProfiles
 
 if TYPE_CHECKING:
     from blybot.domain.models import OutboundMessage
@@ -38,9 +39,20 @@ class _RecordingTransport:
         self.sent.append(message)
 
 
-def _router(**transports: _RecordingTransport) -> BridgeRouter:
-    bridge = BridgeService(groups=(frozenset({TG, DC, IRC}),), counters=Counters())
-    router = BridgeRouter(bridge=bridge)
+def _store(*members: Scope) -> InMemoryProfiles:
+    """A store where every listed scope has joined one bridge."""
+    return InMemoryProfiles(
+        profiles={scope: GroupProfile(scope=scope, bridge_id="abc") for scope in members}
+    )
+
+
+def _router(
+    store: InMemoryProfiles | None = None, **transports: _RecordingTransport
+) -> BridgeRouter:
+    router = BridgeRouter(
+        bridge=BridgeService(counters=Counters()),
+        store=store if store is not None else _store(TG, DC, IRC),
+    )
     for platform, transport in transports.items():
         router.register(platform, transport)
     return router
@@ -87,9 +99,7 @@ async def test_one_unreachable_target_never_stops_the_others() -> None:
 
 async def test_an_unbridged_scope_dispatches_nothing() -> None:
     telegram = _RecordingTransport()
-    bridge = BridgeService(groups=(frozenset({DC, IRC}),), counters=Counters())
-    router = BridgeRouter(bridge=bridge)
-    router.register("telegram", telegram)
+    router = _router(_store(DC, IRC), telegram=telegram)
 
     await router.dispatch(RelayMessage(origin=TG, author="alice", text="hello"))
 
@@ -114,3 +124,44 @@ async def test_an_unreachable_channel_never_fails_the_command_that_caused_it() -
     await router.announce([TG, IRC], "notice")  # must not raise
 
     assert len(telegram.sent) == 1
+
+
+async def test_a_bridge_join_takes_effect_on_the_next_message() -> None:
+    """Membership is a lookup, not startup configuration (#81): an admin
+    joining must not have to wait for a restart."""
+    telegram, irc = _RecordingTransport(), _RecordingTransport()
+    store = _store(DC, TG)
+    router = _router(store, telegram=telegram, irc=irc)
+
+    await router.dispatch(RelayMessage(origin=DC, author="alice", text="one"))
+    assert (len(telegram.sent), len(irc.sent)) == (1, 0)
+
+    store.profiles[IRC] = GroupProfile(scope=IRC, bridge_id="abc")  # `bridge join`
+    await router.dispatch(RelayMessage(origin=DC, author="alice", text="two"))
+    assert (len(telegram.sent), len(irc.sent)) == (2, 1)
+
+
+async def test_an_unconfigured_or_unbridged_scope_resolves_no_targets() -> None:
+    telegram = _RecordingTransport()
+    router = BridgeRouter(bridge=BridgeService(counters=Counters()))  # no store at all
+    router.register("telegram", telegram)
+    await router.dispatch(RelayMessage(origin=DC, author="alice", text="hi"))
+    assert telegram.sent == []
+
+    # ...and a scope whose profile exists but has joined nothing.
+    unjoined = InMemoryProfiles(profiles={DC: GroupProfile(scope=DC)})
+    await _router(unjoined, telegram=telegram).dispatch(
+        RelayMessage(origin=DC, author="alice", text="hi")
+    )
+    assert telegram.sent == []
+
+
+async def test_a_storage_outage_pauses_the_mirror_rather_than_killing_the_handler() -> None:
+    telegram = _RecordingTransport()
+    store = _store(DC, TG)
+    store.fail = True
+    router = _router(store, telegram=telegram)
+
+    await router.dispatch(RelayMessage(origin=DC, author="alice", text="hi"))  # must not raise
+
+    assert telegram.sent == []

@@ -35,6 +35,7 @@ _PLATFORM_REQUIRED_KEYS: Final = {
     "irc": "IRC_SERVER",
 }
 
+UNIFIED_PLATFORM: Final = "unified"
 DEFAULT_BOT_NAME: Final = "Blybot"
 DEFAULT_WIKI_API_URL: Final = "https://meta.wikimedia.org/w/api.php"
 
@@ -152,7 +153,13 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     source = os.environ if env is None else env
 
     platform = _parse_platform(source.get("PLATFORM", "telegram"))
-    required = (*_REQUIRED_KEYS, _PLATFORM_REQUIRED_KEYS[platform])
+    # Unified mode runs whatever is configured, so no single platform key
+    # is indispensable — `run_unified` refuses if none of them is set.
+    required = (
+        _REQUIRED_KEYS
+        if platform == UNIFIED_PLATFORM
+        else (*_REQUIRED_KEYS, _PLATFORM_REQUIRED_KEYS[platform])
+    )
     missing = [key for key in required if not source.get(key)]
     if missing:
         msg = f"missing required configuration keys: {', '.join(sorted(missing))}"
@@ -235,9 +242,15 @@ def load_config(env: dict[str, str] | None = None) -> Config:
 
 
 def _parse_platform(raw: str) -> str:
-    """The chat platform to run: ``telegram`` (default), ``discord`` or ``irc``."""
-    if raw not in _PLATFORM_REQUIRED_KEYS:
-        allowed = ", ".join(sorted(_PLATFORM_REQUIRED_KEYS))
+    """The chat platform to run: ``telegram`` (default), ``discord``, ``irc``.
+
+    ``unified`` is the fourth option: every platform this config has
+    credentials for, in one process, which is what cross-platform
+    bridging requires (#76). It is deliberately opt-in, because it trades
+    away the per-platform isolation the other three have.
+    """
+    if raw not in {*_PLATFORM_REQUIRED_KEYS, UNIFIED_PLATFORM}:
+        allowed = ", ".join(sorted({*_PLATFORM_REQUIRED_KEYS, UNIFIED_PLATFORM}))
         msg = f"PLATFORM must be one of: {allowed}"
         raise ConfigurationError(msg)
     return raw

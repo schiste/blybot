@@ -30,6 +30,7 @@ from blybot.adapters.telegram.app import (
     poll_until_cancelled,
     run_polling,
 )
+from blybot.adapters.telegram.bridge import BridgeHandlers
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
 from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
@@ -637,3 +638,25 @@ async def test_poll_until_cancelled_starts_and_unwinds_the_lifecycle() -> None:
         "stop",
         "shutdown",
     ]
+
+
+def test_the_relay_observes_updates_in_its_own_handler_group() -> None:
+    """Group 2, so bridging works with capture off and neither sees the
+    other's data — they read the same update and diverge (#79)."""
+    group_handlers, _, _ = make_group_handlers()
+    private_handlers, _ = make_private_handlers()
+    lifecycle, _, _ = make_lifecycle()
+    handlers = BridgeHandlers(router=cast("Any", object()))
+
+    application = build_application(
+        TOKEN,
+        group_handlers,
+        private_handlers,
+        make_admin_handlers(),
+        lifecycle,
+        bridge_handlers=handlers,
+    )
+
+    callbacks = [handler.callback for handler in application.handlers[2]]
+    assert callbacks == [handlers.on_group_message]
+    assert 1 not in application.handlers  # capture stayed off; the relay did not

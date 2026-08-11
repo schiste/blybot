@@ -30,6 +30,7 @@ from blybot.adapters.irc.author_mask import IrcAuthorMasker
 from blybot.adapters.irc.ops import ChannelOps
 from blybot.adapters.irc.protocol import IrcLine, privmsg_lines
 from blybot.adapters.irc.scope import scope_of
+from blybot.domain.bridge import RelayMessage
 from blybot.domain.models import CapturedMessage, Scope
 from blybot.services.health import log_startup
 
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
     from blybot.adapters.irc.connection import LineChannel
     from blybot.domain.ports import Clock
+    from blybot.services.bridge_router import BridgeRouter
     from blybot.services.capture import CaptureService
     from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory
@@ -79,6 +81,9 @@ class IrcGateway:
     # Live operator tracking — IRC's stand-in for get_chat_member. Holds raw
     # nicks, so it stays here in the adapter and never crosses inward (R6).
     ops: ChannelOps = field(default_factory=ChannelOps)
+    # Set only in the unified runtime, which is the one process that can
+    # reach another platform's transport (#76).
+    bridge: BridgeRouter | None = None
     # IRC gives no message ids, so one is synthesised per captured line.
     # Monotonic within a process; a restart may repeat values, and the
     # archive's INSERT IGNORE makes that a no-op rather than a duplicate.
@@ -191,6 +196,18 @@ class IrcGateway:
         result = await self.commands.repo_summary(scope)
         return result.text
 
+    async def relay_message(self, channel: str, nick: str, text: str) -> None:
+        """Mirror one channel line into every channel bridged to this one.
+
+        The nick travels verbatim — a mirror is unreadable without it —
+        and never touches the archive, which sees only the HMAC label
+        :meth:`ingest_message` computes from the same line.
+        """
+        router = self.bridge
+        if router is None or not text:
+            return
+        await router.dispatch(RelayMessage(origin=scope_of(channel), author=nick, text=text))
+
     async def ingest_message(self, channel: str, nick: str, text: str) -> None:
         """Archive one channel line iff capture is on for it (never raises)."""
         capture, masker = self.capture, self.masker
@@ -286,6 +303,9 @@ class IrcSession:
         # Only a RECOGNISED command is withheld from the archive. "blybot:
         # what do you think?" is not a command, it is someone talking in a
         # public channel, and dropping it would leave a hole in the log.
+        # The relay forks here too: it carries the nick verbatim sideways
+        # and stores nothing, while ingest_message masks and archives.
+        await self.gateway.relay_message(target, nick, line.trailing)
         await self.gateway.ingest_message(target, nick, line.trailing)
 
     def _track_membership(self, line: IrcLine) -> None:

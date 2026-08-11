@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     from blybot.adapters.telegram.admin import AdminHandlers
     from blybot.adapters.telegram.analyze import AnalysisHandlers
+    from blybot.adapters.telegram.bridge import BridgeHandlers
     from blybot.adapters.telegram.capture import CaptureHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.adapters.telegram.subscribe import SubscriptionHandlers
@@ -187,6 +188,7 @@ def build_application(  # noqa: PLR0913, PLR0917 -- one handler bundle per conce
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
     subscription_handlers: SubscriptionHandlers | None = None,
+    bridge_handlers: BridgeHandlers | None = None,
     capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
 ) -> _App:
     """Build the PTB application with every handler registered."""
@@ -303,6 +305,17 @@ def build_application(  # noqa: PLR0913, PLR0917 -- one handler bundle per conce
             ChatMemberHandler(capture_handlers.on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER),
             group=1,
         )
+    if bridge_handlers is not None:
+        # Handler group 2: the relay observes the same updates as capture
+        # but is independent of it — bridging must work with capture off,
+        # and neither may see the other's data.
+        application.add_handler(
+            MessageHandler(
+                filters.ChatType.GROUPS & ~filters.COMMAND & ~filters.StatusUpdate.ALL,
+                bridge_handlers.on_group_message,
+            ),
+            group=2,
+        )
     return application
 
 
@@ -315,6 +328,7 @@ def build_polling_application(  # noqa: PLR0913, PLR0917 -- one handler bundle p
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
     subscription_handlers: SubscriptionHandlers | None = None,
+    bridge_handlers: BridgeHandlers | None = None,
     capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
 ) -> tuple[_App, list[str]]:
     """Wire the application and return it with the update types to request.
@@ -333,7 +347,8 @@ def build_polling_application(  # noqa: PLR0913, PLR0917 -- one handler bundle p
         capture_handlers,
         analysis_handlers,
         subscription_handlers,
-        capabilities,
+        capabilities=capabilities,
+        bridge_handlers=bridge_handlers,
     )
     allowed = list(_ALLOWED_UPDATES)
     if analysis_handlers is not None:
@@ -358,6 +373,7 @@ def run_polling(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
     subscription_handlers: SubscriptionHandlers | None = None,
+    bridge_handlers: BridgeHandlers | None = None,
     capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
 ) -> None:
     """Poll until stopped; blocks for the process lifetime."""
@@ -370,7 +386,8 @@ def run_polling(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
         capture_handlers,
         analysis_handlers,
         subscription_handlers,
-        capabilities,
+        capabilities=capabilities,
+        bridge_handlers=bridge_handlers,
     )
     application.run_polling(allowed_updates=allowed)
 

@@ -816,3 +816,13 @@ async def test_two_concurrent_multi_line_messages_never_interleave() -> None:
     # contiguous — no "abab" run anywhere.
     assert set(letters) == {"a", "b"}
     assert letters == sorted(letters) or letters == sorted(letters, reverse=True)
+
+
+async def test_the_bridge_command_reaches_the_neutral_service() -> None:
+    """One dispatch entry; every rule about consent lives in the service."""
+    gateway = _op_gateway()
+    refused = await gateway.run_command("#chan", "randomer", "bridge new")
+    assert refused == sub.REPLY_NOT_ADMIN
+
+    off = await gateway.run_command("#chan", "chanop", "bridge new")
+    assert off == sub.REPLY_BRIDGE_OFF_DEPLOY  # no announcer on this deployment

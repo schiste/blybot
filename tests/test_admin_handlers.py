@@ -110,6 +110,7 @@ async def test_non_admins_are_refused_on_every_command() -> None:
         "on_setconsent",
         "on_setrepo",
         "on_events",
+        "on_bridge",
         "on_rule",
         "on_rules",
         "on_revoke",
@@ -975,3 +976,13 @@ async def test_capture_purge_rejects_a_bad_before_date() -> None:
         context, bot = admin_context(args=["purge", bad])
         await handlers.on_capture(command(f"/capture purge {bad}"), context)
         assert tg.sent_texts(bot) == [a.REPLY_CAPTURE_USAGE]
+
+
+async def test_bridge_command_routes_to_the_neutral_service() -> None:
+    """Every rule about who may bridge lives in the service (#81)."""
+    handlers = make_handlers(InMemoryProfiles())
+    context, bot = admin_context(args=["new"])
+    await handlers.on_bridge(command("/bridge new"), context)
+    # No announcer on a Telegram-only deployment: nothing could relay, so
+    # recording a consent would be a lie.
+    assert tg.sent_texts(bot) == [cmd.REPLY_BRIDGE_OFF_DEPLOY]

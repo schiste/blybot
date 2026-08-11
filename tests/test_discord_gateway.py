@@ -642,6 +642,7 @@ def test_build_registers_every_slash_command() -> None:
     names = sorted(c.name for c in entries if not isinstance(c, discord.app_commands.ContextMenu))
     assert names == [
         "action",
+        "bridge",
         "capture",
         "events",
         "issue",
@@ -1722,3 +1723,24 @@ async def test_without_a_bridge_the_relay_is_simply_skipped() -> None:
     gateway, _store, _archive, _capture = _capture_gateway()
     client = build_gateway_client(gateway)  # no bridge wired
     await client.on_message(cast("discord.Message", _relayable()))  # must not raise
+
+
+async def test_bridge_slash_command_answers_the_channel_not_just_the_caller() -> None:
+    """Joining changes who can read this channel, so the channel is the
+    audience — the same reason /capture announces (§22.5)."""
+    gateway, _store, _archive, _capture = _capture_gateway()
+    client = build_gateway_client(gateway)
+    channel = SimpleNamespace(id=_CHANNEL)
+    interaction = _admin_interaction(channel)
+
+    await _command(client, "bridge").callback(interaction, "new")
+
+    (text, ephemeral) = interaction.response.sent[0]
+    assert ephemeral is False
+    assert text == cmd.REPLY_BRIDGE_OFF_DEPLOY  # nothing could relay here
+
+
+async def test_a_non_admin_bridge_attempt_is_refused_by_the_service() -> None:
+    gateway, _store, _archive, _capture = _capture_gateway()
+    reply = await gateway.bridge_command(_CHANNEL, None, is_admin=False, tokens=["new"])
+    assert reply == cmd.REPLY_NOT_ADMIN

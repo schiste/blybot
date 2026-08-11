@@ -53,6 +53,36 @@ async def test_list_event_enabled_returns_only_enabled_in_stable_order(
     assert listed == await profiles.list_event_enabled()  # stable across calls
 
 
+async def test_list_bridge_members_returns_one_bridge_in_stable_order(
+    profiles: ProfileStore,
+) -> None:
+    """Membership is the consent record (#81), so the read must be exact:
+    a scope in a *different* bridge, or in none, is not a member of this one."""
+    await profiles.upsert(GroupProfile(scope=Scope("discord", "100"), bridge_id="abc"))
+    await profiles.upsert(GroupProfile(scope=Scope("irc", "#chan"), bridge_id="abc"))
+    await profiles.upsert(GroupProfile(scope=Scope("telegram", "-1"), bridge_id="other"))
+    await profiles.upsert(GroupProfile(scope=Scope("telegram", "-2")))
+
+    listed = await profiles.list_bridge_members("abc")
+
+    assert [p.scope for p in listed] == [Scope("discord", "100"), Scope("irc", "#chan")]
+    assert listed == await profiles.list_bridge_members("abc")  # stable across calls
+    assert await profiles.list_bridge_members("nothing") == []
+
+
+async def test_a_bridge_id_survives_a_round_trip(profiles: ProfileStore) -> None:
+    scope = Scope("irc", "#wikipedia-fr")
+    await profiles.upsert(GroupProfile(scope=scope, bridge_id="code-1"))
+    stored = await profiles.get(scope)
+    assert stored is not None
+    assert stored.bridge_id == "code-1"
+
+    await profiles.upsert(GroupProfile(scope=scope, bridge_id=None))  # severed
+    severed = await profiles.get(scope)
+    assert severed is not None
+    assert severed.bridge_id is None
+
+
 async def test_list_capture_enabled_returns_only_enabled_in_stable_order(
     profiles: ProfileStore,
 ) -> None:

@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from blybot.domain.models import OutboundMessage
 from blybot.domain.ports import (
     PermanentTransportError,
     RateLimited,
@@ -27,6 +28,7 @@ from blybot.observability import log_event
 
 if TYPE_CHECKING:
     from blybot.domain.bridge import RelayMessage
+    from blybot.domain.models import Scope
     from blybot.domain.ports import Transport
     from blybot.services.bridge import BridgeService
 
@@ -42,6 +44,16 @@ class BridgeRouter:
         """Make ``platform`` reachable; called as each adapter comes up."""
         self.transports[platform] = transport
 
+    async def announce(self, scopes: list[Scope], text: str) -> None:
+        """Tell each scope something about the bridge itself (#81).
+
+        Unlike a relay this carries no author — it is the bot speaking —
+        and it must never fail the command that triggered it, so a
+        channel that cannot be reached is logged and skipped.
+        """
+        for scope in scopes:
+            await self._send(OutboundMessage(scope=scope, text=text), label="bridge_announce")
+
     async def dispatch(self, message: RelayMessage) -> None:
         """Relay one inbound message to every other channel of its bridge.
 
@@ -51,19 +63,23 @@ class BridgeRouter:
         swallowed.
         """
         for outbound in self.bridge.relay(message):
-            transport = self.transports.get(outbound.scope.platform)
-            if transport is None:
-                log_event("bridge_deliver", "ignored", reason="platform_down")
-                continue
-            try:
-                await transport.send(outbound)
-            except RateLimited:
-                # The pacing queue (#80) owns waiting this out; here it can
-                # only mean the transport itself refused right now.
-                log_event("bridge_deliver", "ignored", reason="flood")
-            except TransientTransportError:
-                log_event("bridge_deliver", "ignored", reason="transient")
-            except PermanentTransportError:
-                log_event("bridge_deliver", "ignored", reason="permanent")
-            except Exception as error:  # keep the inbound handler alive
-                log_event("bridge_deliver", "error", error=type(error).__name__)
+            await self._send(outbound, label="bridge_deliver")
+
+    async def _send(self, outbound: OutboundMessage, *, label: str) -> None:
+        """Deliver one message on its platform's transport, swallowing failure."""
+        transport = self.transports.get(outbound.scope.platform)
+        if transport is None:
+            log_event(label, "ignored", reason="platform_down")
+            return
+        try:
+            await transport.send(outbound)
+        except RateLimited:
+            # The pacing queue (#80) owns waiting this out; here it can
+            # only mean the transport itself refused right now.
+            log_event(label, "ignored", reason="flood")
+        except TransientTransportError:
+            log_event(label, "ignored", reason="transient")
+        except PermanentTransportError:
+            log_event(label, "ignored", reason="permanent")
+        except Exception as error:  # keep the inbound handler alive
+            log_event(label, "error", error=type(error).__name__)

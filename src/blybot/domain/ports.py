@@ -84,6 +84,21 @@ class Transform(Protocol):
         ...
 
 
+class BridgeAnnouncer(Protocol):
+    """Sends one notice about a bridge to scopes on several platforms.
+
+    An announcement — "this channel just joined" — has to reach channels
+    the *calling* adapter cannot send to. Only a process holding every
+    transport can do that, so the bridge commands take this port and
+    refuse where nothing implements it, rather than recording a consent
+    nothing would honour.
+    """
+
+    async def announce(self, scopes: list[Scope], text: str) -> None:
+        """Deliver ``text`` to each scope; never raises."""
+        ...
+
+
 class Sink(Protocol):
     """Publishes an action pipeline's final payload.
 
@@ -274,6 +289,10 @@ class ProfileStore(Protocol):
 
     async def list_capture_enabled(self) -> list[GroupProfile]:
         """Return every profile with message capture switched on."""
+        ...
+
+    async def list_bridge_members(self, bridge_id: str) -> list[GroupProfile]:
+        """Return every scope that has joined the given bridge."""
         ...
 
     async def get_cursors(self, scope: Scope) -> dict[str, str]:

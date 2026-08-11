@@ -229,6 +229,7 @@ def build_application(  # noqa: PLR0913, PLR0917 -- one handler bundle per conce
         ("setconsent", admin_handlers.on_setconsent),
         ("setrepo", admin_handlers.on_setrepo),
         ("events", admin_handlers.on_events),
+        ("bridge", admin_handlers.on_bridge),
         ("rule", admin_handlers.on_rule),
         ("rules", admin_handlers.on_rules),
         ("capture", admin_handlers.on_capture),

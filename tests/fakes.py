@@ -228,6 +228,11 @@ class InMemoryProfiles:
         self._check()
         return [profile for profile in self.profiles.values() if profile.capture_enabled]
 
+    async def list_bridge_members(self, bridge_id: str) -> list[GroupProfile]:
+        self._check()
+        members = [p for p in self.profiles.values() if p.bridge_id == bridge_id]
+        return sorted(members, key=lambda profile: profile.scope.key)
+
     async def get_cursors(self, scope: Scope) -> dict[str, str]:
         self._check()
         return dict(self.cursors.get(scope, {}))

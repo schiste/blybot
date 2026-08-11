@@ -192,6 +192,10 @@ class IrcGateway:
         result = await self.commands.file_issue(scope, description=" ".join(tokens))
         return result.text
 
+    async def _cmd_bridge(self, scope: Scope, tokens: list[str], admin: bool) -> str:
+        result = await self.commands.bridge(scope, is_admin=admin, tokens=tokens)
+        return result.text
+
     async def _cmd_repo(self, scope: Scope, _tokens: list[str], _admin: bool) -> str:
         result = await self.commands.repo_summary(scope)
         return result.text
@@ -250,6 +254,7 @@ _DISPATCH: Final[dict[str, _Handler]] = {
     "action": IrcGateway._cmd_action,
     "issue": IrcGateway._cmd_issue,
     "repo": IrcGateway._cmd_repo,
+    "bridge": IrcGateway._cmd_bridge,
 }
 
 

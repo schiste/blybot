@@ -45,13 +45,15 @@ import secrets
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
-from blybot.domain.models import CommandResult, ConsentMode
+from blybot.domain.models import CommandResult, ConsentMode, TriggerKind
 from blybot.domain.ports import IssueTrackerError, StorageError, WikiWriteError
 from blybot.domain.subscriptions import Subscription
 from blybot.observability import log_event
 from blybot.services.actions import (
+    DELIVERY_NEEDS_DURABLE_DM,
     MAX_ACTIONS,
     ActionParseError,
+    delivery_of,
     describe_action,
     parse_action,
 )
@@ -196,6 +198,15 @@ REPLY_LOG_OFF_DEPLOY: Final = "Publishing isn't enabled on this deployment; ask 
 REPLY_LOG_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see details in the logs."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
 REPLY_SUBS_NO_DURABLE_DM: Final = "Digest subscriptions aren't available on this platform."
+REPLY_SUBS_NOTHING_TO_INHERIT: Final = (
+    "This channel has no scheduled summary yet, so there is nothing to send you. Ask an "
+    "admin to set one up, or give me your own schedule — e.g. `subscribe weekly@mon.08:00 "
+    "stats`."
+)
+REPLY_DELIVERY_NO_DURABLE_DM: Final = (
+    "delivery={mode} needs durable direct messages, which this platform doesn't have. "
+    "Use delivery=wiki here."
+)
 REPLY_BRIDGE_OFF_DEPLOY: Final = (
     "Cross-platform bridging isn't enabled on this deployment; ask the operator."
 )
@@ -752,7 +763,9 @@ class CommandService:
         if announcer is not None and scopes:
             await announcer.announce(scopes, text)
 
-    async def subscribe(self, source: Scope, dm: Scope, *, options: str) -> CommandResult:
+    async def subscribe(  # noqa: PLR0911 -- one early return per refusal reason
+        self, source: Scope, dm: Scope, *, options: str
+    ) -> CommandResult:
         """Create a durable DM digest subscription to ``source`` (any member).
 
         How an adapter learns ``source`` differs — Telegram redeems a shared
@@ -770,6 +783,14 @@ class CommandService:
             schedule, recipe, lang = parse_subscription(options, self.default_lang)
         except SubscriptionParseError as error:
             return CommandResult(str(error), ok=False)
+        # A bare `subscribe` means "send me whatever this channel's owner
+        # configured"; passing *any* option means "no, send me this
+        # instead", which is an independent subscription with its own run.
+        inherited = not options.strip()
+        if inherited:
+            refusal = await self._inheritable(source)
+            if refusal is not None:
+                return refusal
         subscription = Subscription(
             sub_id=mint_sub_id(),
             dm=dm,
@@ -777,6 +798,7 @@ class CommandService:
             schedule=schedule,
             recipe=recipe,
             lang=lang,
+            inherited=inherited,
         )
         try:
             await admit_subscription(store, subscription, self.max_subs_per_user)
@@ -790,6 +812,24 @@ class CommandService:
                 sub_id=subscription.sub_id, schedule=schedule.token, recipe=recipe, lang=lang
             )
         )
+
+    async def _inheritable(self, source: Scope) -> CommandResult | None:
+        """Refuse to inherit from a channel with no scheduled summary.
+
+        Inheriting from nothing would silently deliver nothing forever, and
+        the subscriber would have no way to tell that from a quiet channel.
+        """
+        store = self.actions
+        if store is None:
+            return CommandResult(REPLY_SUBS_NOTHING_TO_INHERIT, ok=False)
+        try:
+            actions = await store.get_actions(source)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        scheduled = [action for action in actions if action.trigger.kind is TriggerKind.SCHEDULE]
+        if not scheduled:
+            return CommandResult(REPLY_SUBS_NOTHING_TO_INHERIT, ok=False)
+        return None
 
     async def list_subscriptions(self, dm: Scope) -> CommandResult:
         """List the caller's DM digest subscriptions."""
@@ -842,7 +882,9 @@ class CommandService:
             return await self.list_actions(scope, is_admin=True)
         return CommandResult(REPLY_ACTION_USAGE, ok=False)
 
-    async def add_action(self, scope: Scope, *, is_admin: bool, spec: str) -> CommandResult:
+    async def add_action(  # noqa: PLR0911 -- one early return per refusal reason
+        self, scope: Scope, *, is_admin: bool, spec: str
+    ) -> CommandResult:
         """Schedule one recurring analysis for this scope (admins only)."""
         if not is_admin:
             return CommandResult(REPLY_NOT_ADMIN, ok=False)
@@ -853,6 +895,16 @@ class CommandService:
             parsed = parse_action(spec, now_iso=clock.now().isoformat())
         except ActionParseError as error:
             return CommandResult(str(error), ok=False)
+        mode = delivery_of(parsed)
+        if (
+            mode in DELIVERY_NEEDS_DURABLE_DM
+            and self.capabilities is not None
+            and not self.capabilities.durable_dm
+        ):
+            # Refuse rather than silently fall back to `wiki`: an admin who
+            # asked for subscriber delivery would otherwise believe they had
+            # it, and nobody would ever be told they do not.
+            return CommandResult(REPLY_DELIVERY_NO_DURABLE_DM.format(mode=mode), ok=False)
         try:
             current = await store.get_actions(scope)
             if len(current) >= MAX_ACTIONS:

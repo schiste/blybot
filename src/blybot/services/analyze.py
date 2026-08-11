@@ -35,12 +35,21 @@ from blybot.services.directory import PageNotAllowedError, SelfServiceUnavailabl
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from blybot.domain.models import ActionContext, CapturedMessage, PromptResult, Scope, StepSpec
+    from blybot.domain.models import (
+        ActionContext,
+        CapturedMessage,
+        PlatformCapabilities,
+        PromptResult,
+        Scope,
+        StepSpec,
+    )
     from blybot.domain.ports import (
         MessageArchive,
         ProfileStore,
         PromptRunner,
         Sanitizer,
+        Sink,
+        SubscriptionStore,
         WikiPublisher,
     )
     from blybot.observability import Counters
@@ -479,3 +488,47 @@ def _stats_lines(report: StatsReport) -> list[str]:
 
 def _author_label(message: CapturedMessage) -> str:
     return message.author or "channel"
+
+
+@dataclass(eq=False)
+class SubscriberDmSink:
+    """Fans a scope's report out to everyone inheriting its digest (#71).
+
+    The delivery half of `delivery=wiki+subs` and `delivery=subs`: the
+    channel's own action produces one report, and this sends that same
+    report to each subscriber who asked for "whatever this channel
+    publishes".
+
+    **One run, one language.** The report is rendered once and re-scoped,
+    so every inheriting subscriber gets the channel's configured language.
+    A subscriber wanting another passes `lang:`, which makes their
+    subscription an override with its own run — N languages here would
+    mean N model runs per tick, which the per-scope token budget (C8)
+    exists to prevent.
+    """
+
+    subscriptions: SubscriptionStore
+    reply: Sink
+    capabilities: PlatformCapabilities
+    counters: Counters
+
+    async def deliver(
+        self, context: ActionContext, step: StepSpec, payload: object
+    ) -> tuple[OutboundMessage, ...]:
+        """Render once, then address a copy to each inheriting subscriber."""
+        if not self.capabilities.durable_dm:
+            return ()  # nowhere durable to deliver; the gate, not an error
+        try:
+            # A full scan, as the subscription scheduler already does: the
+            # table is bounded by (users x max_subs_per_user) and a second
+            # access pattern for it would be premature.
+            subs = await self.subscriptions.list_all()
+        except StorageError:
+            log_event("subscriber_fanout", "error")
+            return ()
+        recipients = [sub for sub in subs if sub.inherited and sub.scope == context.scope]
+        if not recipients:
+            return ()
+        rendered = await self.reply.deliver(context, step, payload)
+        self.counters.increment("subscriber_digests")
+        return tuple(replace(message, scope=sub.dm) for sub in recipients for message in rendered)

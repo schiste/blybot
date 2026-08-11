@@ -506,7 +506,9 @@ async def test_subscribe_keeps_an_existing_code() -> None:
 
 async def test_subscribe_reports_storage_down() -> None:
     gateway, _store, _subs = _subs_gateway(subs=InMemorySubscriptions(fail=True))
-    reply = await gateway.subscribe_command(_CHANNEL, None, 321, "")
+    # An explicit option, so this exercises the storage path rather than the
+    # inherit check a bare subscribe now runs first (#73).
+    reply = await gateway.subscribe_command(_CHANNEL, None, 321, "stats")
     assert reply == cmd.REPLY_STORAGE_DOWN
 
 
@@ -1226,13 +1228,13 @@ async def test_subscribe_refuses_past_the_per_user_cap() -> None:
     gateway.commands.max_subs_per_user = 2
 
     for _ in range(2):
-        assert "Subscribed" in await gateway.subscribe_command(_CHANNEL, None, 321, "")
-    refused = await gateway.subscribe_command(_CHANNEL, None, 321, "")
+        assert "Subscribed" in await gateway.subscribe_command(_CHANNEL, None, 321, "stats")
+    refused = await gateway.subscribe_command(_CHANNEL, None, 321, "stats")
     assert "maximum of 2" in refused
     assert len(subs.subs) == 2  # nothing extra was written
 
     # A different subscriber is unaffected, and the existing rows survive.
-    assert "Subscribed" in await gateway.subscribe_command(_CHANNEL, None, 999, "")
+    assert "Subscribed" in await gateway.subscribe_command(_CHANNEL, None, 999, "stats")
     assert len(await subs.list_for_user(dm_scope(321))) == 2
 
 

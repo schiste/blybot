@@ -501,21 +501,9 @@ async def _discord_startup(  # noqa: PLR0913 -- setup-hook wiring enumerates its
     log_startup()
 
 
-def discord_run(
-    client: DiscordGatewayClient, token: str, release: Callable[[], Coroutine[Any, Any, None]]
-) -> None:
-    """Start the gateway (blocks for the process lifetime), releasing clients after.
-
-    ``client.run`` owns the event loop and returns only when the bot stops,
-    so the HTTP clients are closed afterwards on a fresh loop.
-    """
-    try:
-        client.run(token)
-    finally:
-        asyncio.run(release())
-
-
-def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
+def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
+    config: Config, bridge: BridgeRouter | None = None
+) -> PlatformRuntime:
     """Build the Discord object graph and start the gateway client.
 
     Reuses every neutral service (directory, capture, engine, subscription
@@ -780,8 +768,27 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
             archive=archive,
             heartbeat_interval=_DISCORD_HEARTBEAT_SECONDS,
         ),
+        bridge=bridge,
     )
-    discord_run(client, config.discord_bot_token, release_clients)
+    token = config.discord_bot_token
+
+    def start() -> Coroutine[Any, Any, None]:
+        return client.start(token)
+
+    return PlatformRuntime(
+        start=start,
+        release=release_clients,
+        # Unlike IRC, the client object exists before it connects, so the
+        # router can be handed the transport up front.
+        transport=DiscordTransport(client),
+        platform="discord",
+    )
+
+
+def run_discord(config: Config) -> int:
+    """Build the Discord object graph and start the gateway."""
+    runtime = build_discord(config)
+    asyncio.run(_run_alone(runtime))
     return 0
 
 

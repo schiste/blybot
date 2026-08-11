@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, cast
 
 import pytest
@@ -13,6 +14,7 @@ from blybot.adapters.discord.gateway import DiscordGatewayClient
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
 from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
+from blybot.config import load_config
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from tests.test_config import REQUIRED
@@ -28,16 +30,22 @@ def _discord_env(monkeypatch: pytest.MonkeyPatch, **extra: str) -> None:
 
 
 def _run(monkeypatch: pytest.MonkeyPatch, **extra: str) -> dict[str, Any]:
-    """Route main() to the Discord path with the network start patched out."""
+    """Build the Discord graph without ever connecting.
+
+    The build/start split (#78) is what makes this possible without owning
+    an event loop: `start()` is a coroutine the caller decides to run.
+    """
     _discord_env(monkeypatch, **extra)
-    seen: dict[str, Any] = {}
-
-    def fake_discord_run(client: DiscordGatewayClient, token: str, release: Any) -> None:
-        seen.update(client=client, token=token, release=release)
-
-    monkeypatch.setattr(entry, "discord_run", fake_discord_run)
-    assert entry.main() == 0
-    return seen
+    runtime = entry.build_discord(load_config())
+    started = runtime.start()
+    started.close()  # never actually dial Discord
+    client = cast("DiscordGatewayClient", runtime.transport.client)  # type: ignore[union-attr]
+    return {
+        "client": client,
+        "token": os.environ["DISCORD_BOT_TOKEN"],
+        "release": runtime.release,
+        "transport": runtime.transport,
+    }
 
 
 def _collectors(client: DiscordGatewayClient) -> dict[str, Any]:
@@ -252,17 +260,22 @@ async def test_spawn_schedules_a_background_task() -> None:
     assert done == [1]
 
 
-def test_discord_run_starts_the_client_then_releases() -> None:
+def test_main_dispatches_to_the_selected_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run_discord` still owns its own loop; only the split moved (#78)."""
+    _discord_env(monkeypatch)
     ran: list[str] = []
     released: list[int] = []
 
-    class _FakeClient:
-        def run(self, token: str) -> None:
-            ran.append(token)
+    async def start() -> None:
+        ran.append("started")
 
     async def release() -> None:
         released.append(1)
 
-    entry.discord_run(cast("DiscordGatewayClient", _FakeClient()), "tok", release)
-    assert ran == ["tok"]
-    assert released == [1]
+    monkeypatch.setattr(
+        entry,
+        "build_discord",
+        lambda _config: entry.PlatformRuntime(start=start, release=release, platform="discord"),
+    )
+    assert entry.main() == 0
+    assert (ran, released) == (["started"], [1])

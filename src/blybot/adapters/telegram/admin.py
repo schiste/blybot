@@ -334,6 +334,15 @@ class AdminHandlers:
         result = await self.commands.set_llm(scope, is_admin=True, tokens=list(context.args or ()))
         await self._reply(context, chat_id, thread_id, result.text)
 
+    async def on_bridge(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Create, join, leave or show this scope's cross-platform bridge (#81)."""
+        scope = await self._admin_chat(update, context)
+        if scope is None:
+            return
+        chat_id, thread_id = _target(scope)
+        result = await self.commands.bridge(scope, is_admin=True, tokens=list(context.args or ()))
+        await self._reply(context, chat_id, thread_id, result.text)
+
     async def on_rule(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Add, remove, or clear this (group, topic)'s composable event rules."""
         scope = await self._admin_chat(update, context)

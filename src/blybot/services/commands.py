@@ -41,6 +41,7 @@ page suffix.
 from __future__ import annotations
 
 import re
+import secrets
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final
 
@@ -80,12 +81,14 @@ from blybot.services.subscriptions import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from blybot.domain.models import LlmSettings, LogContent, PlatformCapabilities, Scope
     from blybot.domain.ports import (
         ActionStore,
+        BridgeAnnouncer,
         Clock,
+        ProfileStore,
         RepoActions,
         SubscriptionStore,
         TokenVault,
@@ -96,6 +99,21 @@ if TYPE_CHECKING:
     from blybot.services.engine import ActionEngine
     from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
     from blybot.services.repo import GroupRepoService
+
+
+def mint_bridge_id() -> str:
+    """A random, unguessable bridge code (also its identity)."""
+    return secrets.token_urlsafe(9)
+
+
+def _label(scope: Scope) -> str:
+    """A human-readable channel name for an announcement."""
+    return f"{scope.channel} ({scope.platform})"
+
+
+def _labels(scopes: Iterable[Scope]) -> str:
+    return ", ".join(sorted(_label(scope) for scope in scopes))
+
 
 REPLY_NOT_ADMIN: Final = "Only this chat's admins can run that command."
 REPLY_NOT_ALLOWED: Final = "I'm not configured to serve this channel."
@@ -178,6 +196,33 @@ REPLY_LOG_OFF_DEPLOY: Final = "Publishing isn't enabled on this deployment; ask 
 REPLY_LOG_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see details in the logs."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
 REPLY_SUBS_NO_DURABLE_DM: Final = "Digest subscriptions aren't available on this platform."
+REPLY_BRIDGE_OFF_DEPLOY: Final = (
+    "Cross-platform bridging isn't enabled on this deployment; ask the operator."
+)
+REPLY_BRIDGE_USAGE: Final = "Usage: bridge new | bridge join <code> | bridge leave | bridge show"
+REPLY_BRIDGE_CREATED: Final = (
+    "📢 This channel is now the start of a cross-platform bridge. Its code is {code} — an "
+    "admin of another channel runs `bridge join {code}` there to mirror messages between "
+    "them. Everything said here will be relayed, with names, to every channel that joins."
+)
+REPLY_BRIDGE_ALREADY: Final = (
+    "This channel is already bridged. Run `bridge leave` first if you want a different one."
+)
+REPLY_BRIDGE_UNKNOWN_CODE: Final = "No bridge has that code."
+REPLY_BRIDGE_JOINED: Final = (
+    "📢 This channel is now bridged to {others}. Everything said here will be relayed there, "
+    "with names, and everything said there will appear here. An admin can stop this with "
+    "`bridge leave`."
+)
+REPLY_BRIDGE_MEMBER_JOINED: Final = (
+    "📢 {scope} has joined this bridge. Messages here are now relayed there too."
+)
+REPLY_BRIDGE_LEFT: Final = "This channel is no longer bridged."
+REPLY_BRIDGE_MEMBER_LEFT: Final = (
+    "📢 {scope} has left this bridge; messages are no longer relayed there."
+)
+REPLY_BRIDGE_NOT_BRIDGED: Final = "This channel isn't bridged to anything."
+REPLY_BRIDGE_SHOW: Final = "Bridged to: {others}. Code: {code}."
 REPLY_SUBSCRIBED: Final = (
     "Subscribed [{sub_id}]: {schedule} {recipe} ({lang}) — digests arrive in your DMs. "
     "/mysubs to review, /unsubscribe {sub_id} to stop."
@@ -312,6 +357,10 @@ class CommandService:
     # The DM digest surface (#32): the store, the platform's durable-DM
     # capability, and the per-subscriber cap (#23).
     subscriptions: SubscriptionStore | None = None
+    # Present only where a bridge can actually relay — the unified runtime.
+    # Absent means the bridge commands refuse rather than record a consent
+    # that nothing would honour.
+    bridge_announcer: BridgeAnnouncer | None = None
     capabilities: PlatformCapabilities | None = None
     default_lang: str = "en"
     max_subs_per_user: int = MAX_SUBS_PER_USER
@@ -613,6 +662,95 @@ class CommandService:
             self.counters.increment("log_throttled")
             return REPLY_THROTTLED
         return None
+
+    async def bridge(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
+        """Create, join, leave or show this scope's cross-platform bridge.
+
+        Consent is two-sided by construction rather than by a handshake:
+        a scope only ever joins because an admin ran this command **in that
+        scope**, and its own stored ``bridge_id`` is the record. There is
+        no way for one channel's admin to opt another channel in.
+        """
+        verb = tokens[0].casefold() if tokens else ""
+        if verb not in {"new", "join", "leave", "show"}:
+            return CommandResult(REPLY_BRIDGE_USAGE, ok=False)
+        if verb != "show" and not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        store = self.directory.store
+        if store is None or self.bridge_announcer is None:
+            return CommandResult(REPLY_BRIDGE_OFF_DEPLOY, ok=False)
+        if not self.groups.is_allowed(scope):
+            return CommandResult(REPLY_NOT_ALLOWED, ok=False)
+        try:
+            return await self._bridge_verb(scope, verb, tokens, store)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+
+    async def _bridge_verb(
+        self, scope: Scope, verb: str, tokens: list[str], store: ProfileStore
+    ) -> CommandResult:
+        """Run one bridge verb against a store that is known to be present."""
+        profile = await store.get(scope)
+        current = profile.bridge_id if profile is not None else None
+        if verb == "show":
+            return await self._bridge_show(scope, current, store)
+        if verb == "leave":
+            return await self._bridge_leave(scope, current, store)
+        if current:
+            return CommandResult(REPLY_BRIDGE_ALREADY, ok=False)
+        if verb == "new":
+            code = mint_bridge_id()
+            await self.directory.set_bridge(scope, code)
+            log_event("bridge_link", "ok")
+            return CommandResult(REPLY_BRIDGE_CREATED.format(code=code), payload=code)
+        code = tokens[1] if len(tokens) > 1 else ""
+        members = await store.list_bridge_members(code) if code else []
+        if not members:
+            return CommandResult(REPLY_BRIDGE_UNKNOWN_CODE, ok=False)
+        await self.directory.set_bridge(scope, code)
+        # The other channels are told too: everyone being mirrored has to
+        # learn that a new audience just appeared, not only the joiner.
+        await self._announce(
+            [member.scope for member in members],
+            REPLY_BRIDGE_MEMBER_JOINED.format(scope=_label(scope)),
+        )
+        log_event("bridge_link", "ok")
+        return CommandResult(
+            REPLY_BRIDGE_JOINED.format(others=_labels(member.scope for member in members))
+        )
+
+    async def _bridge_show(
+        self, scope: Scope, current: str | None, store: ProfileStore
+    ) -> CommandResult:
+        if not current:
+            return CommandResult(REPLY_BRIDGE_NOT_BRIDGED, ok=False)
+        members = await store.list_bridge_members(current)
+        others = [member.scope for member in members if member.scope != scope]
+        if not others:
+            return CommandResult(REPLY_BRIDGE_NOT_BRIDGED, ok=False)
+        return CommandResult(REPLY_BRIDGE_SHOW.format(others=_labels(others), code=current))
+
+    async def _bridge_leave(
+        self, scope: Scope, current: str | None, store: ProfileStore
+    ) -> CommandResult:
+        if not current:
+            return CommandResult(REPLY_BRIDGE_NOT_BRIDGED, ok=False)
+        members = await store.list_bridge_members(current)
+        await self.directory.set_bridge(scope, None)
+        # Severing is unilateral, and the others are told: a channel that
+        # stops being mirrored must not keep believing it still is.
+        await self._announce(
+            [member.scope for member in members if member.scope != scope],
+            REPLY_BRIDGE_MEMBER_LEFT.format(scope=_label(scope)),
+        )
+        log_event("bridge_unlink", "ok")
+        return CommandResult(REPLY_BRIDGE_LEFT)
+
+    async def _announce(self, scopes: list[Scope], text: str) -> None:
+        """Tell every listed channel; never fails the command that caused it."""
+        announcer = self.bridge_announcer
+        if announcer is not None and scopes:
+            await announcer.announce(scopes, text)
 
     async def subscribe(self, source: Scope, dm: Scope, *, options: str) -> CommandResult:
         """Create a durable DM digest subscription to ``source`` (any member).

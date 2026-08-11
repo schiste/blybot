@@ -94,3 +94,23 @@ async def test_an_unbridged_scope_dispatches_nothing() -> None:
     await router.dispatch(RelayMessage(origin=TG, author="alice", text="hello"))
 
     assert telegram.sent == []
+
+
+async def test_an_announcement_reaches_every_named_channel() -> None:
+    """Bridge notices carry no author — the bot is speaking, not relaying."""
+    telegram, irc = _RecordingTransport(), _RecordingTransport()
+    router = _router(telegram=telegram, irc=irc)
+
+    await router.announce([TG, IRC], "alice joined the bridge")
+
+    assert telegram.sent[0].text == "alice joined the bridge"
+    assert irc.sent[0].text == "alice joined the bridge"
+
+
+async def test_an_unreachable_channel_never_fails_the_command_that_caused_it() -> None:
+    telegram = _RecordingTransport()
+    router = _router(telegram=telegram, irc=_RecordingTransport(error=PermanentTransportError()))
+
+    await router.announce([TG, IRC], "notice")  # must not raise
+
+    assert len(telegram.sent) == 1

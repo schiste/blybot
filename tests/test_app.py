@@ -122,9 +122,9 @@ def test_build_registers_every_handler() -> None:
     handlers = application.handlers[0]
     kinds = [type(handler) for handler in handlers]
     # log, logmedia, start, flush, whoami, privacy, bug, issue x2, repo, help x2,
-    # setup, setpage, setconsent, setrepo, events, rule, rules, capture, llm,
-    # action, revoke, settings, reset
-    assert kinds.count(CommandHandler) == 26  # incl. /subscribable
+    # setup, setpage, setconsent, setrepo, events, bridge, rule, rules, capture,
+    # llm, action, revoke, settings, reset
+    assert kinds.count(CommandHandler) == 27  # incl. /subscribable and /bridge
     assert kinds.count(ChatMemberHandler) == 2  # greet-on-entry and newcomer
     assert kinds.count(MessageHandler) == 3  # migration, DM chat picker, and DM text
     assert 1 not in application.handlers  # no capture: group 1 stays empty
@@ -425,7 +425,7 @@ def test_subscription_commands_register_when_wired() -> None:
         subscription_handlers=_subscription_handlers(),
     )
     kinds = [type(handler) for handler in application.handlers[0]]
-    assert kinds.count(CommandHandler) == 29  # 26 base + subscribe/unsubscribe/mysubs
+    assert kinds.count(CommandHandler) == 30  # 27 base + subscribe/unsubscribe/mysubs
 
 
 async def test_post_init_starts_the_subscription_task() -> None:
@@ -459,7 +459,7 @@ def test_analysis_commands_register_when_wired(monkeypatch: pytest.MonkeyPatch) 
         analysis_handlers=make_analysis_handlers(),
     )
     kinds = [type(handler) for handler in application.handlers[0]]
-    assert kinds.count(CommandHandler) == 30  # + summarize, talkingpoints, stats, run
+    assert kinds.count(CommandHandler) == 31  # + summarize, talkingpoints, stats, run
 
     seen: dict[str, Any] = {}
 

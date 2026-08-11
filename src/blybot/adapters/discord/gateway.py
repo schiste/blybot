@@ -391,6 +391,15 @@ class DiscordGateway:
         result = await self.commands.list_rules(scope_of(channel_id, thread_id), is_admin=is_admin)
         return result.text
 
+    async def bridge_command(
+        self, channel_id: int, thread_id: int | None, *, is_admin: bool, tokens: list[str]
+    ) -> str:
+        """Create, join, leave or show this channel's bridge (#81)."""
+        result = await self.commands.bridge(
+            scope_of(channel_id, thread_id), is_admin=is_admin, tokens=tokens
+        )
+        return result.text
+
     async def analyze_command(
         self,
         channel_id: int,
@@ -817,6 +826,24 @@ class DiscordGatewayClient(discord.Client):
                 channel_id, thread_id, state, is_admin=_is_admin(interaction.user)
             )
             await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="bridge", description="Bridge this channel to another platform (admins)."
+        )
+        @app_commands.guild_only()
+        @app_commands.describe(action="new | join <code> | leave | show")
+        async def bridge(interaction: discord.Interaction, action: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.bridge_command(
+                channel_id,
+                thread_id,
+                is_admin=_is_admin(interaction.user),
+                tokens=action.split(),
+            )
+            # Public, not ephemeral: joining or leaving changes who can read
+            # this channel, so the channel is the audience — the same reason
+            # /capture announces (§22.5).
+            await _respond(interaction, reply, ephemeral=False)
 
         @self.tree.command(name="rules", description="List this channel's event rules (admins).")
         @app_commands.guild_only()

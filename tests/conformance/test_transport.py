@@ -8,7 +8,7 @@ mapping is Telegram-specific, so it is asserted only against TelegramTransport.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import timedelta
 from typing import Any, cast
 
@@ -114,10 +114,10 @@ class _RecordingLineChannel:
         self.lines_sent: list[str] = []
         self._error = error
 
-    async def send_line(self, line: str) -> None:
+    async def send_lines(self, lines: Sequence[str]) -> None:
         if self._error is not None:
             raise self._error
-        self.lines_sent.append(line)
+        self.lines_sent.extend(lines)
 
     def lines(self) -> AsyncIterator[Any]:  # pragma: no cover -- outbound-only here
         raise NotImplementedError

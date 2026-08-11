@@ -1653,3 +1653,72 @@ async def test_subscribe_reports_a_storage_failure_while_minting_the_code() -> N
     store.fail_upserts = True
     assert await gateway.subscribe_command(_CHANNEL, None, 321, "") == gw.REPLY_STORAGE_DOWN
     assert subs.subs == {}
+
+
+# --- bridge relay (#79) -------------------------------------------------------
+
+
+class _RecordingRouter:
+    def __init__(self) -> None:
+        self.dispatched: list[Any] = []
+
+    async def dispatch(self, message: Any) -> None:
+        self.dispatched.append(message)
+
+
+def _relayable(**extra: Any) -> Any:
+    base: dict[str, Any] = {
+        "author": SimpleNamespace(bot=False, id=7, display_name="Alice"),
+        "guild": SimpleNamespace(id=1),
+        "channel": SimpleNamespace(id=_CHANNEL),
+        "id": 42,
+        "created_at": datetime(2026, 7, 20, tzinfo=UTC),
+        "content": "hi there",
+        "reference": None,
+        "attachments": [],
+    }
+    base.update(extra)
+    return SimpleNamespace(**base)
+
+
+async def test_a_message_is_relayed_by_name_and_archived_pseudonymously() -> None:
+    """The two paths read the same message and never see each other's data."""
+    store = InMemoryProfiles(profiles={_SCOPE: GroupProfile(scope=_SCOPE, capture_enabled=True)})
+    gateway, _store, archive, _capture = _capture_gateway(store=store)
+    router = _RecordingRouter()
+    client = build_gateway_client(gateway, bridge=cast("Any", router))
+
+    await client.on_message(cast("discord.Message", _relayable()))
+
+    (relayed,) = router.dispatched
+    assert (relayed.author, relayed.text) == ("Alice", "hi there")  # the real name
+    (stored,) = archive.messages
+    assert stored.text == "hi there"
+    assert "Alice" not in stored.author  # ...the archive only ever sees the label
+
+
+async def test_an_attachment_only_message_relays_as_a_marker() -> None:
+    gateway, _store, _archive, _capture = _capture_gateway()
+    router = _RecordingRouter()
+    client = build_gateway_client(gateway, bridge=cast("Any", router))
+    attached = _relayable(content="", attachments=[SimpleNamespace(filename="notes.pdf")])
+
+    await client.on_message(cast("discord.Message", attached))
+
+    assert router.dispatched[0].text == "[file: notes.pdf]"
+
+
+async def test_a_message_with_nothing_to_mirror_is_not_relayed() -> None:
+    gateway, _store, _archive, _capture = _capture_gateway()
+    router = _RecordingRouter()
+    client = build_gateway_client(gateway, bridge=cast("Any", router))
+
+    await client.on_message(cast("discord.Message", _relayable(content="")))
+
+    assert router.dispatched == []
+
+
+async def test_without_a_bridge_the_relay_is_simply_skipped() -> None:
+    gateway, _store, _archive, _capture = _capture_gateway()
+    client = build_gateway_client(gateway)  # no bridge wired
+    await client.on_message(cast("discord.Message", _relayable()))  # must not raise

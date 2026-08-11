@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     from blybot.adapters.telegram.admin import AdminHandlers
     from blybot.adapters.telegram.analyze import AnalysisHandlers
+    from blybot.adapters.telegram.bridge import BridgeHandlers
     from blybot.adapters.telegram.capture import CaptureHandlers
     from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
     from blybot.adapters.telegram.subscribe import SubscriptionHandlers
@@ -187,6 +188,7 @@ def build_application(  # noqa: PLR0913, PLR0917 -- one handler bundle per conce
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
     subscription_handlers: SubscriptionHandlers | None = None,
+    bridge_handlers: BridgeHandlers | None = None,
     capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
 ) -> _App:
     """Build the PTB application with every handler registered."""
@@ -303,10 +305,21 @@ def build_application(  # noqa: PLR0913, PLR0917 -- one handler bundle per conce
             ChatMemberHandler(capture_handlers.on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER),
             group=1,
         )
+    if bridge_handlers is not None:
+        # Handler group 2: the relay observes the same updates as capture
+        # but is independent of it — bridging must work with capture off,
+        # and neither may see the other's data.
+        application.add_handler(
+            MessageHandler(
+                filters.ChatType.GROUPS & ~filters.COMMAND & ~filters.StatusUpdate.ALL,
+                bridge_handlers.on_group_message,
+            ),
+            group=2,
+        )
     return application
 
 
-def run_polling(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
+def build_polling_application(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
     token: str,
     group_handlers: GroupHandlers,
     private_handlers: PrivateHandlers,
@@ -315,9 +328,16 @@ def run_polling(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
     capture_handlers: CaptureHandlers | None = None,
     analysis_handlers: AnalysisHandlers | None = None,
     subscription_handlers: SubscriptionHandlers | None = None,
+    bridge_handlers: BridgeHandlers | None = None,
     capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
-) -> None:
-    """Poll until stopped; blocks for the process lifetime."""
+) -> tuple[_App, list[str]]:
+    """Wire the application and return it with the update types to request.
+
+    Split out of :func:`run_polling` so the unified runtime (#78) can drive
+    the same object graph through PTB's *async* entry points instead of
+    ``run_polling``, which owns the event loop and so cannot share a
+    process with another platform's client.
+    """
     application = build_application(
         token,
         group_handlers,
@@ -327,7 +347,8 @@ def run_polling(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
         capture_handlers,
         analysis_handlers,
         subscription_handlers,
-        capabilities,
+        capabilities=capabilities,
+        bridge_handlers=bridge_handlers,
     )
     allowed = list(_ALLOWED_UPDATES)
     if analysis_handlers is not None:
@@ -340,4 +361,55 @@ def run_polling(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
             application.add_handler(CommandHandler(name, callback, filters=filters.ChatType.GROUPS))
     if capture_handlers is not None:
         allowed.append(Update.CHANNEL_POST)
+    return application, allowed
+
+
+def run_polling(  # noqa: PLR0913, PLR0917 -- one handler bundle per concern
+    token: str,
+    group_handlers: GroupHandlers,
+    private_handlers: PrivateHandlers,
+    admin_handlers: AdminHandlers,
+    lifecycle: Lifecycle,
+    capture_handlers: CaptureHandlers | None = None,
+    analysis_handlers: AnalysisHandlers | None = None,
+    subscription_handlers: SubscriptionHandlers | None = None,
+    bridge_handlers: BridgeHandlers | None = None,
+    capabilities: PlatformCapabilities = TELEGRAM_CAPABILITIES,
+) -> None:
+    """Poll until stopped; blocks for the process lifetime."""
+    application, allowed = build_polling_application(
+        token,
+        group_handlers,
+        private_handlers,
+        admin_handlers,
+        lifecycle,
+        capture_handlers,
+        analysis_handlers,
+        subscription_handlers,
+        capabilities=capabilities,
+        bridge_handlers=bridge_handlers,
+    )
     application.run_polling(allowed_updates=allowed)
+
+
+async def poll_until_cancelled(application: _App, allowed: list[str]) -> None:
+    """Poll on the *caller's* event loop, until the task is cancelled.
+
+    ``run_polling`` installs signal handlers and owns the loop, which two
+    platforms in one process cannot both do. This drives the same
+    lifecycle through PTB's async API so the unified runtime can gather it
+    alongside the Discord client and the IRC session.
+    """
+    await application.initialize()
+    await application.start()
+    updater = application.updater
+    if updater is None:  # pragma: no cover -- always built with one
+        msg = "the application was built without an updater"
+        raise RuntimeError(msg)
+    await updater.start_polling(allowed_updates=allowed)
+    try:
+        await asyncio.Event().wait()  # cancelled by the runtime on shutdown
+    finally:
+        await updater.stop()
+        await application.stop()
+        await application.shutdown()

@@ -79,6 +79,12 @@ class Config:
     irc_tls: bool
     irc_nick: str
     irc_channels: tuple[str, ...]
+    # Client-side flood pacing: IRC servers kill a client that sends too
+    # fast and there is no retry-after to react to, so we stay under a
+    # limit we cannot query. A voiced bot is exempt from some of Libera's
+    # mitigation, so a bridging deployment can raise these.
+    irc_send_burst: int
+    irc_send_interval: float
     # PASS for a password-protected server; a credential, so kept out of repr.
     irc_password: str = field(repr=False)
     wiki_api_url: str
@@ -168,6 +174,8 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         irc_server=source.get("IRC_SERVER", ""),
         irc_port=_parse_positive_int(source, "IRC_PORT", 6697),
         irc_tls=_parse_irc_tls(source.get("IRC_TLS", "on")),
+        irc_send_burst=_parse_positive_int(source, "IRC_SEND_BURST", 4),
+        irc_send_interval=_parse_positive_float(source, "IRC_SEND_INTERVAL", 2.0),
         irc_nick=source.get("IRC_NICK", DEFAULT_BOT_NAME.lower()),
         irc_channels=tuple(
             name.strip().lower()
@@ -335,6 +343,24 @@ def _parse_non_negative_int(
         raise ConfigurationError(msg) from exc
     if value < 0:
         msg = f"{key} must not be negative (0 disables it)"
+        raise ConfigurationError(msg)
+    return value
+
+
+def _parse_positive_float(
+    source: dict[str, str] | os._Environ[str], key: str, default: float
+) -> float:
+    """Read a strictly positive float, or fail naming the key."""
+    raw = source.get(key, "")
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        msg = f"{key} must be a positive number"
+        raise ConfigurationError(msg) from exc
+    if value <= 0:
+        msg = f"{key} must be a positive number"
         raise ConfigurationError(msg)
     return value
 

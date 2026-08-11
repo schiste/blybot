@@ -41,6 +41,7 @@ import discord
 from discord import app_commands
 
 from blybot.adapters.discord.scope import dm_scope, scope_of
+from blybot.domain.bridge import RelayMessage
 from blybot.domain.models import CapturedMessage, CommandResult, LogContent
 from blybot.domain.ports import StorageError, WikiWriteError
 from blybot.services import commands as cmd
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
     from blybot.domain.models import Scope
     from blybot.domain.ports import SubscriptionStore
     from blybot.services.analysis_run import AnalysisService
+    from blybot.services.bridge_router import BridgeRouter
     from blybot.services.capture import CaptureService
     from blybot.services.commands import CommandService
     from blybot.services.directory import ChannelDirectory
@@ -456,6 +458,19 @@ class DiscordGateway:
             await self.directory.set_subscribe_code(scope, mint_subscribe_code())
 
 
+def _describe_attachments(message: discord.Message) -> str:
+    """A marker for an attachment-only message.
+
+    Attachments relay as a marker rather than a re-upload: re-hosting
+    another platform's files means storage, expiry, and a copyright
+    question the wiki context makes real (#76).
+    """
+    if not message.attachments:
+        return ""
+    names = ", ".join(attachment.filename for attachment in message.attachments)
+    return f"[file: {names}]"
+
+
 def _channel_ids(channel: Any) -> tuple[int, int | None]:
     """Split a Discord channel into ``(parent_channel_id, thread_id | None)``.
 
@@ -545,10 +560,12 @@ class DiscordGatewayClient(discord.Client):
         *,
         intents: discord.Intents,
         on_setup: Callable[[DiscordGatewayClient], Awaitable[None]] | None = None,
+        bridge: BridgeRouter | None = None,
     ) -> None:
         super().__init__(intents=intents)
         self._gateway = gateway
         self._on_setup = on_setup
+        self._bridge = bridge
         self.tree = app_commands.CommandTree(self)
         self._register_commands()
 
@@ -573,6 +590,11 @@ class DiscordGatewayClient(discord.Client):
             return
         channel_id, thread_id = _channel_ids(message.channel)
         reference = message.reference
+        # The relay forks from capture here: it carries the real display
+        # name sideways and stores nothing, while ingest_message
+        # pseudonymizes and archives. Neither sees the other's data, and
+        # bridging works with capture off.
+        await self._relay(message, channel_id, thread_id)
         await self._gateway.ingest_message(
             channel_id=channel_id,
             thread_id=thread_id,
@@ -581,6 +603,24 @@ class DiscordGatewayClient(discord.Client):
             posted_at=message.created_at,
             text=message.content,
             reply_to=reference.message_id if reference is not None else None,
+        )
+
+    async def _relay(
+        self, message: discord.Message, channel_id: int, thread_id: int | None
+    ) -> None:
+        """Mirror one message into every channel bridged to this one."""
+        router = self._bridge
+        if router is None:
+            return
+        text = message.content or _describe_attachments(message)
+        if not text:
+            return
+        await router.dispatch(
+            RelayMessage(
+                origin=scope_of(channel_id, thread_id),
+                author=message.author.display_name,
+                text=text,
+            )
         )
 
     def _register_commands(self) -> None:  # noqa: PLR0915 -- one flat block per slash command
@@ -883,12 +923,13 @@ def build_gateway_client(
     *,
     on_setup: Callable[[DiscordGatewayClient], Awaitable[None]] | None = None,
     intents: discord.Intents | None = None,
+    bridge: BridgeRouter | None = None,
 ) -> DiscordGatewayClient:
     """Build the gateway client with the privileged intents by default."""
     # An explicit ``Intents`` is used verbatim even when it is empty
     # (``Intents.none()`` is falsy, so ``or`` would wrongly discard it).
     resolved = default_intents() if intents is None else intents
-    return DiscordGatewayClient(gateway, intents=resolved, on_setup=on_setup)
+    return DiscordGatewayClient(gateway, intents=resolved, on_setup=on_setup, bridge=bridge)
 
 
 def run(client: discord.Client, token: str) -> None:

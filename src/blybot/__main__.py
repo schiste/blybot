@@ -989,7 +989,12 @@ async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph on
     reader, writer = await asyncio.open_connection(
         config.irc_server, config.irc_port, ssl=config.irc_tls or None
     )
-    connection = IrcConnection(reader=reader, writer=writer)
+    connection = IrcConnection(
+        reader=reader,
+        writer=writer,
+        burst=config.irc_send_burst,
+        min_interval=config.irc_send_interval,
+    )
     session = IrcSession(
         channel=connection,
         gateway=gateway,

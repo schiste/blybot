@@ -7,6 +7,7 @@ tested directly from strings — no socket, no mocked library internals.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -139,10 +140,10 @@ class _RecordingChannel:
         self.sent: list[str] = []
         self._error = error
 
-    async def send_line(self, line: str) -> None:
+    async def send_lines(self, lines: Sequence[str]) -> None:
         if self._error is not None:
             raise self._error
-        self.sent.append(line)
+        self.sent.extend(lines)
 
     def lines(self) -> Any:  # pragma: no cover -- outbound-only
         raise NotImplementedError
@@ -727,3 +728,91 @@ async def test_a_delivery_loop_can_write_while_the_session_reads() -> None:
 
     assert [m.text for m in archive.messages] == ["inbound"]  # the read side worked
     assert b"PRIVMSG #chan :outbound digest\r\n" in b"".join(writer.written)
+
+
+# --- bridge relay (#79) -------------------------------------------------------
+
+
+class _RecordingRouter:
+    def __init__(self) -> None:
+        self.dispatched: list[Any] = []
+
+    async def dispatch(self, message: Any) -> None:
+        self.dispatched.append(message)
+
+
+async def test_a_line_is_relayed_verbatim_and_archived_pseudonymously() -> None:
+    """The two paths read the same line and never see each other's data."""
+    scope = scope_of("#chan")
+    store = InMemoryProfiles(profiles={scope: GroupProfile(scope=scope, capture_enabled=True)})
+    gateway, archive = _gateway(store)
+    router = _RecordingRouter()
+    gateway.bridge = cast("Any", router)
+    session, _channel = _session(gateway)
+
+    await _feed(session, ":alice!u@h PRIVMSG #chan :hello everyone")
+
+    (relayed,) = router.dispatched
+    assert (relayed.author, relayed.text) == ("alice", "hello everyone")  # nick verbatim
+    (stored,) = archive.messages
+    assert stored.text == "hello everyone"
+    assert "alice" not in stored.author  # ...but the archive only ever sees the label
+
+
+async def test_relaying_needs_no_capture_and_capture_needs_no_bridge() -> None:
+    """Neither feature may require the other to be configured."""
+    gateway, archive = _gateway()  # capture has no profile enabling it
+    router = _RecordingRouter()
+    gateway.bridge = cast("Any", router)
+    session, _channel = _session(gateway)
+
+    await _feed(session, ":alice!u@h PRIVMSG #chan :still relayed")
+
+    assert len(router.dispatched) == 1
+    assert archive.messages == []
+
+
+async def test_a_recognised_command_is_never_relayed() -> None:
+    """A command is addressed to the bot, not said to the channel."""
+    gateway, _archive = _gateway()
+    router = _RecordingRouter()
+    gateway.bridge = cast("Any", router)
+    session, _channel = _session(gateway)
+
+    await _feed(session, ":alice!u@h PRIVMSG #chan :!help")
+    assert router.dispatched == []
+
+    # ...but merely addressing the bot with nonsense is still talking.
+    await _feed(session, ":alice!u@h PRIVMSG #chan :blybot: what do you think?")
+    assert len(router.dispatched) == 1
+
+
+async def test_no_bridge_configured_is_simply_a_noop() -> None:
+    gateway, _archive = _gateway()
+    assert gateway.bridge is None
+    await gateway.relay_message("#chan", "alice", "hi")  # must not raise
+
+
+async def test_two_concurrent_multi_line_messages_never_interleave() -> None:
+    """The lock is per *message*, not per line (#80).
+
+    Taking it per line let two senders interleave the pieces of two
+    different multi-line messages — and a reader cannot tell that is what
+    happened, which is what makes it worth a test rather than a comment.
+    """
+    conn, writer, _slept = _paced()
+    transport = IrcTransport(channel=conn)
+    long_a = "a" * 1200
+    long_b = "b" * 1200
+
+    await asyncio.gather(
+        transport.send(OutboundMessage(scope=scope_of("#chan"), text=long_a)),
+        transport.send(OutboundMessage(scope=scope_of("#chan"), text=long_b)),
+    )
+
+    payloads = [line.decode().split(" :", 1)[1].rstrip("\r\n") for line in writer.written]
+    letters = ["".join(sorted(set(payload))) for payload in payloads]
+    # Every line is purely one message's text, and one message's lines are
+    # contiguous — no "abab" run anywhere.
+    assert set(letters) == {"a", "b"}
+    assert letters == sorted(letters) or letters == sorted(letters, reverse=True)

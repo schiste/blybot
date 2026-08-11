@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
@@ -26,8 +27,10 @@ from blybot.adapters.telegram.app import (
     Lifecycle,
     Maintenance,
     build_application,
+    poll_until_cancelled,
     run_polling,
 )
+from blybot.adapters.telegram.bridge import BridgeHandlers
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
 from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
@@ -584,3 +587,76 @@ async def test_post_init_starts_the_reminder_task_when_configured() -> None:
     await lifecycle.post_shutdown(app)
     await asyncio.sleep(0)
     assert lifecycle._reminder_task.cancelled()
+
+
+async def test_poll_until_cancelled_starts_and_unwinds_the_lifecycle() -> None:
+    """The unified runtime (#78) drives PTB through its async API.
+
+    `run_polling` installs signal handlers and owns the loop, which two
+    platforms in one process cannot both do — so the same object graph has
+    to start, run, and unwind under the caller's loop instead.
+    """
+    calls: list[str] = []
+
+    class _Updater:
+        async def start_polling(self, **kwargs: Any) -> None:
+            calls.append(f"start_polling:{kwargs['allowed_updates']}")
+
+        async def stop(self) -> None:
+            calls.append("updater.stop")
+
+    class _FakeApplication:
+        updater = _Updater()
+
+        async def initialize(self) -> None:
+            calls.append("initialize")
+
+        async def start(self) -> None:
+            calls.append("start")
+
+        async def stop(self) -> None:
+            calls.append("stop")
+
+        async def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    task = asyncio.ensure_future(
+        poll_until_cancelled(cast("_App", _FakeApplication()), [Update.MESSAGE]),
+    )
+    await asyncio.sleep(0)  # let it reach the wait
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+    assert calls == [
+        "initialize",
+        "start",
+        f"start_polling:{[Update.MESSAGE]}",
+        # ...and cancellation unwinds in reverse, so polling stops before
+        # the application does rather than being killed mid-update.
+        "updater.stop",
+        "stop",
+        "shutdown",
+    ]
+
+
+def test_the_relay_observes_updates_in_its_own_handler_group() -> None:
+    """Group 2, so bridging works with capture off and neither sees the
+    other's data — they read the same update and diverge (#79)."""
+    group_handlers, _, _ = make_group_handlers()
+    private_handlers, _ = make_private_handlers()
+    lifecycle, _, _ = make_lifecycle()
+    handlers = BridgeHandlers(router=cast("Any", object()))
+
+    application = build_application(
+        TOKEN,
+        group_handlers,
+        private_handlers,
+        make_admin_handlers(),
+        lifecycle,
+        bridge_handlers=handlers,
+    )
+
+    callbacks = [handler.callback for handler in application.handlers[2]]
+    assert callbacks == [handlers.on_group_message]
+    assert 1 not in application.handlers  # capture stayed off; the relay did not

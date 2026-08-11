@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
     from blybot.config import Config
     from blybot.domain.ports import Sink, Source, Transform, Transport
-    from blybot.services.bridge_router import BridgeRouter
     from blybot.services.delivery import MessageCollector
 
 from blybot.adapters.discord.author_mask import DiscordAuthorMasker
@@ -73,6 +72,8 @@ from blybot.services.analyze import (
     explicit_page_resolver,
 )
 from blybot.services.binding import TokenBinding
+from blybot.services.bridge import BridgeService
+from blybot.services.bridge_router import BridgeRouter
 from blybot.services.capture import CaptureReminder, CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.delivery import message_loop
@@ -98,6 +99,91 @@ from blybot.services.schedule import ActionScheduler
 from blybot.services.sessions import SessionRegistry, SessionSweeper
 from blybot.services.subscriptions import SubscriptionBinding, SubscriptionScheduler
 from blybot.services.transcribe import DmTranscriptionService
+
+
+def run_unified(config: Config) -> int:
+    """Run every configured platform in one process, bridged together (#78).
+
+    The bridge needs the process that *receives* a message to reach the
+    platform that must *send* it, and a separate bridging job cannot do
+    that — Telegram's getUpdates is exclusive to one poller and a second
+    IRC connection collides on the nick. So a mirror requires one process
+    hosting every adapter.
+
+    The cost is deliberate and documented: this trades the per-platform
+    isolation the default deployment has, where one platform's crash
+    cannot touch another's. That is why unified mode is opt-in rather
+    than the default.
+    """
+    counters = Counters()
+    router = BridgeRouter(
+        bridge=BridgeService(counters=counters, bot_authors=_bot_authors(config)),
+        store=_bridge_store(config),
+    )
+    builders = (
+        ("telegram", build_telegram),
+        ("discord", build_discord),
+        ("irc", build_irc),
+    )
+    runtimes = [build(config, router) for name, build in builders if _configured(config, name)]
+    if not runtimes:
+        print("configuration error: unified mode needs at least one platform", file=sys.stderr)
+        return 2
+    for runtime in runtimes:
+        if runtime.transport is not None:
+            router.register(runtime.platform, runtime.transport)
+    asyncio.run(_run_together(runtimes))
+    return 0
+
+
+def _bridge_store(config: Config) -> ToolsDbStore | None:
+    """The store the router reads bridge membership from, if configured."""
+    if not config.profile_encryption_key:
+        return None
+    runner = PymysqlRunner(
+        host=config.toolsdb_host,
+        database=config.toolsdb_name,
+        cnf_path=Path(config.toolsdb_cnf),
+    )
+    return ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
+
+
+def _bot_authors(config: Config) -> dict[str, str]:
+    """The bot's own display name per platform, for the relay echo fence."""
+    return {"irc": config.irc_nick, "telegram": config.bot_name, "discord": config.bot_name}
+
+
+def _configured(config: Config, platform: str) -> bool:
+    """Whether this deployment has what the platform needs to start."""
+    return bool(
+        {
+            "telegram": config.telegram_bot_token,
+            "discord": config.discord_bot_token,
+            "irc": config.irc_server,
+        }[platform]
+    )
+
+
+async def _run_together(runtimes: list[PlatformRuntime]) -> None:
+    """Run every platform until one stops, then unwind them all.
+
+    A platform ending is treated as the process ending. The alternative —
+    carrying on with a hole in the mirror — is worse: the remaining
+    channels would keep relaying to each other while silently dropping
+    everything bound for the platform that died.
+    """
+    tasks = [asyncio.ensure_future(runtime.start()) for runtime in runtimes]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            task.result()  # re-raise whatever ended the process
+    finally:
+        for runtime in runtimes:
+            if runtime.release is not None:
+                await runtime.release()
 
 
 @dataclass(eq=False)
@@ -132,6 +218,8 @@ def main() -> int:
         return 2
 
     configure_logging()
+    if config.platform == "unified":
+        return run_unified(config)
     if config.platform == "discord":
         return run_discord(config)
     if config.platform == "irc":

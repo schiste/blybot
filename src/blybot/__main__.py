@@ -42,12 +42,18 @@ from blybot.adapters.mediawiki.publisher import MetaWikiPublisher
 from blybot.adapters.system import SystemClock
 from blybot.adapters.telegram.admin import AdminHandlers
 from blybot.adapters.telegram.analyze import AnalysisHandlers
-from blybot.adapters.telegram.app import Lifecycle, Maintenance, run_polling
+from blybot.adapters.telegram.app import (
+    Lifecycle,
+    Maintenance,
+    build_polling_application,
+    poll_until_cancelled,
+)
+from blybot.adapters.telegram.bridge import BridgeHandlers
 from blybot.adapters.telegram.capture import CaptureHandlers, HmacAuthorMasker
 from blybot.adapters.telegram.handlers import GroupHandlers, PrivateHandlers
 from blybot.adapters.telegram.subscribe import SubscriptionHandlers
 from blybot.adapters.telegram.token_entry import TokenEntryHandler
-from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES
+from blybot.adapters.telegram.transport import TELEGRAM_CAPABILITIES, TelegramTransport
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import PymysqlRunner, ToolsDbStore
 from blybot.adapters.toolsdb.subscriptions import ToolsDbSubscriptions
@@ -110,6 +116,11 @@ class PlatformRuntime:
     # router can reach a platform as soon as it comes up.
     transport: Transport | None = None
     platform: str = ""
+    # Set where a platform's SDK offers a better *isolated* entry point than
+    # `start`. Telegram's `run_polling` installs the signal handlers that
+    # give a Toolforge SIGTERM a graceful shutdown; the unified runtime
+    # cannot use it (one loop, three platforms) and provides its own.
+    run_alone: Callable[[], None] | None = None
 
 
 def main() -> int:
@@ -128,7 +139,9 @@ def main() -> int:
     return run_telegram(config)
 
 
-def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
+def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph once
+    config: Config, bridge: BridgeRouter | None = None
+) -> PlatformRuntime:
     """Build the Telegram object graph and start long polling."""
     counters = Counters()
     clock = SystemClock()
@@ -447,7 +460,7 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         subscription_scheduler=subscription_scheduler,
         poll_interval_seconds=config.events_poll_minutes * 60,
     )
-    run_polling(
+    application, allowed = build_polling_application(
         token=config.telegram_bot_token,
         group_handlers=group_handlers,
         private_handlers=private_handlers,
@@ -457,7 +470,27 @@ def run_telegram(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates
         analysis_handlers=analysis_handlers,
         subscription_handlers=subscription_handlers,
         capabilities=TELEGRAM_CAPABILITIES,
+        bridge_handlers=BridgeHandlers(router=bridge) if bridge is not None else None,
     )
+
+    def start() -> Coroutine[Any, Any, None]:
+        return poll_until_cancelled(application, allowed)
+
+    return PlatformRuntime(
+        start=start,
+        transport=TelegramTransport(application.bot),
+        platform="telegram",
+        run_alone=lambda: application.run_polling(allowed_updates=allowed),
+    )
+
+
+def run_telegram(config: Config) -> int:
+    """Build the Telegram object graph and start long polling."""
+    runtime = build_telegram(config)
+    # Always set for Telegram: `run_polling` installs the signal handlers a
+    # Toolforge SIGTERM needs, which the shared async path cannot provide.
+    assert runtime.run_alone is not None  # noqa: S101 -- structural, not a check
+    runtime.run_alone()
     return 0
 
 

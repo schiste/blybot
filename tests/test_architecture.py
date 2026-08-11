@@ -290,6 +290,32 @@ def test_platform_identity_stays_at_its_own_adapter_boundary() -> None:
             )
 
 
+def test_the_relay_identity_never_reaches_storage_or_the_wiki() -> None:
+    """``RelayMessage`` carries a real display name; nothing may persist it.
+
+    The bridge (#76) is the one path where an unpseudonymized name travels,
+    and it stays lawful under R6 only because it goes chat-to-chat and
+    nowhere else: never to Meta, never to disk, never into the capture
+    layer. That is a claim about *reachability*, so it is asserted here
+    rather than left to the module docstring — the archive, the profile
+    store and the wiki publisher must not so much as import the type.
+    """
+    forbidden = {
+        SRC / "services" / "capture.py",
+        SRC / "services" / "analyze.py",
+        SRC / "services" / "publish.py",
+        SRC / "services" / "subscriptions.py",
+        *(SRC / "adapters" / "toolsdb").glob("*.py"),
+        *(SRC / "adapters" / "mediawiki").glob("*.py"),
+    }
+    offenders = [
+        path.relative_to(SRC.parent)
+        for path in sorted(forbidden)
+        if path.exists() and "domain.bridge" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == [], f"relay identity reached a persisting/publishing module: {offenders}"
+
+
 def test_startup_and_liveness_logging_lives_in_one_place() -> None:
     """Issue #46: each adapter used to re-implement these lines and they drifted.
 

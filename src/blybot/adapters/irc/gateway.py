@@ -265,20 +265,20 @@ class IrcSession:
 
     async def register(self) -> None:
         """Send the opening handshake and join the configured channels."""
-        if self.password:
-            # PASS must precede NICK/USER per RFC 1459 §4.1.1.
-            await self.channel.send_line(f"PASS {self.password}")
-        await self.channel.send_line(f"NICK {self.nick}")
-        await self.channel.send_line(f"USER {self.nick} 0 * :{self.nick}")
-        for name in self.channels:
-            await self.channel.send_line(f"JOIN {name}")
+        handshake = [f"PASS {self.password}"] if self.password else []
+        # PASS must precede NICK/USER per RFC 1459 §4.1.1, and the whole
+        # handshake is one unit: a relay landing between NICK and USER
+        # would be sent before the session is registered.
+        handshake += [f"NICK {self.nick}", f"USER {self.nick} 0 * :{self.nick}"]
+        handshake += [f"JOIN {name}" for name in self.channels]
+        await self.channel.send_lines(handshake)
         log_startup()
 
     async def handle(self, line: IrcLine) -> None:
         """Dispatch one inbound line."""
         if line.command == "PING":
             # Answering keeps the session alive; missing it gets us killed.
-            await self.channel.send_line(f"PONG :{line.trailing}")
+            await self.channel.send_lines((f"PONG :{line.trailing}",))
             return
         if line.command in _MEMBERSHIP_COMMANDS:
             self._track_membership(line)
@@ -341,9 +341,8 @@ class IrcSession:
             ops.forget(line.nick)
 
     async def _say(self, target: str, text: str) -> None:
-        """Send one reply to ``target`` as PRIVMSG lines."""
-        for rendered in privmsg_lines(target, text):
-            await self.channel.send_line(rendered)
+        """Send one reply to ``target`` as one uninterrupted batch of lines."""
+        await self.channel.send_lines(privmsg_lines(target, text))
 
     async def run(self) -> None:
         """Register, then dispatch every inbound line until the peer closes."""

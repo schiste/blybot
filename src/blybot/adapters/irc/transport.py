@@ -40,6 +40,5 @@ class IrcTransport:
         return IRC_CAPABILITIES
 
     async def send(self, message: OutboundMessage) -> None:
-        """Deliver one message, split across as many lines as it needs."""
-        for line in privmsg_lines(irc_target(message.scope), message.text):
-            await self.channel.send_line(line)
+        """Deliver one message as a batch, so nothing interleaves its lines."""
+        await self.channel.send_lines(privmsg_lines(irc_target(message.scope), message.text))

@@ -7,6 +7,7 @@ tested directly from strings — no socket, no mocked library internals.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -139,10 +140,10 @@ class _RecordingChannel:
         self.sent: list[str] = []
         self._error = error
 
-    async def send_line(self, line: str) -> None:
+    async def send_lines(self, lines: Sequence[str]) -> None:
         if self._error is not None:
             raise self._error
-        self.sent.append(line)
+        self.sent.extend(lines)
 
     def lines(self) -> Any:  # pragma: no cover -- outbound-only
         raise NotImplementedError
@@ -790,3 +791,28 @@ async def test_no_bridge_configured_is_simply_a_noop() -> None:
     gateway, _archive = _gateway()
     assert gateway.bridge is None
     await gateway.relay_message("#chan", "alice", "hi")  # must not raise
+
+
+async def test_two_concurrent_multi_line_messages_never_interleave() -> None:
+    """The lock is per *message*, not per line (#80).
+
+    Taking it per line let two senders interleave the pieces of two
+    different multi-line messages — and a reader cannot tell that is what
+    happened, which is what makes it worth a test rather than a comment.
+    """
+    conn, writer, _slept = _paced()
+    transport = IrcTransport(channel=conn)
+    long_a = "a" * 1200
+    long_b = "b" * 1200
+
+    await asyncio.gather(
+        transport.send(OutboundMessage(scope=scope_of("#chan"), text=long_a)),
+        transport.send(OutboundMessage(scope=scope_of("#chan"), text=long_b)),
+    )
+
+    payloads = [line.decode().split(" :", 1)[1].rstrip("\r\n") for line in writer.written]
+    letters = ["".join(sorted(set(payload))) for payload in payloads]
+    # Every line is purely one message's text, and one message's lines are
+    # contiguous — no "abab" run anywhere.
+    assert set(letters) == {"a", "b"}
+    assert letters == sorted(letters) or letters == sorted(letters, reverse=True)

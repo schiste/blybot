@@ -119,6 +119,23 @@ def test_a_typo_in_irc_tls_does_not_silently_downgrade_the_connection() -> None:
         load_config(env)
 
 
+def test_irc_send_pacing_is_configurable() -> None:
+    """The token bucket is a client-side guard against a limit we cannot
+    query, not a protocol constant — a voiced bot has real headroom."""
+    default = load_config(dict(REQUIRED))
+    assert (default.irc_send_burst, default.irc_send_interval) == (4, 2.0)
+
+    tuned = load_config(dict(REQUIRED) | {"IRC_SEND_BURST": "10", "IRC_SEND_INTERVAL": "0.5"})
+    assert (tuned.irc_send_burst, tuned.irc_send_interval) == (10, 0.5)
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "fast"])
+def test_a_nonsensical_send_interval_is_rejected(bad: str) -> None:
+    """Zero or negative would disable pacing silently and get us killed."""
+    with pytest.raises(ConfigurationError, match="IRC_SEND_INTERVAL must be a positive number"):
+        load_config(dict(REQUIRED) | {"IRC_SEND_INTERVAL": bad})
+
+
 def test_unknown_platform_is_rejected() -> None:
     env = dict(REQUIRED) | {"PLATFORM": "slack"}
     with pytest.raises(ConfigurationError, match="PLATFORM must be one of"):

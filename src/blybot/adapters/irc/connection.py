@@ -17,14 +17,14 @@ from blybot.adapters.irc.protocol import LINE_BYTES, IrcLine, parse_line
 from blybot.domain.ports import TransientTransportError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 
 class LineChannel(Protocol):
     """A bidirectional line channel — what the gateway and transport need."""
 
-    async def send_line(self, line: str) -> None:
-        """Write one protocol line (CRLF appended here)."""
+    async def send_lines(self, lines: Sequence[str]) -> None:
+        """Write these lines as one unit, with nothing interleaved."""
         ...
 
     def lines(self) -> AsyncIterator[IrcLine]:
@@ -64,13 +64,25 @@ class IrcConnection:
 
     async def send_line(self, line: str) -> None:
         """Write one line, paced and serialized against concurrent senders."""
+        await self.send_lines((line,))
+
+    async def send_lines(self, lines: Sequence[str]) -> None:
+        """Write ``lines`` as one unit, paced, with nothing interleaved.
+
+        The lock is held for the **whole batch**, not per line. Taking it
+        per line let two concurrent senders interleave the pieces of two
+        different multi-line messages — invisible until the bridge (#76)
+        made concurrent multi-line sends routine, and unrecoverable for a
+        reader, who cannot tell that is what happened.
+        """
         async with self._lock:
-            await self._await_turn()
-            try:
-                self.writer.write(f"{line}\r\n".encode())
-                await self.writer.drain()
-            except (OSError, ConnectionError) as error:
-                raise TransientTransportError from error
+            for line in lines:
+                await self._await_turn()
+                try:
+                    self.writer.write(f"{line}\r\n".encode())
+                    await self.writer.drain()
+                except (OSError, ConnectionError) as error:
+                    raise TransientTransportError from error
 
     async def _await_turn(self) -> None:
         """Block until the bucket has room for one more line."""

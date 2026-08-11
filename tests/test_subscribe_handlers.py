@@ -131,7 +131,9 @@ async def test_subscribe_reports_storage_outage() -> None:
     handlers, _profiles, subs, binding = make()
     binding.open_entry(dmscope(777), gscope(-100))
     subs.fail = True
-    context, bot = tg.make_context()
+    # An explicit option, so this exercises the storage path rather than the
+    # inherit check a bare /subscribe now runs first (#73).
+    context, bot = tg.make_context(args=["stats"])
     await handlers.on_subscribe(dm(), context)
     assert tg.sent_texts(bot) == [cmd.REPLY_STORAGE_DOWN]
 
@@ -210,12 +212,12 @@ async def test_subscribe_refuses_past_the_per_user_cap() -> None:
 
     for _ in range(2):
         binding.open_entry(dmscope(777), gscope(-100))
-        context, bot = tg.make_context()
+        context, bot = tg.make_context(args=["stats"])  # explicit: an override
         await handlers.on_subscribe(dm(), context)
         assert tg.sent_texts(bot)[0].startswith("Subscribed [")
 
     binding.open_entry(dmscope(777), gscope(-100))
-    context, bot = tg.make_context()
+    context, bot = tg.make_context(args=["stats"])
     await handlers.on_subscribe(dm(), context)
     assert "maximum of 2" in tg.sent_texts(bot)[0]
     assert len(subs.subs) == 2  # nothing extra was written

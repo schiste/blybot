@@ -89,7 +89,13 @@ async def test_discord_full_deployment_wires_every_neutral_service(
     # The wiki_section sink lets the on-demand analyses publish to the wiki,
     # exactly like Telegram; the reply sink stays for scheduled digest DMs and
     # chat_message carries the rule-matched repo events.
-    assert set(engine.sinks) == {"wiki_section", "reply", "chat_message", "chat_confirm"}
+    assert set(engine.sinks) == {
+        "wiki_section",
+        "reply",
+        "subscriber_dm",
+        "chat_message",
+        "chat_confirm",
+    }
     assert gateway.analysis.engine is engine  # analyses run through this engine
 
     # The bootstrap closure covers all three stores.

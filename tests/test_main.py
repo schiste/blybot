@@ -207,6 +207,7 @@ async def test_capture_wiring_builds_the_analysis_pipeline(
     assert set(engine.sinks) == {
         "wiki_section",
         "reply",
+        "subscriber_dm",  # delivery=wiki+subs / subs (#71)
         "chat_confirm",
         "chat_message",
     }

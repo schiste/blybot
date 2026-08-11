@@ -68,6 +68,7 @@ from blybot.services.analyze import (
     ChatReplySink,
     PromptTransform,
     StatsTransform,
+    SubscriberDmSink,
     WikiSectionSink,
     explicit_page_resolver,
 )
@@ -334,7 +335,10 @@ def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph onc
         sources["repo_events"] = RepoEventsSource(store=store, vault=store, gateway=gateway)
         transforms["rule_match"] = RuleMatchTransform(counters=counters)
         sinks["chat_message"] = ChatMessagesSink()
-    if store is not None and archive is not None:
+    # The archive and the subscription store are created together (both
+    # need ARCHIVE_PSEUDONYM_KEY), so naming all three keeps the analysis
+    # tier's precondition in one place.
+    if store is not None and archive is not None and subscriptions_store is not None:
         llm_defaults = LlmSettings(lang=config.llm_default_lang)
         llm_client = LiftWingClient(
             api_base=config.liftwing_api_base,
@@ -365,7 +369,16 @@ def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph onc
             edit_summary=config.edit_summary,
             bot_name=config.bot_name,
         )
-        sinks["reply"] = ChatReplySink(max_chars=TELEGRAM_CAPABILITIES.max_message_chars)
+        reply_sink = ChatReplySink(max_chars=TELEGRAM_CAPABILITIES.max_message_chars)
+        sinks["reply"] = reply_sink
+        # `delivery=wiki+subs` / `delivery=subs` (#71): one report,
+        # re-addressed to everyone inheriting this channel's digest.
+        sinks["subscriber_dm"] = SubscriberDmSink(
+            subscriptions=subscriptions_store,
+            reply=reply_sink,
+            capabilities=TELEGRAM_CAPABILITIES,
+            counters=counters,
+        )
     engine = ActionEngine(
         sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock
     )
@@ -739,7 +752,16 @@ def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
             edit_summary=config.edit_summary,
             bot_name=config.bot_name,
         )
-        sinks["reply"] = ChatReplySink(max_chars=DISCORD_CAPABILITIES.max_message_chars)
+        reply_sink = ChatReplySink(max_chars=DISCORD_CAPABILITIES.max_message_chars)
+        sinks["reply"] = reply_sink
+        # `delivery=wiki+subs` / `delivery=subs` (#71): one report,
+        # re-addressed to everyone inheriting this channel's digest.
+        sinks["subscriber_dm"] = SubscriberDmSink(
+            subscriptions=subscriptions_store,
+            reply=reply_sink,
+            capabilities=DISCORD_CAPABILITIES,
+            counters=counters,
+        )
     engine = ActionEngine(
         sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock
     )
@@ -1011,6 +1033,8 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
             edit_summary=config.edit_summary,
             bot_name=config.bot_name,
         )
+        # No `subscriber_dm` sink here: durable_dm is False, so the
+        # delivery gate refuses those modes before anything resolves it.
         sinks["reply"] = ChatReplySink(max_chars=IRC_CAPABILITIES.max_message_chars)
     engine = ActionEngine(
         sources=sources, transforms=transforms, sinks=sinks, counters=counters, clock=clock

@@ -9,7 +9,7 @@ on the nick — so a mirror requires one process hosting every adapter.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from cryptography.fernet import Fernet
@@ -192,3 +192,28 @@ async def test_a_platform_crashing_surfaces_rather_than_being_swallowed() -> Non
                 entry.PlatformRuntime(start=boom, platform="irc"),
             ]
         )
+
+
+async def test_the_relay_drains_are_cancelled_with_the_platforms() -> None:
+    """They never end on their own, so the process must not wait on them."""
+    drained: list[str] = []
+
+    async def drain() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            drained.append("cancelled")
+            raise
+
+    class _Router:
+        def workers(self) -> list[Any]:
+            return [drain()]
+
+    async def ends() -> None:
+        return None
+
+    await entry._run_together(
+        [entry.PlatformRuntime(start=ends, platform="irc")], cast("Any", _Router())
+    )
+
+    assert drained == ["cancelled"]

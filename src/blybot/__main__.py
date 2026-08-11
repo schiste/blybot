@@ -132,7 +132,7 @@ def run_unified(config: Config) -> int:
     for runtime in runtimes:
         if runtime.transport is not None:
             router.register(runtime.platform, runtime.transport)
-    asyncio.run(_run_together(runtimes))
+    asyncio.run(_run_together(runtimes, router))
     return 0
 
 
@@ -164,7 +164,9 @@ def _configured(config: Config, platform: str) -> bool:
     )
 
 
-async def _run_together(runtimes: list[PlatformRuntime]) -> None:
+async def _run_together(
+    runtimes: list[PlatformRuntime], router: BridgeRouter | None = None
+) -> None:
     """Run every platform until one stops, then unwind them all.
 
     A platform ending is treated as the process ending. The alternative —
@@ -173,6 +175,10 @@ async def _run_together(runtimes: list[PlatformRuntime]) -> None:
     everything bound for the platform that died.
     """
     tasks = [asyncio.ensure_future(runtime.start()) for runtime in runtimes]
+    # The relay drains are background work, not platforms: they never end
+    # on their own, so they are cancelled with the rest rather than being
+    # something the process waits on.
+    drains = [asyncio.ensure_future(worker) for worker in (router.workers() if router else [])]
     try:
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
@@ -181,6 +187,9 @@ async def _run_together(runtimes: list[PlatformRuntime]) -> None:
         for task in done:
             task.result()  # re-raise whatever ended the process
     finally:
+        for drain in drains:
+            drain.cancel()
+        await asyncio.gather(*drains, return_exceptions=True)
         for runtime in runtimes:
             if runtime.release is not None:
                 await runtime.release()

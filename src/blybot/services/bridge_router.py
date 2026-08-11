@@ -16,7 +16,8 @@ a live conversation is worse than one that admits the gap.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import TYPE_CHECKING, Any
 
 from blybot.domain.models import OutboundMessage
 from blybot.domain.ports import (
@@ -26,8 +27,11 @@ from blybot.domain.ports import (
     TransientTransportError,
 )
 from blybot.observability import log_event
+from blybot.services.relay_queue import RelayQueue
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
+
     from blybot.domain.bridge import RelayMessage
     from blybot.domain.models import Scope
     from blybot.domain.ports import ProfileStore, Transport
@@ -45,10 +49,22 @@ class BridgeRouter:
     # restart.
     store: ProfileStore | None = None
     transports: dict[str, Transport] = field(default_factory=dict)
+    # One backlog per platform, because the bottleneck is per-connection:
+    # IRC's pacing has nothing to do with Discord's.
+    queues: dict[str, RelayQueue] = field(default_factory=dict)
 
     def register(self, platform: str, transport: Transport) -> None:
         """Make ``platform`` reachable; called as each adapter comes up."""
         self.transports[platform] = transport
+        self.queues[platform] = RelayQueue(
+            platform=platform,
+            send=partial(self._send, label="bridge_deliver"),
+            notify=self.announce,
+        )
+
+    def workers(self) -> list[Coroutine[Any, Any, None]]:
+        """The drain loops the runtime must run, one per registered platform."""
+        return [queue.run() for queue in self.queues.values()]
 
     async def announce(self, scopes: list[Scope], text: str) -> None:
         """Tell each scope something about the bridge itself (#81).
@@ -56,6 +72,10 @@ class BridgeRouter:
         Unlike a relay this carries no author — it is the bot speaking —
         and it must never fail the command that triggered it, so a
         channel that cannot be reached is logged and skipped.
+
+        Deliberately **not** queued: a bridge notice, and above all a
+        "the relay is running behind" notice, is useless if it arrives
+        behind the backlog it is about.
         """
         for scope in scopes:
             await self._send(OutboundMessage(scope=scope, text=text), label="bridge_announce")
@@ -69,8 +89,16 @@ class BridgeRouter:
         swallowed.
         """
         targets = await self._targets(message.origin)
+        audience = [message.origin, *targets]
         for outbound in self.bridge.relay(message, targets):
-            await self._send(outbound, label="bridge_deliver")
+            queue = self.queues.get(outbound.scope.platform)
+            if queue is None:
+                log_event("bridge_deliver", "ignored", reason="platform_down")
+                continue
+            # Queue rather than send: a slow platform must not stall the
+            # inbound handler, and the backlog is what makes the lag
+            # measurable and therefore announceable (#80).
+            await queue.submit(outbound, audience)
 
     async def _targets(self, origin: Scope) -> tuple[Scope, ...]:
         """The other members of ``origin``'s bridge, or nothing.

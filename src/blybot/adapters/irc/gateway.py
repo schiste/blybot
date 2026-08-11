@@ -23,7 +23,9 @@ stays in the service, shared with Telegram and Discord.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Final
 
 from blybot.adapters.irc.author_mask import IrcAuthorMasker
@@ -35,10 +37,9 @@ from blybot.domain.models import CapturedMessage, Scope
 from blybot.services.health import log_startup
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
-
     from blybot.adapters.irc.connection import LineChannel
     from blybot.domain.ports import Clock
+    from blybot.services.analysis_run import AnalysisService
     from blybot.services.bridge_router import BridgeRouter
     from blybot.services.capture import CaptureService
     from blybot.services.commands import CommandService
@@ -46,10 +47,19 @@ if TYPE_CHECKING:
     from blybot.services.policy import GroupPolicy
 
     # One command handler: (gateway, scope, tokens, is_admin) -> reply.
-    _Handler = Callable[["IrcGateway", Scope, list[str], bool], Awaitable[str]]
+    _Handler = Callable[["IrcGateway", "Request"], Awaitable[str]]
 
 # Commands may be addressed either way; both are conventional on IRC.
 _BANG: Final = "!"
+
+# How a handler speaks before it has an answer. Defaults to silence so a
+# caller with no channel to write to (a test, a dry run) needs no stub.
+Say = Callable[[str], Awaitable[None]]
+
+
+async def _silent(_text: str) -> None:
+    """Drop an interim line: no channel is attached to this invocation."""
+
 
 # RFC 1459 numerics the session acts on.
 _RPL_NAMREPLY: Final = "353"
@@ -59,12 +69,32 @@ _NAMREPLY_MIN_PARAMS: Final = 3  # <me> <symbol> <#channel>
 _KICK_MIN_PARAMS: Final = 2  # <#channel> <nick>
 
 REPLY_CAPTURE_USAGE: Final = "Usage: capture on | capture off"
+REPLY_ANALYSES_OFF_DEPLOY: Final = "On-demand analyses aren't available on this deployment."
+REPLY_ANALYSING: Final = (
+    "Analysing… a large window can take a few minutes. I'll post the result here."
+)
+REPLY_RUN_USAGE: Final = "Usage: run <template> [key=value …]"
 REPLY_HELP: Final = (
     "Commands: capture on|off, setpage <page>, settings, reset, setrepo <owner/repo>, "
     "revoke, llm …, events on|off, rule …, rules, action …, issue <text>, repo. "
     "Address me as 'blybot: <command>' or '!<command>'. Channel operators only, "
     "except issue and repo. No digest subscriptions here: IRC has no durable DM."
 )
+
+
+@dataclass(frozen=True, slots=True)
+class Request:
+    """One addressed command, with the means to answer mid-run.
+
+    ``say`` exists for the analyses: a chunked run takes minutes, and an
+    IRC channel that sees nothing for that long reads the bot as broken.
+    Telegram and Discord both acknowledge first; this is how IRC can.
+    """
+
+    scope: Scope
+    tokens: list[str]
+    is_admin: bool
+    say: Say
 
 
 @dataclass(eq=False)
@@ -84,6 +114,8 @@ class IrcGateway:
     # Set only in the unified runtime, which is the one process that can
     # reach another platform's transport (#76).
     bridge: BridgeRouter | None = None
+    # On-demand analyses; absent on a deployment without the archive.
+    analysis: AnalysisService | None = None
     # IRC gives no message ids, so one is synthesised per captured line.
     # Monotonic within a process; a restart may repeat values, and the
     # archive's INSERT IGNORE makes that a no-op rather than a duplicate.
@@ -103,7 +135,9 @@ class IrcGateway:
             return stripped[len(_BANG) :].strip()
         return None
 
-    async def run_command(self, channel: str, nick: str, text: str) -> str | None:
+    async def run_command(
+        self, channel: str, nick: str, text: str, say: Say = _silent
+    ) -> str | None:
         """Route one addressed command and return the reply, or ``None``.
 
         ``None`` means "not a verb I know" — deliberately silent, because a
@@ -120,37 +154,51 @@ class IrcGateway:
         handler = _DISPATCH.get(verb)
         if handler is None:
             return None
-        return await handler(self, scope_of(channel), tokens, self.ops.is_op(channel, nick))
+        return await handler(
+            self,
+            Request(
+                scope=scope_of(channel),
+                tokens=tokens,
+                is_admin=self.ops.is_op(channel, nick),
+                say=say,
+            ),
+        )
 
     # --- command handlers: parse the tokens, call the neutral service ------
 
-    async def _cmd_help(self, _scope: Scope, _tokens: list[str], _admin: bool) -> str:
+    async def _cmd_help(self, _request: Request) -> str:
         return REPLY_HELP
 
-    async def _cmd_capture(self, scope: Scope, tokens: list[str], admin: bool) -> str:
-        argument = tokens[0].casefold() if tokens else ""
+    async def _cmd_capture(self, request: Request) -> str:
+        argument = request.tokens[0].casefold() if request.tokens else ""
         if argument not in {"on", "off"}:
             return REPLY_CAPTURE_USAGE
-        result = await self.commands.capture(scope, is_admin=admin, enabled=argument == "on")
+        result = await self.commands.capture(
+            request.scope, is_admin=request.is_admin, enabled=argument == "on"
+        )
         return result.text
 
-    async def _cmd_setpage(self, scope: Scope, tokens: list[str], admin: bool) -> str:
-        result = await self.commands.set_page(scope, is_admin=admin, page=" ".join(tokens))
+    async def _cmd_setpage(self, request: Request) -> str:
+        result = await self.commands.set_page(
+            request.scope, is_admin=request.is_admin, page=" ".join(request.tokens)
+        )
         return result.text
 
-    async def _cmd_settings(self, scope: Scope, _tokens: list[str], admin: bool) -> str:
-        result = await self.commands.show_settings(scope, is_admin=admin)
+    async def _cmd_settings(self, request: Request) -> str:
+        result = await self.commands.show_settings(request.scope, is_admin=request.is_admin)
         return result.text
 
-    async def _cmd_reset(self, scope: Scope, _tokens: list[str], admin: bool) -> str:
-        result = await self.commands.reset(scope, is_admin=admin)
+    async def _cmd_reset(self, request: Request) -> str:
+        result = await self.commands.reset(request.scope, is_admin=request.is_admin)
         return result.text
 
-    async def _cmd_setrepo(self, scope: Scope, tokens: list[str], admin: bool) -> str:
-        result = await self.commands.set_repo(scope, is_admin=admin, repo=" ".join(tokens))
+    async def _cmd_setrepo(self, request: Request) -> str:
+        result = await self.commands.set_repo(
+            request.scope, is_admin=request.is_admin, repo=" ".join(request.tokens)
+        )
         return result.text
 
-    async def _cmd_settoken(self, scope: Scope, _tokens: list[str], admin: bool) -> str:
+    async def _cmd_settoken(self, request: Request) -> str:
         """Refuse a token here — and never look at what was typed.
 
         The tokens are dropped on the floor rather than forwarded: by the
@@ -159,45 +207,93 @@ class IrcGateway:
         and to tell them to revoke. The refusal itself is the neutral
         service's (``confidential_input``), not this adapter's.
         """
-        result = await self.commands.store_token(scope, is_admin=admin, token="")
+        result = await self.commands.store_token(request.scope, is_admin=request.is_admin, token="")
         return result.text
 
-    async def _cmd_revoke(self, scope: Scope, _tokens: list[str], admin: bool) -> str:
-        result = await self.commands.revoke_token(scope, is_admin=admin)
+    async def _cmd_revoke(self, request: Request) -> str:
+        result = await self.commands.revoke_token(request.scope, is_admin=request.is_admin)
         return result.text
 
-    async def _cmd_llm(self, scope: Scope, tokens: list[str], admin: bool) -> str:
-        result = await self.commands.set_llm(scope, is_admin=admin, tokens=tokens)
+    async def _cmd_llm(self, request: Request) -> str:
+        result = await self.commands.set_llm(
+            request.scope, is_admin=request.is_admin, tokens=request.tokens
+        )
         return result.text
 
-    async def _cmd_events(self, scope: Scope, tokens: list[str], admin: bool) -> str:
-        result = await self.commands.events(scope, is_admin=admin, tokens=tokens)
+    async def _cmd_events(self, request: Request) -> str:
+        result = await self.commands.events(
+            request.scope, is_admin=request.is_admin, tokens=request.tokens
+        )
         return result.text
 
-    async def _cmd_rule(self, scope: Scope, tokens: list[str], admin: bool) -> str:
-        result = await self.commands.rule(scope, is_admin=admin, tokens=tokens)
+    async def _cmd_rule(self, request: Request) -> str:
+        result = await self.commands.rule(
+            request.scope, is_admin=request.is_admin, tokens=request.tokens
+        )
         return result.text
 
-    async def _cmd_rules(self, scope: Scope, _tokens: list[str], admin: bool) -> str:
-        result = await self.commands.list_rules(scope, is_admin=admin)
+    async def _cmd_rules(self, request: Request) -> str:
+        result = await self.commands.list_rules(request.scope, is_admin=request.is_admin)
         return result.text
 
-    async def _cmd_action(self, scope: Scope, tokens: list[str], admin: bool) -> str:
-        result = await self.commands.action(scope, is_admin=admin, tokens=tokens)
+    async def _cmd_action(self, request: Request) -> str:
+        result = await self.commands.action(
+            request.scope, is_admin=request.is_admin, tokens=request.tokens
+        )
         return result.text
 
-    async def _cmd_issue(self, scope: Scope, tokens: list[str], _admin: bool) -> str:
+    async def _cmd_issue(self, request: Request) -> str:
         # Not admin-gated anywhere: filing is the one repo action any member
         # may take, and the report reaches GitHub with no reporter identity.
-        result = await self.commands.file_issue(scope, description=" ".join(tokens))
+        result = await self.commands.file_issue(request.scope, description=" ".join(request.tokens))
         return result.text
 
-    async def _cmd_bridge(self, scope: Scope, tokens: list[str], admin: bool) -> str:
-        result = await self.commands.bridge(scope, is_admin=admin, tokens=tokens)
+    async def _cmd_bridge(self, request: Request) -> str:
+        result = await self.commands.bridge(
+            request.scope, is_admin=request.is_admin, tokens=request.tokens
+        )
         return result.text
 
-    async def _cmd_repo(self, scope: Scope, _tokens: list[str], _admin: bool) -> str:
-        result = await self.commands.repo_summary(scope)
+    async def _analysis(self, request: Request, command: str, recipe: str) -> str:
+        """Run one on-demand analysis, announcing before the slow part.
+
+        The ack is sent through ``request.say`` rather than returned,
+        because a chunked run takes minutes: without it the channel sees
+        nothing at all and reads the bot as hung. `on_started` fires only
+        once the run is committed to, so a refusal or a bad parse answers
+        immediately with no misleading "analysing…".
+        """
+        service = self.analysis
+        if service is None:
+            return REPLY_ANALYSES_OFF_DEPLOY
+        result = await service.run_analysis(
+            request.scope,
+            is_admin=request.is_admin,
+            command=command,
+            recipe=recipe,
+            tokens=request.tokens,
+            on_started=lambda: request.say(REPLY_ANALYSING),
+        )
+        return result.text
+
+    async def _cmd_summarize(self, request: Request) -> str:
+        return await self._analysis(request, "summarize", "summarize")
+
+    async def _cmd_stats(self, request: Request) -> str:
+        return await self._analysis(request, "stats", "stats")
+
+    async def _cmd_talkingpoints(self, request: Request) -> str:
+        return await self._analysis(request, "talkingpoints", "talking_points")
+
+    async def _cmd_run(self, request: Request) -> str:
+        """`run <template> [key=value …]` — any named prompt template."""
+        if not request.tokens:
+            return REPLY_RUN_USAGE
+        template, rest = request.tokens[0], request.tokens[1:]
+        return await self._analysis(replace(request, tokens=rest), "run", f"prompt:{template}")
+
+    async def _cmd_repo(self, request: Request) -> str:
+        result = await self.commands.repo_summary(request.scope)
         return result.text
 
     async def relay_message(self, channel: str, nick: str, text: str) -> None:
@@ -254,6 +350,10 @@ _DISPATCH: Final[dict[str, _Handler]] = {
     "action": IrcGateway._cmd_action,
     "issue": IrcGateway._cmd_issue,
     "repo": IrcGateway._cmd_repo,
+    "summarize": IrcGateway._cmd_summarize,
+    "stats": IrcGateway._cmd_stats,
+    "talkingpoints": IrcGateway._cmd_talkingpoints,
+    "run": IrcGateway._cmd_run,
     "bridge": IrcGateway._cmd_bridge,
 }
 
@@ -297,7 +397,9 @@ class IrcSession:
             return  # a direct message: no durable_dm, so nothing to do
         command = self.gateway.addressed_command(line.trailing)
         if command is not None:
-            reply = await self.gateway.run_command(target, nick, command)
+            reply = await self.gateway.run_command(
+                target, nick, command, partial(self._say, target)
+            )
             if reply is not None:
                 # Replies go to the CHANNEL, never privately to the caller:
                 # on IRC that is not a style choice but the consent model —

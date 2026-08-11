@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
@@ -17,7 +18,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
     from blybot.config import Config
-    from blybot.domain.ports import Sink, Source, Transform
+    from blybot.domain.ports import Sink, Source, Transform, Transport
+    from blybot.services.bridge_router import BridgeRouter
     from blybot.services.delivery import MessageCollector
 
 from blybot.adapters.discord.author_mask import DiscordAuthorMasker
@@ -90,6 +92,24 @@ from blybot.services.schedule import ActionScheduler
 from blybot.services.sessions import SessionRegistry, SessionSweeper
 from blybot.services.subscriptions import SubscriptionBinding, SubscriptionScheduler
 from blybot.services.transcribe import DmTranscriptionService
+
+
+@dataclass(eq=False)
+class PlatformRuntime:
+    """One platform, built and ready to run inside someone else's loop.
+
+    Splitting "build the graph" from "start the transport" is what lets a
+    single process host several platforms (#78): the isolated per-platform
+    jobs still call the blocking entry points, while the unified runtime
+    gathers the coroutines instead.
+    """
+
+    start: Callable[[], Coroutine[Any, Any, None]]
+    release: Callable[[], Awaitable[None]] | None = None
+    # Available before the platform is live where the SDK allows it, so the
+    # router can reach a platform as soon as it comes up.
+    transport: Transport | None = None
+    platform: str = ""
 
 
 def main() -> int:
@@ -765,7 +785,9 @@ def run_discord(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates 
     return 0
 
 
-def run_irc(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the object graph once
+def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
+    config: Config, bridge: BridgeRouter | None = None
+) -> PlatformRuntime:
     """Build the IRC object graph and run the session until the peer closes.
 
     The narrowest of the three roots, because IRC's capabilities admit the
@@ -936,6 +958,7 @@ def run_irc(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the 
         nick=config.irc_nick,
         capture=capture_service,
         masker=masker,
+        bridge=bridge,
     )
 
     async def release_clients() -> None:
@@ -944,18 +967,34 @@ def run_irc(config: Config) -> int:  # noqa: PLR0915 -- the root enumerates the 
         if llm_client is not None:
             await llm_client.aclose()
 
-    asyncio.run(
-        _irc_main(
+    def start() -> Coroutine[Any, Any, None]:
+        return _irc_main(
             config,
             gateway,
             store,
             archive,
             collectors=tuple(collectors),
             counters=counters,
-            release=release_clients,
+            bridge=bridge,
         )
-    )
+
+    return PlatformRuntime(start=start, release=release_clients, platform="irc")
+
+
+def run_irc(config: Config) -> int:
+    """Build the IRC object graph and run the session until the peer closes."""
+    runtime = build_irc(config)
+    asyncio.run(_run_alone(runtime))
     return 0
+
+
+async def _run_alone(runtime: PlatformRuntime) -> None:
+    """Run one platform, releasing its HTTP clients on the way out."""
+    try:
+        await runtime.start()
+    finally:
+        if runtime.release is not None:
+            await runtime.release()
 
 
 async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph once
@@ -966,7 +1005,7 @@ async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph on
     *,
     collectors: tuple[tuple[MessageCollector, str], ...] = (),
     counters: Counters | None = None,
-    release: Callable[[], Awaitable[None]] | None = None,
+    bridge: BridgeRouter | None = None,
 ) -> None:
     """Bootstrap storage, dial the server, and run the session and its loops.
 
@@ -1003,6 +1042,10 @@ async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph on
         password=config.irc_password,
     )
     transport = IrcTransport(channel=connection)
+    if bridge is not None:
+        # Only now can IRC be relayed *to*: the transport needs a live
+        # socket, unlike Telegram's bot or the Discord client.
+        bridge.register("irc", transport)
     poll_interval = config.events_poll_minutes * 60
     background = [
         asyncio.create_task(message_loop(transport, collector, poll_interval, label))
@@ -1022,8 +1065,6 @@ async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph on
             task.cancel()
         await asyncio.gather(*background, return_exceptions=True)
         await connection.close()
-        if release is not None:
-            await release()
 
 
 if __name__ == "__main__":

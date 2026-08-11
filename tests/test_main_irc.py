@@ -13,6 +13,7 @@ from blybot.adapters.irc.capabilities import IRC_CAPABILITIES
 from blybot.adapters.irc.transport import IrcTransport
 from blybot.adapters.toolsdb.archive import ToolsDbArchive
 from blybot.adapters.toolsdb.store import ToolsDbStore
+from blybot.config import load_config
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters
 from blybot.services.delivery import message_loop
@@ -49,9 +50,13 @@ def _run(monkeypatch: pytest.MonkeyPatch, **extra: str) -> dict[str, Any]:
         return _noop()
 
     monkeypatch.setattr(entry, "_irc_main", fake_main)
-    # `run_irc` owns the event loop; the caller may already be inside one.
-    monkeypatch.setattr(asyncio, "run", lambda coro: coro.close())
-    assert entry.main() == 0
+    # Build the graph directly rather than through `main()`: the split into
+    # build + start (#78) is exactly what lets a caller inspect it without
+    # owning an event loop.
+    runtime = entry.build_irc(load_config())
+    runtime.start().close()
+    seen["release"] = runtime.release
+    seen["platform"] = runtime.platform
     return seen
 
 
@@ -322,11 +327,6 @@ async def test_the_loops_are_cancelled_when_the_peer_closes(
         await asyncio.Event().wait()  # never completes on its own
 
     monkeypatch.setattr(entry, "message_loop", forever)
-    released: list[int] = []
-
-    async def release() -> None:
-        released.append(1)
-
     await _REAL_IRC_MAIN(
         seen["config"],
         seen["gateway"],
@@ -334,7 +334,54 @@ async def test_the_loops_are_cancelled_when_the_peer_closes(
         None,
         collectors=((cast("Any", object()), "repo_notify"),),
         counters=Counters(),
-        release=release,
     )
-    assert started == ["repo_notify"]  # it ran...
-    assert released == [1]  # ...and _irc_main still returned, clients closed
+    assert started == ["repo_notify"]  # it ran, and _irc_main still returned
+
+
+def test_run_irc_builds_then_runs_the_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The isolated job still owns its loop; only the split moved (#78)."""
+    _irc_env(monkeypatch)
+    ran: list[str] = []
+    released: list[int] = []
+
+    async def fake_start() -> None:
+        ran.append("started")
+
+    async def release() -> None:
+        released.append(1)
+
+    monkeypatch.setattr(
+        entry,
+        "build_irc",
+        lambda _config: entry.PlatformRuntime(start=fake_start, release=release, platform="irc"),
+    )
+    assert entry.main() == 0
+    assert (ran, released) == (["started"], [1])
+
+
+async def test_the_bridge_can_reach_irc_only_once_the_socket_is_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IRC's transport needs a live connection, unlike Telegram's bot or
+    the Discord client — so the router learns about it late."""
+    seen = _gateway_for(monkeypatch)
+    _dial(monkeypatch, b"")
+    registered: dict[str, Any] = {}
+
+    class _Router:
+        def register(self, platform: str, transport: Any) -> None:
+            registered[platform] = transport
+
+    await _REAL_IRC_MAIN(seen["config"], seen["gateway"], None, None, bridge=cast("Any", _Router()))
+
+    assert isinstance(registered["irc"], IrcTransport)
+
+
+async def test_a_runtime_with_nothing_to_release_still_unwinds() -> None:
+    ran: list[str] = []
+
+    async def start() -> None:
+        ran.append("started")
+
+    await entry._run_alone(entry.PlatformRuntime(start=start))
+    assert ran == ["started"]

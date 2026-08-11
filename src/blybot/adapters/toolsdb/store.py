@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     events_enabled TINYINT(1) NOT NULL DEFAULT 0,
     capture_enabled TINYINT(1) NULL DEFAULT NULL,
     subscribe_code VARCHAR(32) NULL DEFAULT NULL,
+    bridge_id VARCHAR(32) NULL DEFAULT NULL,
     rules_json TEXT NULL,
     llm_json TEXT NULL,
     cursors_json TEXT NULL,
@@ -91,12 +92,19 @@ CREATE TABLE IF NOT EXISTS profiles (
 
 _PROFILE_COLUMNS: Final = (
     "platform, channel, thread, log_page, repo, consent_mode, events_enabled, "
-    "capture_enabled, rules_json, llm_json, subscribe_code, token_ciphertext IS NOT NULL"
+    "capture_enabled, rules_json, llm_json, subscribe_code, bridge_id, "
+    "token_ciphertext IS NOT NULL"
 )
 _KEY: Final = "platform = %s AND channel = %s AND thread = %s"
 Q_GET: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE {_KEY}"  # noqa: S608
 # Resolve a subscribe deep-link code back to its scope (unique random code).
 Q_GET_BY_CODE: Final = f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE subscribe_code = %s"  # noqa: S608
+# Every scope that joined one bridge. Ordered so the member list a channel
+# is shown, and the announcement fan-out, are stable across calls.
+Q_LIST_BRIDGE_MEMBERS: Final = (
+    f"SELECT {_PROFILE_COLUMNS} FROM profiles WHERE bridge_id = %s "  # noqa: S608
+    "ORDER BY platform, channel, thread"
+)
 # The ORDER BY makes the scan order stable across ticks, which the
 # per-tick rotation in the scheduler/notifier relies on to keep any scope
 # above the cap from being permanently starved.
@@ -113,13 +121,14 @@ Q_LIST_CAPTURE_ENABLED: Final = (
 Q_UPSERT: Final = """
 INSERT INTO profiles
     (platform, channel, thread, chat_id, thread_id, log_page, repo, consent_mode,
-     events_enabled, capture_enabled, rules_json, llm_json, subscribe_code)
-VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+     events_enabled, capture_enabled, rules_json, llm_json, subscribe_code, bridge_id)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON DUPLICATE KEY UPDATE chat_id = VALUES(chat_id), thread_id = VALUES(thread_id),
     log_page = VALUES(log_page), repo = VALUES(repo),
     consent_mode = VALUES(consent_mode), events_enabled = VALUES(events_enabled),
     capture_enabled = VALUES(capture_enabled), rules_json = VALUES(rules_json),
-    llm_json = VALUES(llm_json), subscribe_code = VALUES(subscribe_code)
+    llm_json = VALUES(llm_json), subscribe_code = VALUES(subscribe_code),
+    bridge_id = VALUES(bridge_id)
 """
 Q_DELETE: Final = f"DELETE FROM profiles WHERE {_KEY}"  # noqa: S608
 Q_GET_CURSORS: Final = f"SELECT cursors_json FROM profiles WHERE {_KEY}"  # noqa: S608
@@ -172,6 +181,12 @@ MIGRATE_CAPTURE_UNSET: Final = (
 MIGRATE_ADD_LLM: Final = "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS llm_json TEXT NULL"
 MIGRATE_ADD_SUBSCRIBE_CODE: Final = (
     "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS subscribe_code VARCHAR(32) NULL DEFAULT NULL"
+)
+# Bridge membership (#81). Non-null means this scope's admin opted it into
+# that bridge; the column IS the consent record, so it is deliberately
+# nullable with no default rather than inferred from anything else.
+MIGRATE_ADD_BRIDGE_ID: Final = (
+    "ALTER TABLE profiles ADD COLUMN IF NOT EXISTS bridge_id VARCHAR(32) NULL DEFAULT NULL"
 )
 # The opaque string identity (scope PR-2). Added in place on older tables;
 # each ADD is a no-op once applied. The DEFAULTs mean every pre-existing
@@ -336,6 +351,7 @@ class ToolsDbStore:
         await self._run(MIGRATE_ADD_CAPTURE, ())
         await self._run(MIGRATE_ADD_LLM, ())
         await self._run(MIGRATE_ADD_SUBSCRIBE_CODE, ())
+        await self._run(MIGRATE_ADD_BRIDGE_ID, ())
         await self._run(MIGRATE_ADD_PLATFORM, ())
         await self._run(MIGRATE_ADD_CHANNEL, ())
         await self._run(MIGRATE_ADD_THREAD_STR, ())
@@ -368,6 +384,11 @@ class ToolsDbStore:
         rows = await self._run(Q_GET_BY_CODE, (code,))
         return _profile_from_row(rows[0]) if rows else None
 
+    async def list_bridge_members(self, bridge_id: str) -> list[GroupProfile]:
+        """Return every scope that has joined the given bridge."""
+        rows = await self._run(Q_LIST_BRIDGE_MEMBERS, (bridge_id,))
+        return [_profile_from_row(row) for row in rows]
+
     async def upsert(self, profile: GroupProfile) -> None:
         """Create or update the profile (token and cursors are untouched)."""
         platform, channel, thread = _keys(profile.scope)
@@ -388,6 +409,7 @@ class ToolsDbStore:
                 dumps_rules(profile.rules),
                 dumps_llm(profile.llm) if profile.llm is not None else None,
                 profile.subscribe_code,
+                profile.bridge_id,
             ),
         )
 
@@ -513,6 +535,7 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         rules_json,
         llm_json,
         subscribe_code,
+        bridge_id,
         has_token,
     ) = row
     return GroupProfile(
@@ -525,5 +548,6 @@ def _profile_from_row(row: tuple[Any, ...]) -> GroupProfile:
         rules=loads_rules(rules_json),
         llm=loads_llm(llm_json),
         subscribe_code=subscribe_code,
+        bridge_id=bridge_id,
         has_token=bool(has_token),
     )

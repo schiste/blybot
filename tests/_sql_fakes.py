@@ -45,6 +45,7 @@ from blybot.adapters.toolsdb.archive import Q_MIGRATE as MSG_Q_MIGRATE
 from blybot.adapters.toolsdb.archive import Q_MIGRATE_CLEAR as MSG_Q_MIGRATE_CLEAR
 from blybot.adapters.toolsdb.store import (
     MIGRATE_ADD_ACTIONS,
+    MIGRATE_ADD_BRIDGE_ID,
     MIGRATE_ADD_CAPTURE,
     MIGRATE_ADD_CHANNEL,
     MIGRATE_ADD_CURSORS,
@@ -70,6 +71,7 @@ from blybot.adapters.toolsdb.store import (
     Q_GET,
     Q_GET_BY_CODE,
     Q_GET_CURSORS,
+    Q_LIST_BRIDGE_MEMBERS,
     Q_LIST_CAPTURE_ENABLED,
     Q_LIST_EVENT_ENABLED,
     Q_MIGRATE,
@@ -124,6 +126,7 @@ class FakeToolsDb:
         "rules_json": None,
         "llm_json": None,
         "subscribe_code": None,
+        "bridge_id": None,
         "token": None,
         "cursors": None,
         "actions": None,
@@ -192,6 +195,7 @@ class FakeToolsDb:
             row["rules_json"],
             row["llm_json"],
             row["subscribe_code"],
+            row["bridge_id"],
             row["token"] is not None,
         )
 
@@ -246,6 +250,7 @@ class FakeToolsDb:
             MIGRATE_ADD_CAPTURE,
             MIGRATE_ADD_LLM,
             MIGRATE_ADD_SUBSCRIBE_CODE,
+            MIGRATE_ADD_BRIDGE_ID,
             MIGRATE_ADD_PLATFORM,
             MIGRATE_ADD_CHANNEL,
             MIGRATE_ADD_THREAD_STR,
@@ -307,6 +312,7 @@ class FakeToolsDb:
                 rules,
                 llm,
                 code,
+                bridge_id,
             ) = params
             row = self._upsert_row(platform, channel, thread, chat_id, thread_id)
             row.update(
@@ -318,6 +324,7 @@ class FakeToolsDb:
                 rules_json=rules,
                 llm_json=llm,
                 subscribe_code=code,
+                bridge_id=bridge_id,
             )
             return []
         if query == Q_GET:
@@ -327,6 +334,9 @@ class FakeToolsDb:
             (code,) = params
             hits = [r for r in self.rows if r["subscribe_code"] == code]
             return [self._as_profile_row(hits[0])] if hits else []
+        if query == Q_LIST_BRIDGE_MEMBERS:
+            (bridge_id,) = params
+            return [self._as_profile_row(r) for r in self._sorted() if r["bridge_id"] == bridge_id]
         if query == Q_LIST_EVENT_ENABLED:
             return [self._as_profile_row(r) for r in self._sorted() if r["events_enabled"]]
         if query == Q_LIST_CAPTURE_ENABLED:

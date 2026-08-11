@@ -324,6 +324,11 @@ class GroupProfile:
     # Non-null ⇒ the scope is subscribable; the value is the random
     # deep-link capability code an admin minted with /subscribable on.
     subscribe_code: str | None = None
+    # Non-null ⇒ this scope is a member of that bridge (#81). The value is
+    # both the bridge's identity and the capability code another channel's
+    # admin redeems to join it, so membership *is* the record of consent:
+    # it can only be set by an admin running a command in this very scope.
+    bridge_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

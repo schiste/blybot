@@ -175,6 +175,14 @@ class ChannelDirectory:
         """Set (or with ``None`` clear) this scope's digest-subscribe code (§21)."""
         await self._update(scope, subscribe_code=code)
 
+    async def set_bridge(self, scope: Scope, bridge_id: str | None) -> None:
+        """Join this scope to a bridge, or with ``None`` sever it (#81).
+
+        The stored value *is* the consent record: it can only be written
+        by an admin acting in this very scope.
+        """
+        await self._update(scope, bridge_id=bridge_id)
+
     async def enable_events(self, scope: Scope, seed_rules: tuple[Rule, ...]) -> bool:
         """Enable notifications, seeding ``seed_rules`` iff none exist yet.
 

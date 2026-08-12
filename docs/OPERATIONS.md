@@ -203,7 +203,8 @@ identity and no grant that outlives a redeploy.
 Operator-only: `capture on|off`, `setpage`, `settings`, `reset`,
 `setrepo`, `revoke`, `llm`, `events`, `rule`, `rules`, `action`,
 `bridge new|join <code>|leave|show`.
-Open to anyone: `issue`, `repo`, `help`.
+Open to anyone: `log <text>`, `issue`, `repo`, `help`, and the analyses
+(`summarize`, `stats`, `talkingpoints`, `run <template>`).
 
 The practical consequence for an operator: **the trust boundary is the
 channel's op list, not individual people.** The bot cannot tell one human
@@ -215,6 +216,39 @@ the bot cannot parse unambiguously is ignored rather than guessed at — so
 the worst case is an operator having to re-op, never an outsider gaining
 the admin surface. If a legitimate op is refused, `!settings` will say so;
 re-opping them (`/mode #chan +o nick`) resyncs it.
+
+#### Logging a message on IRC — and how it differs
+
+`log <text>` publishes that text to the channel's wiki page, unattributed.
+
+**It is not the same feature as `/log` elsewhere, and the difference is
+worth understanding before offering it to a channel.** On Telegram and
+Discord the bot republishes a message it *witnessed* — you point at the
+message and the platform hands the bot its content. IRC's `PRIVMSG`
+carries no message id and no reply reference, so there is nothing to
+point at. The alternative would be for the bot to retain recent channel
+lines so one could be named later, and that was rejected: it would mean
+passively holding conversation the bot was never asked to keep.
+
+So the requester quotes the text themselves, and **the bot stores
+nothing**. The consequences:
+
+- The wiki records *what someone typed*, not what the bot saw said. The
+  page implies the words were spoken in the channel, and nothing verifies
+  that. Entries are unattributed either way, so no individual is
+  misquoted by name — but a channel's log page is only as reliable as the
+  people using the command.
+- **`CONSENT_MODE=author_only` refuses `log` outright on IRC.** That
+  policy exists so only a message's author may publish it, and the bot
+  cannot tell whose words a retyped line is. It fails closed rather than
+  guessing.
+- **The requester cannot be hidden.** Telegram deletes the `/log`
+  command; Discord never creates a message. IRC has neither
+  (`message_delete=False`), so `log` stays visible in the channel
+  permanently. The published entry is still unattributed, but everyone
+  present saw who asked for it.
+
+Ordinary rate limits and the wiki sanitizer apply exactly as elsewhere.
 
 #### Capture consent on IRC
 

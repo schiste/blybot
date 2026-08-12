@@ -44,7 +44,7 @@ def _stub_builders(monkeypatch: pytest.MonkeyPatch, built: dict[str, Any]) -> No
     """Replace each platform builder with one that records its router."""
 
     def make(name: str) -> Any:
-        def build(_config: Any, bridge: Any = None) -> entry.PlatformRuntime:
+        def build(_config: Any, _infra: Any = None, bridge: Any = None) -> entry.PlatformRuntime:
             built[name] = bridge
 
             async def start() -> None:
@@ -217,3 +217,80 @@ async def test_the_relay_drains_are_cancelled_with_the_platforms() -> None:
     )
 
     assert drained == ["cancelled"]
+
+
+def test_the_shared_tier_is_built_once_for_the_whole_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three roots used to construct these each; under PLATFORM=unified that
+    meant one process opening three ToolsDB connections and three HTTP
+    clients to serve one config."""
+    _unified_env(
+        monkeypatch,
+        IRC_SERVER="irc.libera.chat",
+        DISCORD_BOT_TOKEN="dc",  # noqa: S106 -- test fixture, not a secret
+        PROFILE_ENCRYPTION_KEY=Fernet.generate_key().decode(),
+        ARCHIVE_PSEUDONYM_KEY="long-random-operator-key",
+    )
+    seen: list[Any] = []
+    real = entry.build_infrastructure
+
+    def once(config: Any) -> Any:
+        infra = real(config)
+        seen.append(infra)
+        return infra
+
+    monkeypatch.setattr(entry, "build_infrastructure", once)
+    built: dict[str, Any] = {}
+    _stub_builders(monkeypatch, built)
+    _never_run(monkeypatch)
+
+    assert entry.main() == 0
+
+    assert len(seen) == 1  # one publisher, one runner, one model client
+    assert seen[0].store is not None
+    assert seen[0].archive is not None
+    assert seen[0].llm is not None
+
+
+def test_storage_is_a_tier_not_a_flag() -> None:
+    """No key means no store; a store without a pseudonym key means no
+    archive, and therefore no capture, analyses or subscriptions."""
+    base = dict(REQUIRED) | {"PLATFORM": "unified"}
+
+    bare = entry.build_infrastructure(load_config(base))
+    assert (bare.store, bare.archive, bare.subscriptions, bare.llm) == (None, None, None, None)
+
+    keyed = entry.build_infrastructure(
+        load_config(base | {"PROFILE_ENCRYPTION_KEY": Fernet.generate_key().decode()})
+    )
+    assert keyed.store is not None
+    assert (keyed.archive, keyed.subscriptions, keyed.llm) == (None, None, None)
+
+
+async def test_closing_the_tier_releases_every_client_it_opened(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A leaked HTTP client outlives the process it was opened for."""
+    base = dict(REQUIRED) | {
+        "PLATFORM": "unified",
+        "PROFILE_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+        "ARCHIVE_PSEUDONYM_KEY": "long-random-operator-key",
+    }
+    infra = entry.build_infrastructure(load_config(base))
+    closed: list[str] = []
+
+    def recording(name: str) -> Any:
+        async def aclose() -> None:
+            closed.append(name)
+
+        return aclose
+
+    assert infra.llm is not None
+    monkeypatch.setattr(infra.publisher, "aclose", recording("publisher"))
+    monkeypatch.setattr(infra.repo_gateway, "aclose", recording("repo"))
+    monkeypatch.setattr(infra.llm, "aclose", recording("llm"))
+
+    await infra.aclose()
+
+    assert sorted(closed) == ["llm", "publisher", "repo"]

@@ -275,7 +275,7 @@ def test_the_unified_start_polls_on_the_callers_loop(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(entry, "build_polling_application", _capturing({}))
     monkeypatch.setattr(entry, "poll_until_cancelled", fake_poll)
 
-    runtime = entry.build_telegram(load_config())
+    runtime = entry.build_telegram(load_config(), entry.build_infrastructure(load_config()))
     runtime.start().close()
 
     assert len(polled) == 1

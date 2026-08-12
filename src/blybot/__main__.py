@@ -116,17 +116,19 @@ def run_unified(config: Config) -> int:
     cannot touch another's. That is why unified mode is opt-in rather
     than the default.
     """
-    counters = Counters()
     router = BridgeRouter(
-        bridge=BridgeService(counters=counters, bot_authors=_bot_authors(config)),
-        store=_bridge_store(config),
+        bridge=BridgeService(counters=Counters(), bot_authors=_bot_authors(config))
     )
     builders = (
         ("telegram", build_telegram),
         ("discord", build_discord),
         ("irc", build_irc),
     )
-    runtimes = [build(config, router) for name, build in builders if _configured(config, name)]
+    infra = build_infrastructure(config)
+    router.store = infra.store
+    runtimes = [
+        build(config, infra, router) for name, build in builders if _configured(config, name)
+    ]
     if not runtimes:
         print("configuration error: unified mode needs at least one platform", file=sys.stderr)
         return 2
@@ -135,18 +137,6 @@ def run_unified(config: Config) -> int:
             router.register(runtime.platform, runtime.transport)
     asyncio.run(_run_together(runtimes, router))
     return 0
-
-
-def _bridge_store(config: Config) -> ToolsDbStore | None:
-    """The store the router reads bridge membership from, if configured."""
-    if not config.profile_encryption_key:
-        return None
-    runner = PymysqlRunner(
-        host=config.toolsdb_host,
-        database=config.toolsdb_name,
-        cnf_path=Path(config.toolsdb_cnf),
-    )
-    return ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
 
 
 def _bot_authors(config: Config) -> dict[str, str]:
@@ -197,6 +187,82 @@ async def _run_together(
 
 
 @dataclass(eq=False)
+class Infrastructure:
+    """Everything a deployment shares, built once per process.
+
+    The three roots each used to construct these, which was harmless while
+    a process ran one platform and wasteful the moment `PLATFORM=unified`
+    made it run three: one process opened three ToolsDB connections, three
+    wiki clients and three LiftWing clients to serve one config.
+
+    Storage is a tier, not a flag: no encryption key means no store at
+    all; a store without a pseudonym key means no archive and therefore no
+    capture, analyses or subscriptions.
+    """
+
+    counters: Counters
+    clock: SystemClock
+    publisher: MetaWikiPublisher
+    sanitizer: WikitextSanitizer
+    repo_gateway: GitHubRepoGateway
+    group_policy: GroupPolicy
+    store: ToolsDbStore | None = None
+    archive: ToolsDbArchive | None = None
+    subscriptions: ToolsDbSubscriptions | None = None
+    llm: LiftWingClient | None = None
+
+    async def aclose(self) -> None:
+        """Release every HTTP client this process opened."""
+        await self.publisher.aclose()
+        await self.repo_gateway.aclose()
+        if self.llm is not None:
+            await self.llm.aclose()
+
+
+def build_infrastructure(config: Config) -> Infrastructure:
+    """Construct the shared tier once for this process."""
+    counters = Counters()
+    infra = Infrastructure(
+        counters=counters,
+        clock=SystemClock(),
+        publisher=MetaWikiPublisher(
+            api_url=config.wiki_api_url,
+            username=config.wiki_username,
+            botpassword=config.wiki_botpassword,
+            user_agent=config.user_agent,
+            max_attempts=config.wiki_max_retries,
+            counters=counters,
+        ),
+        sanitizer=WikitextSanitizer(),
+        repo_gateway=GitHubRepoGateway(user_agent=config.user_agent),
+        group_policy=GroupPolicy(allowed=set(config.allowed_group_ids)),
+    )
+    if not config.profile_encryption_key:
+        return infra
+    runner = PymysqlRunner(
+        host=config.toolsdb_host,
+        database=config.toolsdb_name,
+        cnf_path=Path(config.toolsdb_cnf),
+    )
+    infra.store = ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
+    if not config.archive_pseudonym_key:
+        return infra
+    infra.archive = ToolsDbArchive(runner=runner)
+    infra.subscriptions = ToolsDbSubscriptions(runner=runner)
+    infra.llm = LiftWingClient(
+        api_base=config.liftwing_api_base,
+        user_agent=config.user_agent,
+        models={
+            "default": config.liftwing_model_default,
+            "large": config.liftwing_model_large,
+        },
+        timeout_seconds=config.liftwing_timeout_seconds,
+        counters=counters,
+    )
+    return infra
+
+
+@dataclass(eq=False)
 class PlatformRuntime:
     """One platform, built and ready to run inside someone else's loop.
 
@@ -238,20 +304,11 @@ def main() -> int:
 
 
 def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph once
-    config: Config, bridge: BridgeRouter | None = None
+    config: Config, infra: Infrastructure, bridge: BridgeRouter | None = None
 ) -> PlatformRuntime:
     """Build the Telegram object graph and start long polling."""
-    counters = Counters()
-    clock = SystemClock()
-    sanitizer = WikitextSanitizer()
-    publisher = MetaWikiPublisher(
-        api_url=config.wiki_api_url,
-        username=config.wiki_username,
-        botpassword=config.wiki_botpassword,
-        user_agent=config.user_agent,
-        max_attempts=config.wiki_max_retries,
-        counters=counters,
-    )
+    counters, clock = infra.counters, infra.clock
+    sanitizer, publisher = infra.sanitizer, infra.publisher
     pseudonyms = RandomPseudonymFactory()
     sessions = SessionRegistry(
         pseudonyms=pseudonyms,
@@ -269,28 +326,15 @@ def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph onc
     )
     routes = DmRouteRegistry(clock=clock, route_ttl=config.session_ttl)
     pending_dms = PendingDmMessages(clock=clock)
-    # The key was validated at load; construction can't raise on it.
-    store: ToolsDbStore | None = None
-    archive: ToolsDbArchive | None = None
-    subscriptions_store: ToolsDbSubscriptions | None = None
+    store, archive = infra.store, infra.archive
+    subscriptions_store, llm_client = infra.subscriptions, infra.llm
     capture_service: CaptureService | None = None
     capture_handlers: CaptureHandlers | None = None
-    llm_client: LiftWingClient | None = None
     analysis_handlers: AnalysisHandlers | None = None
     llm_defaults: LlmSettings | None = None
-    if config.profile_encryption_key:
-        runner = PymysqlRunner(
-            host=config.toolsdb_host,
-            database=config.toolsdb_name,
-            cnf_path=Path(config.toolsdb_cnf),
-        )
-        store = ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
-        if config.archive_pseudonym_key:
-            archive = ToolsDbArchive(runner=runner)
-            subscriptions_store = ToolsDbSubscriptions(runner=runner)
     binding = TokenBinding(clock=clock)
     subscription_binding = SubscriptionBinding(clock=clock)
-    gateway = GitHubRepoGateway(user_agent=config.user_agent)
+    gateway = infra.repo_gateway
     tracker = (
         GitHubIssueTracker(
             repo=config.github_repo,
@@ -301,7 +345,7 @@ def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph onc
         else None
     )
 
-    group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
+    group_policy = infra.group_policy
     directory = ChannelDirectory(
         store=store,
         default_log_page=config.log_target_page,
@@ -338,18 +382,13 @@ def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph onc
     # The archive and the subscription store are created together (both
     # need ARCHIVE_PSEUDONYM_KEY), so naming all three keeps the analysis
     # tier's precondition in one place.
-    if store is not None and archive is not None and subscriptions_store is not None:
+    if (
+        store is not None
+        and archive is not None
+        and subscriptions_store is not None
+        and llm_client is not None
+    ):
         llm_defaults = LlmSettings(lang=config.llm_default_lang)
-        llm_client = LiftWingClient(
-            api_base=config.liftwing_api_base,
-            user_agent=config.user_agent,
-            models={
-                "default": config.liftwing_model_default,
-                "large": config.liftwing_model_large,
-            },
-            timeout_seconds=config.liftwing_timeout_seconds,
-            counters=counters,
-        )
         sources["archive_window"] = ArchiveWindowSource(archive=archive)
         transforms["prompt"] = PromptTransform(
             runners={"liftwing": llm_client},
@@ -451,12 +490,11 @@ def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph onc
     )
 
     async def release_clients() -> None:
-        await publisher.aclose()
-        await gateway.aclose()
+        # The bot's own /bug tracker is Telegram-only, so it is closed here
+        # rather than in the shared tier.
+        await infra.aclose()
         if tracker is not None:
             await tracker.aclose()
-        if llm_client is not None:
-            await llm_client.aclose()
 
     private_handlers = PrivateHandlers(
         transcription=transcription,
@@ -596,7 +634,7 @@ def build_telegram(  # noqa: PLR0915 -- the root enumerates the object graph onc
 
 def run_telegram(config: Config) -> int:
     """Build the Telegram object graph and start long polling."""
-    runtime = build_telegram(config)
+    runtime = build_telegram(config, build_infrastructure(config))
     # Always set for Telegram: `run_polling` installs the signal handlers a
     # Toolforge SIGTERM needs, which the shared async path cannot provide.
     assert runtime.run_alone is not None  # noqa: S101 -- structural, not a check
@@ -645,7 +683,7 @@ async def _discord_startup(  # noqa: PLR0913 -- setup-hook wiring enumerates its
 
 
 def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
-    config: Config, bridge: BridgeRouter | None = None
+    config: Config, infra: Infrastructure, bridge: BridgeRouter | None = None
 ) -> PlatformRuntime:
     """Build the Discord object graph and start the gateway client.
 
@@ -653,32 +691,11 @@ def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
     scheduler, repo notifier, action scheduler, archive, store) — only the
     transport and the inbound event shell are Discord-specific.
     """
-    counters = Counters()
-    clock = SystemClock()
-    sanitizer = WikitextSanitizer()
-    publisher = MetaWikiPublisher(
-        api_url=config.wiki_api_url,
-        username=config.wiki_username,
-        botpassword=config.wiki_botpassword,
-        user_agent=config.user_agent,
-        max_attempts=config.wiki_max_retries,
-        counters=counters,
-    )
-    group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
-
-    store: ToolsDbStore | None = None
-    archive: ToolsDbArchive | None = None
-    subscriptions_store: ToolsDbSubscriptions | None = None
-    if config.profile_encryption_key:
-        runner = PymysqlRunner(
-            host=config.toolsdb_host,
-            database=config.toolsdb_name,
-            cnf_path=Path(config.toolsdb_cnf),
-        )
-        store = ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
-        if config.archive_pseudonym_key:
-            archive = ToolsDbArchive(runner=runner)
-            subscriptions_store = ToolsDbSubscriptions(runner=runner)
+    counters, clock = infra.counters, infra.clock
+    sanitizer, publisher = infra.sanitizer, infra.publisher
+    group_policy = infra.group_policy
+    store, archive = infra.store, infra.archive
+    subscriptions_store = infra.subscriptions
 
     directory = ChannelDirectory(
         store=store,
@@ -688,8 +705,8 @@ def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
         page_suffix=config.wiki_page_suffix,
     )
 
-    repo_gateway = GitHubRepoGateway(user_agent=config.user_agent)
-    llm_client: LiftWingClient | None = None
+    repo_gateway = infra.repo_gateway
+    llm_client = infra.llm
     capture_service: CaptureService | None = None
     masker: DiscordAuthorMasker | None = None
     analysis_service: AnalysisService | None = None
@@ -719,18 +736,13 @@ def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
         sources["repo_events"] = RepoEventsSource(store=store, vault=store, gateway=repo_gateway)
         transforms["rule_match"] = RuleMatchTransform(counters=counters)
         sinks["chat_message"] = ChatMessagesSink()
-    if store is not None and archive is not None and subscriptions_store is not None:
+    if (
+        store is not None
+        and archive is not None
+        and subscriptions_store is not None
+        and llm_client is not None
+    ):
         llm_defaults = LlmSettings(lang=config.llm_default_lang)
-        llm_client = LiftWingClient(
-            api_base=config.liftwing_api_base,
-            user_agent=config.user_agent,
-            models={
-                "default": config.liftwing_model_default,
-                "large": config.liftwing_model_large,
-            },
-            timeout_seconds=config.liftwing_timeout_seconds,
-            counters=counters,
-        )
         sources["archive_window"] = ArchiveWindowSource(archive=archive)
         transforms["prompt"] = PromptTransform(
             runners={"liftwing": llm_client},
@@ -891,10 +903,7 @@ def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
         # burst of a private discussion is lost on shutdown (as Telegram's
         # Lifecycle already does).
         await transcription.flush_all()
-        await publisher.aclose()
-        await repo_gateway.aclose()
-        if llm_client is not None:
-            await llm_client.aclose()
+        await infra.aclose()
 
     bootstrap: Callable[[], Awaitable[None]] | None = None
     if store is not None:
@@ -939,13 +948,13 @@ def build_discord(  # noqa: PLR0915 -- the root enumerates the object graph once
 
 def run_discord(config: Config) -> int:
     """Build the Discord object graph and start the gateway."""
-    runtime = build_discord(config)
+    runtime = build_discord(config, build_infrastructure(config))
     asyncio.run(_run_alone(runtime))
     return 0
 
 
-def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
-    config: Config, bridge: BridgeRouter | None = None
+def build_irc(
+    config: Config, infra: Infrastructure, bridge: BridgeRouter | None = None
 ) -> PlatformRuntime:
     """Build the IRC object graph and run the session until the peer closes.
 
@@ -955,21 +964,9 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
     a bare channel. What it does get is capture and the neutral analysis
     pipeline behind it — the reason the adapter is worth having.
     """
-    counters = Counters()
-    clock = SystemClock()
-    group_policy = GroupPolicy(allowed=set(config.allowed_group_ids))
-
-    store: ToolsDbStore | None = None
-    archive: ToolsDbArchive | None = None
-    if config.profile_encryption_key:
-        runner = PymysqlRunner(
-            host=config.toolsdb_host,
-            database=config.toolsdb_name,
-            cnf_path=Path(config.toolsdb_cnf),
-        )
-        store = ToolsDbStore(runner=runner, fernet_key=config.profile_encryption_key)
-        if config.archive_pseudonym_key:
-            archive = ToolsDbArchive(runner=runner)
+    counters, clock = infra.counters, infra.clock
+    group_policy = infra.group_policy
+    store, archive = infra.store, infra.archive
 
     directory = ChannelDirectory(
         store=store,
@@ -978,17 +975,9 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
         default_repo="",
         page_suffix=config.wiki_page_suffix,
     )
-    publisher = MetaWikiPublisher(
-        api_url=config.wiki_api_url,
-        username=config.wiki_username,
-        botpassword=config.wiki_botpassword,
-        user_agent=config.user_agent,
-        max_attempts=config.wiki_max_retries,
-        counters=counters,
-    )
-    sanitizer = WikitextSanitizer()
-    repo_gateway = GitHubRepoGateway(user_agent=config.user_agent)
-    llm_client: LiftWingClient | None = None
+    publisher, sanitizer = infra.publisher, infra.sanitizer
+    repo_gateway = infra.repo_gateway
+    llm_client = infra.llm
     capture_service: CaptureService | None = None
     masker: IrcAuthorMasker | None = None
     analysis_service: AnalysisService | None = None
@@ -1003,18 +992,8 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
         sources["repo_events"] = RepoEventsSource(store=store, vault=store, gateway=repo_gateway)
         transforms["rule_match"] = RuleMatchTransform(counters=counters)
         sinks["chat_message"] = ChatMessagesSink()
-    if store is not None and archive is not None:
+    if store is not None and archive is not None and llm_client is not None:
         llm_defaults = LlmSettings(lang=config.llm_default_lang)
-        llm_client = LiftWingClient(
-            api_base=config.liftwing_api_base,
-            user_agent=config.user_agent,
-            models={
-                "default": config.liftwing_model_default,
-                "large": config.liftwing_model_large,
-            },
-            timeout_seconds=config.liftwing_timeout_seconds,
-            counters=counters,
-        )
         sources["archive_window"] = ArchiveWindowSource(archive=archive)
         transforms["prompt"] = PromptTransform(
             runners={"liftwing": llm_client},
@@ -1130,12 +1109,6 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
         analysis=analysis_service,
     )
 
-    async def release_clients() -> None:
-        await publisher.aclose()
-        await repo_gateway.aclose()
-        if llm_client is not None:
-            await llm_client.aclose()
-
     def start() -> Coroutine[Any, Any, None]:
         return _irc_main(
             config,
@@ -1147,12 +1120,12 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
             bridge=bridge,
         )
 
-    return PlatformRuntime(start=start, release=release_clients, platform="irc")
+    return PlatformRuntime(start=start, release=infra.aclose, platform="irc")
 
 
 def run_irc(config: Config) -> int:
     """Build the IRC object graph and run the session until the peer closes."""
-    runtime = build_irc(config)
+    runtime = build_irc(config, build_infrastructure(config))
     asyncio.run(_run_alone(runtime))
     return 0
 

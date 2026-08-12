@@ -53,7 +53,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, **extra: str) -> dict[str, Any]:
     # Build the graph directly rather than through `main()`: the split into
     # build + start (#78) is exactly what lets a caller inspect it without
     # owning an event loop.
-    runtime = entry.build_irc(load_config())
+    runtime = entry.build_irc(load_config(), entry.build_infrastructure(load_config()))
     runtime.start().close()
     seen["release"] = runtime.release
     seen["platform"] = runtime.platform
@@ -353,7 +353,9 @@ def test_run_irc_builds_then_runs_the_graph(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         entry,
         "build_irc",
-        lambda _config: entry.PlatformRuntime(start=fake_start, release=release, platform="irc"),
+        lambda _config, _infra=None: entry.PlatformRuntime(
+            start=fake_start, release=release, platform="irc"
+        ),
     )
     assert entry.main() == 0
     assert (ran, released) == (["started"], [1])

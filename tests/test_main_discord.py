@@ -36,7 +36,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, **extra: str) -> dict[str, Any]:
     an event loop: `start()` is a coroutine the caller decides to run.
     """
     _discord_env(monkeypatch, **extra)
-    runtime = entry.build_discord(load_config())
+    runtime = entry.build_discord(load_config(), entry.build_infrastructure(load_config()))
     started = runtime.start()
     started.close()  # never actually dial Discord
     client = cast("DiscordGatewayClient", runtime.transport.client)  # type: ignore[union-attr]
@@ -281,7 +281,9 @@ def test_main_dispatches_to_the_selected_platform(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(
         entry,
         "build_discord",
-        lambda _config: entry.PlatformRuntime(start=start, release=release, platform="discord"),
+        lambda _config, _infra=None: entry.PlatformRuntime(
+            start=start, release=release, platform="discord"
+        ),
     )
     assert entry.main() == 0
     assert (ran, released) == (["started"], [1])

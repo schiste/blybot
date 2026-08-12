@@ -1139,6 +1139,18 @@ async def _run_alone(runtime: PlatformRuntime) -> None:
             await runtime.release()
 
 
+def _irc_realname(config: Config) -> str:
+    """What the bot tells an IRC network it is, and who runs it.
+
+    Libera's bot policy requires a bot be clearly labelled as one and
+    attributable to its administrator. IRC's realname field is the only
+    place in the protocol to carry that, so it is built from the operator's
+    own configuration rather than left as the bare nick.
+    """
+    label = f"{config.bot_name} (bot)"
+    return f"{label} — admin: {config.maintainer}" if config.maintainer else label
+
+
 async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph once
     config: Config,
     gateway: IrcGateway,
@@ -1182,6 +1194,7 @@ async def _irc_main(  # noqa: PLR0913 -- the root enumerates the object graph on
         nick=config.irc_nick,
         channels=config.irc_channels,
         password=config.irc_password,
+        realname=_irc_realname(config),
     )
     transport = IrcTransport(channel=connection)
     if bridge is not None:

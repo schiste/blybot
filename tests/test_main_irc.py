@@ -387,3 +387,20 @@ async def test_a_runtime_with_nothing_to_release_still_unwinds() -> None:
 
     await entry._run_alone(entry.PlatformRuntime(start=start))
     assert ran == ["started"]
+
+
+def test_the_realname_carries_the_operator_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _irc_env(monkeypatch, MAINTAINER="User:Schiste", BOT_NAME="Blybot")
+    assert entry._irc_realname(load_config()) == "Blybot (bot) — admin: User:Schiste"
+
+
+def test_without_a_maintainer_it_still_says_it_is_a_bot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Half the requirement is still better than none — and the operator is
+    told what to set in the runbook."""
+    _irc_env(monkeypatch)
+    monkeypatch.delenv("MAINTAINER", raising=False)
+    assert entry._irc_realname(load_config()) == "Blybot (bot)"

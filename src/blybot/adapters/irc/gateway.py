@@ -415,6 +415,11 @@ class IrcSession:
     nick: str
     channels: Sequence[str]
     password: str = ""
+    # The realname field, which is where IRC carries "what am I and who
+    # runs me". Libera's bot policy requires a bot be clearly labelled as
+    # one and attributable to its administrator; this is the only place in
+    # the protocol to say it, so it is not cosmetic.
+    realname: str = ""
 
     async def register(self) -> None:
         """Send the opening handshake and join the configured channels."""
@@ -422,7 +427,10 @@ class IrcSession:
         # PASS must precede NICK/USER per RFC 1459 §4.1.1, and the whole
         # handshake is one unit: a relay landing between NICK and USER
         # would be sent before the session is registered.
-        handshake += [f"NICK {self.nick}", f"USER {self.nick} 0 * :{self.nick}"]
+        handshake += [
+            f"NICK {self.nick}",
+            f"USER {self.nick} 0 * :{self.realname or self.nick}",
+        ]
         handshake += [f"JOIN {name}" for name in self.channels]
         await self.channel.send_lines(handshake)
         log_startup()

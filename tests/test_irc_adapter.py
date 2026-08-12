@@ -1058,3 +1058,32 @@ async def test_setconsent_and_subscribable_reach_the_neutral_service() -> None:
     assert await gateway.run_command("#chan", "chanop", "subscribable") == (
         REPLY_SUBSCRIBABLE_USAGE
     )
+
+
+async def test_the_handshake_labels_the_bot_and_names_its_admin() -> None:
+    """Libera's bot policy requires a bot be clearly labelled as one and
+    attributable to its administrator; realname is the only field for it."""
+    channel = _RecordingChannel()
+    gateway, _archive = _gateway()
+    session = IrcSession(
+        channel=cast("Any", channel),
+        gateway=gateway,
+        nick="blybot",
+        channels=(),
+        realname="Blybot (bot) — admin: User:Someone",
+    )
+
+    await session.register()
+
+    assert "USER blybot 0 * :Blybot (bot) — admin: User:Someone" in channel.sent
+
+
+async def test_an_unlabelled_bot_falls_back_to_its_nick_not_an_empty_field() -> None:
+    """An empty realname is a protocol error on some servers."""
+    channel = _RecordingChannel()
+    gateway, _archive = _gateway()
+    session = IrcSession(channel=cast("Any", channel), gateway=gateway, nick="blybot", channels=())
+
+    await session.register()
+
+    assert "USER blybot 0 * :blybot" in channel.sent

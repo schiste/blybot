@@ -18,8 +18,11 @@ from blybot.adapters.irc.author_mask import IrcAuthorMasker
 from blybot.adapters.irc.capabilities import IRC_CAPABILITIES
 from blybot.adapters.irc.connection import IrcConnection
 from blybot.adapters.irc.gateway import (
+    REPLY_ANALYSES_OFF_DEPLOY,
+    REPLY_ANALYSING,
     REPLY_CAPTURE_USAGE,
     REPLY_HELP,
+    REPLY_RUN_USAGE,
     IrcGateway,
     IrcSession,
 )
@@ -27,7 +30,13 @@ from blybot.adapters.irc.ops import ChannelOps, strip_prefix
 from blybot.adapters.irc.protocol import LINE_BYTES, parse_line, privmsg_lines
 from blybot.adapters.irc.scope import irc_target, nick_scope, scope_of
 from blybot.adapters.irc.transport import IrcTransport
-from blybot.domain.models import ConsentMode, GroupProfile, OutboundMessage, Scope
+from blybot.domain.models import (
+    CommandResult,
+    ConsentMode,
+    GroupProfile,
+    OutboundMessage,
+    Scope,
+)
 from blybot.domain.ports import TransientTransportError
 from blybot.observability import Counters
 from blybot.services.capture import CaptureService
@@ -826,3 +835,124 @@ async def test_the_bridge_command_reaches_the_neutral_service() -> None:
 
     off = await gateway.run_command("#chan", "chanop", "bridge new")
     assert off == sub.REPLY_BRIDGE_OFF_DEPLOY  # no announcer on this deployment
+
+
+# --- on-demand analyses -------------------------------------------------------
+
+
+class _RecordingAnalysis:
+    """Stands in for AnalysisService, recording what it was asked for."""
+
+    def __init__(self, text: str = "published") -> None:
+        self.calls: list[dict[str, Any]] = []
+        self.text = text
+
+    async def run_analysis(
+        self,
+        scope: Scope,
+        *,
+        is_admin: bool,
+        command: str,
+        recipe: str,
+        tokens: list[str],
+        on_started: Any = None,
+    ) -> Any:
+        self.calls.append(
+            {
+                "scope": scope,
+                "is_admin": is_admin,
+                "command": command,
+                "recipe": recipe,
+                "tokens": tokens,
+            }
+        )
+        if on_started is not None:
+            await on_started()
+        return CommandResult(self.text)
+
+
+async def test_each_analysis_verb_maps_to_its_recipe() -> None:
+    gateway = _op_gateway()
+    analysis = _RecordingAnalysis()
+    gateway.analysis = cast("Any", analysis)
+
+    for verb in ("summarize", "stats", "talkingpoints"):
+        assert await gateway.run_command("#chan", "chanop", verb) == "published"
+    assert [call["recipe"] for call in analysis.calls] == [
+        "summarize",
+        "stats",
+        "talking_points",
+    ]
+
+
+async def test_run_takes_a_template_and_passes_the_rest_as_arguments() -> None:
+    gateway = _op_gateway()
+    analysis = _RecordingAnalysis()
+    gateway.analysis = cast("Any", analysis)
+
+    await gateway.run_command("#chan", "chanop", "run mytemplate window=48h")
+
+    (call,) = analysis.calls
+    assert call["recipe"] == "prompt:mytemplate"
+    assert call["tokens"] == ["window=48h"]  # the template name is consumed
+
+
+async def test_run_without_a_template_answers_with_the_usage() -> None:
+    gateway = _op_gateway()
+    gateway.analysis = cast("Any", _RecordingAnalysis())
+    assert await gateway.run_command("#chan", "chanop", "run") == REPLY_RUN_USAGE
+
+
+async def test_a_slow_analysis_says_so_before_it_starts() -> None:
+    """A chunked run takes minutes; an IRC channel that sees nothing for
+    that long reads the bot as hung."""
+    gateway = _op_gateway()
+    gateway.analysis = cast("Any", _RecordingAnalysis())
+    said: list[str] = []
+
+    async def say(text: str) -> None:
+        said.append(text)
+
+    reply = await gateway.run_command("#chan", "chanop", "summarize", say)
+
+    assert said == [REPLY_ANALYSING]  # the ack went out mid-run...
+    assert reply == "published"  # ...and the result is still the reply
+
+
+async def test_a_refusal_never_claims_to_be_analysing() -> None:
+    """`on_started` fires only once the run is committed to, so a refused
+    or unparsable command answers at once with no misleading ack."""
+    gateway = _op_gateway()
+
+    class _Refusing(_RecordingAnalysis):
+        async def run_analysis(self, scope: Scope, **kwargs: Any) -> Any:
+            del scope, kwargs
+            return CommandResult("not allowed", ok=False)
+
+    gateway.analysis = cast("Any", _Refusing())
+    said: list[str] = []
+
+    async def say(text: str) -> None:  # pragma: no cover -- must not fire
+        said.append(text)
+
+    assert await gateway.run_command("#chan", "chanop", "summarize", say) == "not allowed"
+    assert said == []
+
+
+async def test_analyses_are_absent_rather_than_broken_without_the_archive() -> None:
+    gateway = _op_gateway()
+    assert gateway.analysis is None
+    assert await gateway.run_command("#chan", "chanop", "summarize") == (REPLY_ANALYSES_OFF_DEPLOY)
+
+
+async def test_the_session_hands_the_gateway_a_way_to_speak_mid_run() -> None:
+    """End to end: the ack reaches the channel as its own PRIVMSG."""
+    gateway, _archive = _gateway()
+    gateway.ops.grant("#chan", "chanop")
+    gateway.analysis = cast("Any", _RecordingAnalysis())
+    session, channel = _session(gateway)
+
+    await _feed(session, ":chanop!u@h PRIVMSG #chan :!summarize")
+
+    payloads = [line.split(" :", 1)[1] for line in channel.sent]
+    assert payloads == [REPLY_ANALYSING, "published"]

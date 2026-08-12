@@ -991,6 +991,7 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
     llm_client: LiftWingClient | None = None
     capture_service: CaptureService | None = None
     masker: IrcAuthorMasker | None = None
+    analysis_service: AnalysisService | None = None
     llm_defaults: LlmSettings | None = None
     collectors: list[tuple[MessageCollector, str]] = []
 
@@ -1053,6 +1054,12 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
             retention_window=timedelta(days=config.capture_retention_days),
         )
         masker = IrcAuthorMasker(key=config.archive_pseudonym_key)
+        analysis_service = AnalysisService(
+            engine=engine,
+            limiter=SlidingWindowLimiter(clock=clock, limit=6, window=timedelta(hours=1)),
+            clock=clock,
+            counters=counters,
+        )
         collectors.append(
             (
                 ActionScheduler(
@@ -1120,6 +1127,7 @@ def build_irc(  # noqa: PLR0915 -- the root enumerates the object graph once
         capture=capture_service,
         masker=masker,
         bridge=bridge,
+        analysis=analysis_service,
     )
 
     async def release_clients() -> None:

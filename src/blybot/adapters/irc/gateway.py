@@ -74,6 +74,7 @@ REPLY_ANALYSING: Final = (
     "Analysing… a large window can take a few minutes. I'll post the result here."
 )
 REPLY_RUN_USAGE: Final = "Usage: run <template> [key=value …]"
+REPLY_SUBSCRIBABLE_USAGE: Final = "Usage: subscribable on | off"
 REPLY_LOG_USAGE: Final = (
     "Usage: log <text> — I publish that text to this channel's wiki page, unattributed. "
     "IRC gives me no way to point at an earlier message, so quote it yourself."
@@ -296,6 +297,23 @@ class IrcGateway:
         template, rest = request.tokens[0], request.tokens[1:]
         return await self._analysis(replace(request, tokens=rest), "run", f"prompt:{template}")
 
+    async def _cmd_setconsent(self, request: Request) -> str:
+        mode = request.tokens[0] if request.tokens else ""
+        result = await self.commands.set_consent(
+            request.scope, is_admin=request.is_admin, mode=mode
+        )
+        return result.text
+
+    async def _cmd_subscribable(self, request: Request) -> str:
+        """Refused here by `durable_dm`, but offered so the refusal is said."""
+        argument = request.tokens[0].casefold() if request.tokens else ""
+        if argument not in {"on", "off"}:
+            return REPLY_SUBSCRIBABLE_USAGE
+        result = await self.commands.set_subscribable(
+            request.scope, is_admin=request.is_admin, enabled=argument == "on"
+        )
+        return result.text
+
     async def _cmd_log(self, request: Request) -> str:
         """Publish the text the requester typed, unattributed.
 
@@ -377,6 +395,8 @@ _DISPATCH: Final[dict[str, _Handler]] = {
     "action": IrcGateway._cmd_action,
     "issue": IrcGateway._cmd_issue,
     "log": IrcGateway._cmd_log,
+    "setconsent": IrcGateway._cmd_setconsent,
+    "subscribable": IrcGateway._cmd_subscribable,
     "repo": IrcGateway._cmd_repo,
     "summarize": IrcGateway._cmd_summarize,
     "stats": IrcGateway._cmd_stats,
@@ -395,6 +415,11 @@ class IrcSession:
     nick: str
     channels: Sequence[str]
     password: str = ""
+    # The realname field, which is where IRC carries "what am I and who
+    # runs me". Libera's bot policy requires a bot be clearly labelled as
+    # one and attributable to its administrator; this is the only place in
+    # the protocol to say it, so it is not cosmetic.
+    realname: str = ""
 
     async def register(self) -> None:
         """Send the opening handshake and join the configured channels."""
@@ -402,7 +427,10 @@ class IrcSession:
         # PASS must precede NICK/USER per RFC 1459 §4.1.1, and the whole
         # handshake is one unit: a relay landing between NICK and USER
         # would be sent before the session is registered.
-        handshake += [f"NICK {self.nick}", f"USER {self.nick} 0 * :{self.nick}"]
+        handshake += [
+            f"NICK {self.nick}",
+            f"USER {self.nick} 0 * :{self.realname or self.nick}",
+        ]
         handshake += [f"JOIN {name}" for name in self.channels]
         await self.channel.send_lines(handshake)
         log_startup()

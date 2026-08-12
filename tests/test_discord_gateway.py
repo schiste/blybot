@@ -655,11 +655,13 @@ def test_build_registers_every_slash_command() -> None:
         "revoke",
         "rule",
         "rules",
+        "setconsent",
         "setpage",
         "setrepo",
         "settings",
         "settoken",
         "stats",
+        "subscribable",
         "subscribe",
         "summarize",
         "talkingpoints",
@@ -1746,3 +1748,42 @@ async def test_a_non_admin_bridge_attempt_is_refused_by_the_service() -> None:
     gateway, _store, _archive, _capture = _capture_gateway()
     reply = await gateway.bridge_command(_CHANNEL, None, is_admin=False, tokens=["new"])
     assert reply == cmd.REPLY_NOT_ADMIN
+
+
+async def test_setconsent_and_subscribable_reach_the_neutral_service() -> None:
+    store = InMemoryProfiles()
+    gateway = _make_gateway(_directory(store), GroupPolicy(allowed=set()))
+
+    assert await gateway.setconsent_command(
+        _CHANNEL, None, is_admin=True, mode="author_only"
+    ) == cmd.REPLY_CONSENT_SET.format(mode="author_only")
+    assert store.profiles[_SCOPE].consent_mode is ConsentMode.AUTHOR_ONLY
+
+    opened = await gateway.subscribable_command(_CHANNEL, None, is_admin=True, enabled=True)
+    assert opened == cmd.REPLY_SUBSCRIBABLE_ON
+    assert store.profiles[_SCOPE].subscribe_code  # minted, not shown: no deep links
+
+
+async def test_subscribable_slash_validates_its_state_argument() -> None:
+    gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
+    client = build_gateway_client(gateway)
+    interaction = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+
+    await _command(client, "subscribable").callback(interaction, "maybe")
+
+    assert interaction.response.sent[0][0] == gw.SUBSCRIBABLE_USAGE
+
+
+async def test_setconsent_slash_answers_privately_but_subscribable_publicly() -> None:
+    """Opening a channel to digests changes who can read it away from the
+    channel, so the channel is the audience — as with /capture."""
+    gateway = _make_gateway(_directory(InMemoryProfiles()), GroupPolicy(allowed=set()))
+    client = build_gateway_client(gateway)
+
+    private = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await _command(client, "setconsent").callback(private, "author_only")
+    assert private.response.sent[0][1] is True  # ephemeral
+
+    public = _admin_interaction(SimpleNamespace(id=_CHANNEL))
+    await _command(client, "subscribable").callback(public, "on")
+    assert public.response.sent[0][1] is False

@@ -53,7 +53,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, **extra: str) -> dict[str, Any]:
     # Build the graph directly rather than through `main()`: the split into
     # build + start (#78) is exactly what lets a caller inspect it without
     # owning an event loop.
-    runtime = entry.build_irc(load_config())
+    runtime = entry.build_irc(load_config(), entry.build_infrastructure(load_config()))
     runtime.start().close()
     seen["release"] = runtime.release
     seen["platform"] = runtime.platform
@@ -353,7 +353,9 @@ def test_run_irc_builds_then_runs_the_graph(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         entry,
         "build_irc",
-        lambda _config: entry.PlatformRuntime(start=fake_start, release=release, platform="irc"),
+        lambda _config, _infra=None: entry.PlatformRuntime(
+            start=fake_start, release=release, platform="irc"
+        ),
     )
     assert entry.main() == 0
     assert (ran, released) == (["started"], [1])
@@ -385,3 +387,20 @@ async def test_a_runtime_with_nothing_to_release_still_unwinds() -> None:
 
     await entry._run_alone(entry.PlatformRuntime(start=start))
     assert ran == ["started"]
+
+
+def test_the_realname_carries_the_operator_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _irc_env(monkeypatch, MAINTAINER="User:Schiste", BOT_NAME="Blybot")
+    assert entry._irc_realname(load_config()) == "Blybot (bot) — admin: User:Schiste"
+
+
+def test_without_a_maintainer_it_still_says_it_is_a_bot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Half the requirement is still better than none — and the operator is
+    told what to set in the runbook."""
+    _irc_env(monkeypatch)
+    monkeypatch.delenv("MAINTAINER", raising=False)
+    assert entry._irc_realname(load_config()) == "Blybot (bot)"

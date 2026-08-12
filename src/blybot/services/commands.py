@@ -79,6 +79,7 @@ from blybot.services.subscriptions import (
     SubscriptionParseError,
     admit_subscription,
     mint_sub_id,
+    mint_subscribe_code,
     parse_subscription,
 )
 
@@ -198,6 +199,15 @@ REPLY_LOG_OFF_DEPLOY: Final = "Publishing isn't enabled on this deployment; ask 
 REPLY_LOG_WIKI_ERROR: Final = "Sorry, publishing failed. The operator can see details in the logs."
 REPLY_SUBS_UNAVAILABLE: Final = "Digest subscriptions aren't available on this deployment."
 REPLY_SUBS_NO_DURABLE_DM: Final = "Digest subscriptions aren't available on this platform."
+REPLY_CONSENT_USAGE: Final = "Usage: setconsent {modes}"
+REPLY_CONSENT_SET: Final = "Consent policy for this scope is now: {mode}."
+REPLY_SUBSCRIBABLE_ON: Final = (
+    "This scope is now open to digest subscriptions. Members can subscribe to receive "
+    "recurring summaries privately."
+)
+REPLY_SUBSCRIBABLE_OFF: Final = (
+    "This scope is closed to digest subscriptions. Existing ones stop being delivered."
+)
 REPLY_SUBS_NOTHING_TO_INHERIT: Final = (
     "This channel has no scheduled summary yet, so there is nothing to send you. Ask an "
     "admin to set one up, or give me your own schedule — e.g. `subscribe weekly@mon.08:00 "
@@ -673,6 +683,53 @@ class CommandService:
             self.counters.increment("log_throttled")
             return REPLY_THROTTLED
         return None
+
+    async def set_consent(self, scope: Scope, *, is_admin: bool, mode: str) -> CommandResult:
+        """Set this scope's consent policy for publishing (admins only).
+
+        Was Telegram-only, and only because it reached past this service
+        into the directory — which is exactly why it never appeared on the
+        other platforms. The policy it sets is enforced neutrally in
+        `_log_decline`, so configuring it belongs here too.
+        """
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        allowed = (ConsentMode.IMMEDIATE.value, ConsentMode.AUTHOR_ONLY.value)
+        if mode not in allowed:
+            return CommandResult(REPLY_CONSENT_USAGE.format(modes=" | ".join(allowed)), ok=False)
+        try:
+            await self.directory.set_consent(scope, ConsentMode(mode))
+        except SelfServiceUnavailableError:
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        self.counters.increment("profiles_configured")
+        log_event("profile_update", "ok")
+        return CommandResult(REPLY_CONSENT_SET.format(mode=mode))
+
+    async def set_subscribable(
+        self, scope: Scope, *, is_admin: bool, enabled: bool
+    ) -> CommandResult:
+        """Open or close this scope to digest subscriptions (admins only).
+
+        Returns the minted code in ``payload`` when enabling: what an
+        adapter *does* with it is platform-shaped — Telegram builds a deep
+        link, Discord has none — but minting and storing it is not.
+        """
+        if not is_admin:
+            return CommandResult(REPLY_NOT_ADMIN, ok=False)
+        if self.capabilities is not None and not self.capabilities.durable_dm:
+            return CommandResult(REPLY_SUBS_NO_DURABLE_DM, ok=False)
+        code = mint_subscribe_code() if enabled else None
+        try:
+            await self.directory.set_subscribe_code(scope, code)
+        except SelfServiceUnavailableError:
+            return CommandResult(REPLY_SELF_SERVICE_OFF, ok=False)
+        except StorageError:
+            return CommandResult(REPLY_STORAGE_DOWN, ok=False)
+        log_event("profile_update", "ok")
+        text = REPLY_SUBSCRIBABLE_ON if enabled else REPLY_SUBSCRIBABLE_OFF
+        return CommandResult(text, payload=code)
 
     async def bridge(self, scope: Scope, *, is_admin: bool, tokens: list[str]) -> CommandResult:
         """Create, join, leave or show this scope's cross-platform bridge.

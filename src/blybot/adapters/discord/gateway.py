@@ -83,6 +83,7 @@ PAT_MODAL_TITLE: Final = "GitHub token"
 PAT_MODAL_LABEL: Final = "Fine-grained PAT (Issues read/write)"
 # The message context-menu entry label (Apps → …).
 LOG_MENU_LABEL: Final = "Log to wiki"
+SUBSCRIBABLE_USAGE: Final = "Usage: /subscribable state:on | state:off"
 REPLY_TRANSCRIBE_UNAVAILABLE: Final = "Private transcription isn't available on this deployment."
 REPLY_TRANSCRIBE_OPENED: Final = (
     "Check your DMs — everything you send me there now publishes to {page} as one "
@@ -389,6 +390,28 @@ class DiscordGateway:
     async def rules_command(self, channel_id: int, thread_id: int | None, *, is_admin: bool) -> str:
         """List this channel's repo-event rules with their ids (server admins only)."""
         result = await self.commands.list_rules(scope_of(channel_id, thread_id), is_admin=is_admin)
+        return result.text
+
+    async def setconsent_command(
+        self, channel_id: int, thread_id: int | None, *, is_admin: bool, mode: str
+    ) -> str:
+        """Set this channel's consent policy for publishing."""
+        result = await self.commands.set_consent(
+            scope_of(channel_id, thread_id), is_admin=is_admin, mode=mode
+        )
+        return result.text
+
+    async def subscribable_command(
+        self, channel_id: int, thread_id: int | None, *, is_admin: bool, enabled: bool
+    ) -> str:
+        """Open or close this channel to digest subscriptions.
+
+        Discord has no deep links, so the minted code is deliberately not
+        shown: a member subscribes with /subscribe in the channel itself.
+        """
+        result = await self.commands.set_subscribable(
+            scope_of(channel_id, thread_id), is_admin=is_admin, enabled=enabled
+        )
         return result.text
 
     async def bridge_command(
@@ -826,6 +849,38 @@ class DiscordGatewayClient(discord.Client):
                 channel_id, thread_id, state, is_admin=_is_admin(interaction.user)
             )
             await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="setconsent", description="Set who may publish a message here (admins)."
+        )
+        @app_commands.guild_only()
+        @app_commands.describe(mode="immediate or author_only")
+        async def setconsent(interaction: discord.Interaction, mode: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            reply = await gateway.setconsent_command(
+                channel_id, thread_id, is_admin=_is_admin(interaction.user), mode=mode
+            )
+            await _respond(interaction, reply)
+
+        @self.tree.command(
+            name="subscribable", description="Let members subscribe to this channel (admins)."
+        )
+        @app_commands.guild_only()
+        @app_commands.describe(state="on or off")
+        async def subscribable(interaction: discord.Interaction, state: str) -> None:
+            channel_id, thread_id = _channel_ids(interaction.channel)
+            if state.lower() not in {"on", "off"}:
+                await _respond(interaction, SUBSCRIBABLE_USAGE)
+                return
+            reply = await gateway.subscribable_command(
+                channel_id,
+                thread_id,
+                is_admin=_is_admin(interaction.user),
+                enabled=state.lower() == "on",
+            )
+            # Public: opening a channel to digests changes who can read it
+            # away from the channel, so the channel is the audience.
+            await _respond(interaction, reply, ephemeral=False)
 
         @self.tree.command(
             name="bridge", description="Bridge this channel to another platform (admins)."

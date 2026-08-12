@@ -314,3 +314,88 @@ def test_a_hand_built_sink_chain_reads_as_the_default_mode() -> None:
     subscription and log pipelines build their own sinks."""
     odd = replace(parse_action("daily@09:00 summarize"), sinks=(StepSpec(name="reply"),))
     assert delivery_of(odd) == "wiki"
+
+
+# --- setconsent / subscribable, now neutral (parity) --------------------------
+
+
+async def test_setconsent_stores_the_policy_and_rejects_anything_else() -> None:
+    store = InMemoryProfiles()
+    service = _service(store=store)
+
+    ok = await service.set_consent(GROUP, is_admin=True, mode="author_only")
+    assert ok.ok is True
+    assert store.profiles[GROUP].consent_mode is ConsentMode.AUTHOR_ONLY
+
+    for bad in ("", "confirm", "whatever"):
+        refused = await service.set_consent(GROUP, is_admin=True, mode=bad)
+        assert refused.ok is False
+        assert "immediate | author_only" in refused.text
+
+
+async def test_setconsent_and_subscribable_are_admin_only() -> None:
+    service = _service()
+    assert (await service.set_consent(GROUP, is_admin=False, mode="immediate")).text == (
+        c.REPLY_NOT_ADMIN
+    )
+    assert (await service.set_subscribable(GROUP, is_admin=False, enabled=True)).text == (
+        c.REPLY_NOT_ADMIN
+    )
+
+
+async def test_subscribable_mints_a_code_and_hands_it_back_for_the_adapter() -> None:
+    """What a platform *does* with the code differs — Telegram builds a deep
+    link, Discord has none — but minting and storing it does not."""
+    store = InMemoryProfiles()
+    service = _service(store=store)
+
+    opened = await service.set_subscribable(GROUP, is_admin=True, enabled=True)
+
+    assert opened.payload
+    assert store.profiles[GROUP].subscribe_code == opened.payload
+
+    closed = await service.set_subscribable(GROUP, is_admin=True, enabled=False)
+    assert closed.payload is None
+    assert store.profiles[GROUP].subscribe_code is None
+
+
+async def test_subscribable_is_refused_without_durable_dms() -> None:
+    service = _service(capabilities=IRC_CAPABILITIES)
+    refused = await service.set_subscribable(GROUP, is_admin=True, enabled=True)
+    assert refused.text == c.REPLY_SUBS_NO_DURABLE_DM
+
+
+async def test_a_storage_outage_is_reported_not_swallowed() -> None:
+    store = InMemoryProfiles()
+    store.fail = True
+    service = _service(store=store)
+    assert (await service.set_consent(GROUP, is_admin=True, mode="immediate")).text == (
+        c.REPLY_STORAGE_DOWN
+    )
+    assert (await service.set_subscribable(GROUP, is_admin=True, enabled=True)).text == (
+        c.REPLY_STORAGE_DOWN
+    )
+
+
+async def test_a_v1_deployment_says_self_service_is_off_rather_than_failing() -> None:
+    """No profile store at all: the commands are unavailable, not broken."""
+    service = CommandService(
+        directory=ChannelDirectory(
+            store=None,
+            default_log_page="Project:Log",
+            default_consent=ConsentMode.IMMEDIATE,
+            default_repo="",
+            page_suffix="logs",
+        ),
+        groups=GroupPolicy(allowed=set()),
+        page_url_for=str,
+        counters=Counters(),
+        capabilities=TELEGRAM_CAPABILITIES,
+    )
+
+    assert (await service.set_consent(GROUP, is_admin=True, mode="immediate")).text == (
+        c.REPLY_SELF_SERVICE_OFF
+    )
+    assert (await service.set_subscribable(GROUP, is_admin=True, enabled=True)).text == (
+        c.REPLY_SELF_SERVICE_OFF
+    )

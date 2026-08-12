@@ -226,7 +226,7 @@ async def test_setconsent_stores_the_policy() -> None:
     context, bot = admin_context(args=["author_only"])
     await handlers.on_setconsent(command("/setconsent author_only"), context)
     assert store.profiles[gscope()].consent_mode is ConsentMode.AUTHOR_ONLY
-    assert tg.sent_texts(bot) == [a.REPLY_CONSENT_SET.format(mode="author_only")]
+    assert tg.sent_texts(bot) == [cmd.REPLY_CONSENT_SET.format(mode="author_only")]
 
 
 async def test_setconsent_rejects_unknown_values_and_confirm() -> None:
@@ -234,7 +234,9 @@ async def test_setconsent_rejects_unknown_values_and_confirm() -> None:
     for bad in ([], ["confirm"], ["maybe"]):
         context, bot = admin_context(args=bad)
         await handlers.on_setconsent(command("/setconsent"), context)
-        assert tg.sent_texts(bot) == [a.REPLY_CONSENT_USAGE]
+        assert tg.sent_texts(bot) == [
+            cmd.REPLY_CONSENT_USAGE.format(modes="immediate | author_only")
+        ]
 
 
 async def test_setconsent_reports_storage_outage() -> None:
@@ -427,7 +429,9 @@ async def test_setconsent_says_group_wide_even_from_a_topic() -> None:
     await handlers.on_setconsent(command_in_topic("/setconsent author_only", 42), context)
     assert store.profiles[gscope()].consent_mode is ConsentMode.AUTHOR_ONLY  # thread 0
     assert gscope(tg.GROUP.id, 42) not in store.profiles
-    assert "group-wide" in tg.sent_texts(bot)[0]
+    # The wording is neutral now; what matters is that a topic-level
+    # /setconsent still writes the group default rather than a topic row.
+    assert tg.sent_texts(bot)[0] == cmd.REPLY_CONSENT_SET.format(mode="author_only")
 
 
 async def test_events_storage_failure_after_repo_check_is_reported() -> None:
@@ -720,7 +724,7 @@ async def test_subscribable_off_clears_the_code() -> None:
     context, bot = admin_context(args=["off"])
     await handlers.on_subscribable(command("/subscribable off"), context)
     assert store.profiles[gscope()].subscribe_code is None
-    assert "OFF" in tg.sent_texts(bot)[0]
+    assert tg.sent_texts(bot)[0] == cmd.REPLY_SUBSCRIBABLE_OFF
 
 
 async def test_subscribable_requires_admin() -> None:

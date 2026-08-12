@@ -24,6 +24,7 @@ from blybot.adapters.irc.gateway import (
     REPLY_HELP,
     REPLY_LOG_USAGE,
     REPLY_RUN_USAGE,
+    REPLY_SUBSCRIBABLE_USAGE,
     IrcGateway,
     IrcSession,
 )
@@ -1040,3 +1041,20 @@ async def test_author_only_consent_refuses_because_authorship_is_unknowable() ->
     reply = await gateway.run_command("#chan", "someone", "log their words")
 
     assert reply == sub.REPLY_LOG_AUTHOR_ONLY
+
+
+async def test_setconsent_and_subscribable_reach_the_neutral_service() -> None:
+    """Both were Telegram-only, and only because they bypassed the service."""
+    gateway = _op_gateway()
+
+    assert await gateway.run_command("#chan", "chanop", "setconsent author_only") == (
+        sub.REPLY_CONSENT_SET.format(mode="author_only")
+    )
+    # Offered here even though durable_dm refuses it, so an admin is *told*
+    # rather than finding a command that simply is not there.
+    assert await gateway.run_command("#chan", "chanop", "subscribable on") == (
+        sub.REPLY_SUBS_NO_DURABLE_DM
+    )
+    assert await gateway.run_command("#chan", "chanop", "subscribable") == (
+        REPLY_SUBSCRIBABLE_USAGE
+    )

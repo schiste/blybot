@@ -22,10 +22,9 @@ from blybot.adapters.telegram._common import (
     send_threaded,
     thread_of,
 )
-from blybot.domain.models import ConsentMode, Scope
+from blybot.domain.models import Scope
 from blybot.domain.ports import StorageError
 from blybot.observability import Counters, log_event
-from blybot.services.subscriptions import mint_subscribe_code
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,8 +46,8 @@ REPLY_SELF_SERVICE_OFF: Final = (
 REPLY_STORAGE_DOWN: Final = "Configuration is temporarily unavailable — please try again later."
 # /setpage's wording now lives in the neutral CommandService (both platforms
 # share it); on_setpage renders whatever CommandResult it returns.
-REPLY_CONSENT_SET: Final = "Consent policy for /log is now: {mode} (group-wide)."
-REPLY_CONSENT_USAGE: Final = "Usage: /setconsent immediate | author_only"
+# /setconsent's wording now lives in the neutral CommandService (every
+# platform shares it); on_setconsent renders whatever it returns.
 # /reset's wording now lives in the neutral CommandService (both platforms
 # share it); on_reset renders whatever CommandResult it returns.
 # /setrepo's binding half now lives in the neutral CommandService; only the
@@ -66,12 +65,10 @@ REPLY_PAT_LINK: Final = (
 REPLY_SUBSCRIBABLE_USAGE: Final = (
     "Usage: /subscribable on | off — let members subscribe to this chat's digest in DM"
 )
-REPLY_SUBSCRIBABLE_ON: Final = (
-    "Digest subscriptions are ON for {scope}. Share this link so members can get "
-    "summaries privately: {link}\n(Digests stay empty until /capture is on here.)"
-)
-REPLY_SUBSCRIBABLE_OFF: Final = (
-    "Digest subscriptions are OFF for {scope}. The old share link no longer works."
+# The toggle's wording is neutral now; only the deep link is Telegram's.
+REPLY_SUBSCRIBABLE_LINK: Final = (
+    "Share this link so members can subscribe privately: {link}\n"
+    "(Digests stay empty until /capture is on here.)"
 )
 # /rule add|remove|clear and /rules wording now lives in the neutral
 # CommandService too, seeded from its shared DEFAULT_RULES starter set.
@@ -198,17 +195,10 @@ class AdminHandlers:
         if scope is None:
             return
         chat_id, thread_id = _target(scope)
-        argument = (context.args or [""])[0]
-        if argument not in {ConsentMode.IMMEDIATE.value, ConsentMode.AUTHOR_ONLY.value}:
-            await self._reply(context, chat_id, thread_id, REPLY_CONSENT_USAGE)
-            return
-        try:
-            await self.directory.set_consent(scope, ConsentMode(argument))
-        except StorageError:
-            await self._reply(context, chat_id, thread_id, REPLY_STORAGE_DOWN)
-            return
-        log_event("profile_update", "ok")
-        await self._reply(context, chat_id, thread_id, REPLY_CONSENT_SET.format(mode=argument))
+        result = await self.commands.set_consent(
+            scope, is_admin=True, mode=(context.args or [""])[0]
+        )
+        await self._reply(context, chat_id, thread_id, result.text)
 
     async def on_setrepo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Bind this group to a GitHub repository and start the token flow."""
@@ -243,18 +233,15 @@ class AdminHandlers:
         if argument not in {"on", "off"}:
             await self._reply(context, chat_id, thread_id, REPLY_SUBSCRIBABLE_USAGE)
             return
-        try:
-            if argument == "on":
-                code = mint_subscribe_code()
-                await self.directory.set_subscribe_code(scope, code)
-                link = f"https://t.me/{context.bot.username}?start=sub_{code}"
-                reply = REPLY_SUBSCRIBABLE_ON.format(scope=_scope(scope), link=link)
-            else:
-                await self.directory.set_subscribe_code(scope, None)
-                reply = REPLY_SUBSCRIBABLE_OFF.format(scope=_scope(scope))
-            log_event("profile_update", "ok")
-        except StorageError:
-            reply = REPLY_STORAGE_DOWN
+        result = await self.commands.set_subscribable(
+            scope, is_admin=True, enabled=argument == "on"
+        )
+        reply = result.text
+        if result.ok and result.payload:
+            # The deep link is Telegram's affordance, so it is appended to
+            # the neutral confirmation rather than living in the service.
+            link = f"https://t.me/{context.bot.username}?start=sub_{result.payload}"
+            reply = f"{reply} {REPLY_SUBSCRIBABLE_LINK.format(link=link)}"
         await self._reply(context, chat_id, thread_id, reply)
 
     async def on_revoke(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

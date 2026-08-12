@@ -33,7 +33,7 @@ from blybot.adapters.irc.ops import ChannelOps
 from blybot.adapters.irc.protocol import IrcLine, privmsg_lines
 from blybot.adapters.irc.scope import scope_of
 from blybot.domain.bridge import RelayMessage
-from blybot.domain.models import CapturedMessage, Scope
+from blybot.domain.models import CapturedMessage, LogContent, Scope
 from blybot.services.health import log_startup
 
 if TYPE_CHECKING:
@@ -74,6 +74,10 @@ REPLY_ANALYSING: Final = (
     "Analysing… a large window can take a few minutes. I'll post the result here."
 )
 REPLY_RUN_USAGE: Final = "Usage: run <template> [key=value …]"
+REPLY_LOG_USAGE: Final = (
+    "Usage: log <text> — I publish that text to this channel's wiki page, unattributed. "
+    "IRC gives me no way to point at an earlier message, so quote it yourself."
+)
 REPLY_HELP: Final = (
     "Commands: capture on|off, setpage <page>, settings, reset, setrepo <owner/repo>, "
     "revoke, llm …, events on|off, rule …, rules, action …, issue <text>, repo. "
@@ -292,6 +296,29 @@ class IrcGateway:
         template, rest = request.tokens[0], request.tokens[1:]
         return await self._analysis(replace(request, tokens=rest), "run", f"prompt:{template}")
 
+    async def _cmd_log(self, request: Request) -> str:
+        """Publish the text the requester typed, unattributed.
+
+        IRC's ``PRIVMSG`` carries no message id and no reply reference, so
+        "log *that* message" has nothing to name. Rather than retain recent
+        channel lines to make one nameable, this publishes what the
+        requester supplies — the bot stores nothing at all.
+
+        The consequence is deliberate and documented: elsewhere ``/log``
+        republishes a message the bot *witnessed*; here it republishes an
+        assertion about what was said. ``is_author`` is therefore False,
+        not because the requester did not write it but because the bot
+        cannot know — which fails closed under ``author_only`` consent,
+        where the whole point is that only the author may publish.
+        """
+        text = " ".join(request.tokens).strip()
+        if not text:
+            return REPLY_LOG_USAGE
+        result = await self.commands.log_message(
+            request.scope, is_author=False, content=LogContent(text=text)
+        )
+        return result.text
+
     async def _cmd_repo(self, request: Request) -> str:
         result = await self.commands.repo_summary(request.scope)
         return result.text
@@ -349,6 +376,7 @@ _DISPATCH: Final[dict[str, _Handler]] = {
     "rules": IrcGateway._cmd_rules,
     "action": IrcGateway._cmd_action,
     "issue": IrcGateway._cmd_issue,
+    "log": IrcGateway._cmd_log,
     "repo": IrcGateway._cmd_repo,
     "summarize": IrcGateway._cmd_summarize,
     "stats": IrcGateway._cmd_stats,

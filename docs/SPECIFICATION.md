@@ -759,6 +759,42 @@ private distribution list is a different data flow from a public page. An
 operator switching a scope into `subs` is changing the terms, and should
 say so in the channel.
 
+### 22.5.2 Manual logging where nothing can be pointed at
+
+`/log` republishes a message the bot **witnessed**: Telegram hands it over
+in `reply_to_message`, Discord through a message context menu. Both
+platforms are the custodian of the message until the moment it is marked,
+so the bot retains nothing.
+
+IRC has no such custodian. `PRIVMSG` carries no message id and no reply
+reference, so "log *that* message" has nothing to name. Two shapes were
+possible:
+
+1. **Retain recent lines** so one can be named later. This preserves the
+   feature exactly — the bot still publishes something it saw — at the
+   cost of passively holding conversation nobody asked it to keep, even
+   bounded and in memory. Rejected: the bot's premise is that it ingests
+   only what is explicitly marked, and a buffer breaks that whatever its
+   size.
+2. **The requester quotes the text.** `log <text>` retains nothing at all.
+
+IRC takes the second. The honest consequence is that the feature *means*
+something different there: elsewhere the bot republishes a witnessed
+message, here it republishes an assertion about what was said. Entries
+are unattributed on every platform, so nobody is misquoted by name, but a
+channel log page carries an implication the bot can no longer stand
+behind.
+
+Two follow-on effects, both fail-closed rather than papered over:
+
+- **`is_author` is unknowable**, so it is False. Under
+  `CONSENT_MODE=author_only` — whose entire purpose is that only a
+  message's author may publish it — IRC refuses `log` outright rather
+  than guessing.
+- **The requester cannot be hidden.** `message_delete=False` means the
+  command stays in the channel. The entry is unattributed; the request is
+  not.
+
 ### 22.6 The cross-platform bridge (issue #76)
 
 A **full mirror**: every message in a bridged channel is relayed to the

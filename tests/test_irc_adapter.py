@@ -22,6 +22,7 @@ from blybot.adapters.irc.gateway import (
     REPLY_ANALYSING,
     REPLY_CAPTURE_USAGE,
     REPLY_HELP,
+    REPLY_LOG_USAGE,
     REPLY_RUN_USAGE,
     IrcGateway,
     IrcSession,
@@ -36,14 +37,23 @@ from blybot.domain.models import (
     GroupProfile,
     OutboundMessage,
     Scope,
+    TimestampGranularity,
 )
 from blybot.domain.ports import TransientTransportError
+from blybot.domain.pseudonym import RandomPseudonymFactory
+from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters
 from blybot.services.capture import CaptureService
 from blybot.services.commands import CommandService
 from blybot.services.directory import ChannelDirectory
+from blybot.services.engine import ActionEngine
 from blybot.services.policy import GroupPolicy, SlidingWindowLimiter
-from tests.fakes import FakeClock, InMemoryArchive, InMemoryProfiles
+from blybot.services.publish import (
+    ChatConfirmSink,
+    LogPublicationService,
+    LogPublishTransform,
+)
+from tests.fakes import FakeClock, FakePublisher, InMemoryArchive, InMemoryProfiles
 
 NOW = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
 
@@ -956,3 +966,77 @@ async def test_the_session_hands_the_gateway_a_way_to_speak_mid_run() -> None:
 
     payloads = [line.split(" :", 1)[1] for line in channel.sent]
     assert payloads == [REPLY_ANALYSING, "published"]
+
+
+# --- manual logging -----------------------------------------------------------
+
+
+def _logging_gateway() -> tuple[IrcGateway, InMemoryProfiles]:
+    """A gateway whose /log pipeline is wired to a fake publisher."""
+    store = InMemoryProfiles(
+        profiles={scope_of("#chan"): GroupProfile(scope=scope_of("#chan"), log_page="Project:Log")}
+    )
+    gateway, _archive = _gateway(store)
+    gateway.ops.grant("#chan", "chanop")
+    publisher = FakePublisher()
+    gateway.commands.engine = ActionEngine(
+        sources={},
+        transforms={
+            "log_publish": LogPublishTransform(
+                service=LogPublicationService(
+                    publisher=publisher,
+                    sanitizer=WikitextSanitizer(),
+                    pseudonyms=RandomPseudonymFactory(),
+                    clock=FakeClock(current=NOW),
+                    target_page="Project:Log",
+                    edit_summary="via test",
+                    timestamp_granularity=TimestampGranularity.DATE,
+                ),
+                page_url_for=lambda title: f"https://wiki/{title}",
+            )
+        },
+        sinks={"chat_confirm": ChatConfirmSink()},
+        counters=Counters(),
+        clock=FakeClock(current=NOW),
+    )
+    return gateway, store
+
+
+async def test_log_publishes_the_text_the_requester_typed() -> None:
+    """IRC gives no way to point at an earlier message, so the text comes
+    from the command itself and the bot retains nothing."""
+    gateway, _store = _logging_gateway()
+
+    reply = await gateway.run_command("#chan", "someone", "log the meeting moved to Thursday")
+
+    assert reply is not None
+    assert "https://wiki/" in reply  # published, with the page url back
+
+
+async def test_log_needs_something_to_publish() -> None:
+    gateway, _store = _logging_gateway()
+    assert await gateway.run_command("#chan", "someone", "log") == REPLY_LOG_USAGE
+    assert await gateway.run_command("#chan", "someone", "log    ") == REPLY_LOG_USAGE
+
+
+async def test_log_is_open_to_anyone_not_just_operators() -> None:
+    """Publishing is the one thing any member may do, everywhere."""
+    gateway, _store = _logging_gateway()
+    reply = await gateway.run_command("#chan", "randomer", "log something worth keeping")
+    assert reply is not None
+    assert "https://wiki/" in reply
+
+
+async def test_author_only_consent_refuses_because_authorship_is_unknowable() -> None:
+    """The bot cannot tell whose words a retyped line is, so it fails closed
+    exactly where the policy says only the author may publish."""
+    gateway, store = _logging_gateway()
+    store.profiles[scope_of("#chan")] = GroupProfile(
+        scope=scope_of("#chan"),
+        log_page="Project:Log",
+        consent_mode=ConsentMode.AUTHOR_ONLY,
+    )
+
+    reply = await gateway.run_command("#chan", "someone", "log their words")
+
+    assert reply == sub.REPLY_LOG_AUTHOR_ONLY

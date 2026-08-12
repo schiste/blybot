@@ -374,3 +374,102 @@ def test_no_capability_is_declared_but_never_consulted() -> None:
     # gained a consumer should be removed from it.
     stale = sorted(name for name in pending_by_design if f".{name}" in consulted)
     assert not stale, f"listed as pending but now consulted: {stale}"
+
+
+# --- command-surface parity ---------------------------------------------------
+
+# A user-facing feature, and the neutral calls that implement it. Several are
+# offered in two shapes — a flat dispatcher for adapters handed raw argv, and
+# individual leaves for adapters with native subcommands — so a feature is
+# satisfied by *any* alternative being fully reached.
+FEATURES: dict[str, tuple[frozenset[str], ...]] = {
+    "capture": (frozenset({"capture"}),),
+    "setpage": (frozenset({"set_page"}),),
+    "settings": (frozenset({"show_settings"}),),
+    "reset": (frozenset({"reset"}),),
+    "setrepo": (frozenset({"set_repo"}),),
+    "settoken": (frozenset({"store_token"}),),
+    "revoke": (frozenset({"revoke_token"}),),
+    "llm": (frozenset({"set_llm"}),),
+    "issue": (frozenset({"file_issue"}),),
+    "repo": (frozenset({"repo_summary"}),),
+    "log": (frozenset({"log_message"}),),
+    "bridge": (frozenset({"bridge"}),),
+    "setconsent": (frozenset({"set_consent"}),),
+    "subscribable": (frozenset({"set_subscribable"}),),
+    "events": (frozenset({"events"}), frozenset({"set_events"})),
+    "rules": (
+        frozenset({"rule", "list_rules"}),
+        frozenset({"add_rule", "remove_rule", "clear_rules", "list_rules"}),
+    ),
+    "actions": (
+        frozenset({"action"}),
+        frozenset({"add_action", "remove_action", "list_actions"}),
+    ),
+    "subscriptions": (frozenset({"subscribe", "unsubscribe", "list_subscriptions"}),),
+}
+
+# Features a platform cannot offer, and the capability that says so. The gate
+# is the *reason*, not a per-platform opinion: a future adapter inherits it.
+FEATURE_REQUIRES: dict[str, str] = {"subscriptions": "durable_dm"}
+# `subscribable` deliberately is NOT gated: IRC offers it so the refusal is
+# something an admin is told, rather than a command that silently is not there.
+
+# Features simply not built yet on a platform whose capabilities would allow
+# them. Every entry is a debt, and closing one must delete its line — the
+# test fails on a stale exemption exactly as it fails on a new gap.
+KNOWN_FEATURE_GAPS: dict[str, set[str]] = {}
+
+
+def _capabilities_of(platform: str) -> PlatformCapabilities:
+    module = importlib.import_module(f"blybot.adapters.{platform}.transport")
+    caps = [value for value in vars(module).values() if isinstance(value, PlatformCapabilities)]
+    return caps[0]
+
+
+def _reached_by(platform: str) -> set[str]:
+    """Every neutral command this adapter calls, found in its own source."""
+    probe = re.compile(r"commands\.([a-z_]+)\(")
+    found: set[str] = set()
+    for path in (ADAPTERS / platform).rglob("*.py"):
+        found.update(probe.findall(path.read_text(encoding="utf-8")))
+    return found
+
+
+def test_every_platform_reaches_every_feature_its_capabilities_allow() -> None:
+    """Command surfaces drift silently; this is what makes them fail the build.
+
+    The neutral service is the single definition of what the bot can do, so
+    "does Discord still offer setconsent?" should be a test rather than a
+    grep. A feature missing where the platform *could* support it is a bug
+    until it is written down in KNOWN_FEATURE_GAPS with a reason.
+    """
+    for platform in platform_packages():
+        capabilities = _capabilities_of(platform)
+        reached = _reached_by(platform)
+        allowed = KNOWN_FEATURE_GAPS.get(platform, set())
+        for feature, alternatives in FEATURES.items():
+            gate = FEATURE_REQUIRES.get(feature)
+            if gate is not None and not getattr(capabilities, gate):
+                continue  # the capability gate refusing, not a gap
+            satisfied = any(alternative <= reached for alternative in alternatives)
+            if feature in allowed:
+                assert not satisfied, (
+                    f"{platform} now offers {feature!r}: remove it from KNOWN_FEATURE_GAPS"
+                )
+                continue
+            assert satisfied, (
+                f"{platform} reaches no complete implementation of {feature!r}; "
+                f"add it, or record it in KNOWN_FEATURE_GAPS with a reason"
+            )
+
+
+def test_no_platform_is_exempted_from_a_feature_it_could_not_offer_anyway() -> None:
+    """A gap listed for a platform the gate already excuses is dead weight."""
+    for platform, gaps in KNOWN_FEATURE_GAPS.items():
+        capabilities = _capabilities_of(platform)
+        for feature in gaps:
+            gate = FEATURE_REQUIRES.get(feature)
+            assert gate is None or getattr(capabilities, gate), (
+                f"{platform}'s {feature!r} exemption is redundant: {gate} already excuses it"
+            )

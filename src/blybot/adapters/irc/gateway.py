@@ -34,6 +34,8 @@ from blybot.adapters.irc.protocol import IrcLine, privmsg_lines
 from blybot.adapters.irc.scope import scope_of
 from blybot.domain.bridge import RelayMessage
 from blybot.domain.models import CapturedMessage, LogContent, Scope
+from blybot.domain.ports import PermanentTransportError
+from blybot.observability import log_event
 from blybot.services.health import log_startup
 
 if TYPE_CHECKING:
@@ -62,6 +64,9 @@ async def _silent(_text: str) -> None:
 
 
 # RFC 1459 numerics the session acts on.
+_RPL_WELCOME: Final = "001"  # registration is complete; JOINs are legal now
+_ERR_NICKNAMEINUSE: Final = "433"
+_MAX_NICK_ATTEMPTS: Final = 3
 _RPL_NAMREPLY: Final = "353"
 # Lines that change who holds authority, or who is present to hold it.
 _MEMBERSHIP_COMMANDS: Final = frozenset({_RPL_NAMREPLY, "MODE", "KICK", "PART", "QUIT", "NICK"})
@@ -420,9 +425,18 @@ class IrcSession:
     # one and attributable to its administrator; this is the only place in
     # the protocol to say it, so it is not cosmetic.
     realname: str = ""
+    _registered: bool = field(default=False, init=False)
+    _nick_attempts: int = field(default=0, init=False)
 
     async def register(self) -> None:
-        """Send the opening handshake and join the configured channels."""
+        """Send the opening handshake — and nothing else.
+
+        Channels are **not** joined here. A JOIN sent before the server has
+        acknowledged registration is dropped or errored by most networks,
+        so joining waits for ``001`` (:data:`_RPL_WELCOME`). Sending them
+        together happened to work against an in-memory pipe, which is
+        exactly the class of bug only a real server reveals.
+        """
         handshake = [f"PASS {self.password}"] if self.password else []
         # PASS must precede NICK/USER per RFC 1459 §4.1.1, and the whole
         # handshake is one unit: a relay landing between NICK and USER
@@ -431,15 +445,46 @@ class IrcSession:
             f"NICK {self.nick}",
             f"USER {self.nick} 0 * :{self.realname or self.nick}",
         ]
-        handshake += [f"JOIN {name}" for name in self.channels]
         await self.channel.send_lines(handshake)
+
+    async def _welcomed(self) -> None:
+        """Registration completed: now the channels can be joined."""
+        self._registered = True
+        if self.channels:
+            await self.channel.send_lines([f"JOIN {name}" for name in self.channels])
         log_startup()
 
-    async def handle(self, line: IrcLine) -> None:
+    async def _nick_taken(self) -> None:
+        """Someone already holds our nick — try a variant, bounded.
+
+        Unhandled, this is the worst kind of failure: the socket stays up
+        and PINGs are answered, so the job looks perfectly healthy while
+        the bot is never registered and does nothing at all.
+        """
+        self._nick_attempts += 1
+        if self._nick_attempts > _MAX_NICK_ATTEMPTS:
+            # Out of variants. Say so loudly: the job runner restarting us
+            # is a better outcome than a healthy-looking silent process.
+            log_event("irc_register", "error", reason="nick_unavailable")
+            msg = f"could not register a nick after {_MAX_NICK_ATTEMPTS} attempts"
+            raise PermanentTransportError(msg)
+        self.nick = f"{self.nick}_"
+        log_event("irc_register", "ignored", reason="nick_in_use")
+        await self.channel.send_lines([f"NICK {self.nick}"])
+
+    async def handle(  # noqa: PLR0911 -- one early return per line kind
+        self, line: IrcLine
+    ) -> None:
         """Dispatch one inbound line."""
         if line.command == "PING":
             # Answering keeps the session alive; missing it gets us killed.
             await self.channel.send_lines((f"PONG :{line.trailing}",))
+            return
+        if line.command == _RPL_WELCOME:
+            await self._welcomed()
+            return
+        if line.command == _ERR_NICKNAMEINUSE:
+            await self._nick_taken()
             return
         if line.command in _MEMBERSHIP_COMMANDS:
             self._track_membership(line)

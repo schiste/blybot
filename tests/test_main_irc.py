@@ -167,7 +167,7 @@ async def test_irc_main_registers_bootstraps_and_closes(
 
     monkeypatch.setattr(ToolsDbStore, "bootstrap", boot_profiles)
     monkeypatch.setattr(ToolsDbArchive, "bootstrap", boot_messages)
-    writer = _dial(monkeypatch, b"PING :srv\r\n")
+    writer = _dial(monkeypatch, b":srv 001 blybot :Welcome\r\nPING :srv\r\n")
 
     await _REAL_IRC_MAIN(seen["config"], seen["gateway"], seen["store"], seen["archive"])
 

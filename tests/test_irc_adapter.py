@@ -40,7 +40,7 @@ from blybot.domain.models import (
     Scope,
     TimestampGranularity,
 )
-from blybot.domain.ports import TransientTransportError
+from blybot.domain.ports import PermanentTransportError, TransientTransportError
 from blybot.domain.pseudonym import RandomPseudonymFactory
 from blybot.domain.sanitizer import WikitextSanitizer
 from blybot.observability import Counters
@@ -340,7 +340,15 @@ async def test_session_registers_joins_and_answers_ping() -> None:
     await session.register()
     assert channel.sent[0] == "PASS s3cret"  # PASS precedes NICK/USER (RFC 1459)
     assert channel.sent[1:3] == ["NICK blybot", "USER blybot 0 * :blybot"]
-    assert channel.sent[3:] == ["JOIN #a", "JOIN #b"]
+    # No JOIN yet: a JOIN before the server acknowledges registration is
+    # dropped or errored by most networks.
+    assert channel.sent[3:] == []
+
+    channel.sent.clear()
+    welcome = parse_line(":srv 001 blybot :Welcome")
+    assert welcome is not None
+    await session.handle(welcome)
+    assert channel.sent == ["JOIN #a", "JOIN #b"]
 
     channel.sent.clear()
     ping = parse_line("PING :srv")
@@ -377,11 +385,13 @@ async def test_session_run_registers_then_dispatches_until_eof() -> None:
     scope = scope_of("#chan")
     store = InMemoryProfiles(profiles={scope: GroupProfile(scope=scope, capture_enabled=True)})
     gateway, archive = _gateway(store)
-    reader, writer = _pipe(b":n!u@h PRIVMSG #chan :one\r\n:n!u@h PRIVMSG #chan :two\r\n")
+    reader, writer = _pipe(
+        b":srv 001 blybot :Welcome\r\n:n!u@h PRIVMSG #chan :one\r\n:n!u@h PRIVMSG #chan :two\r\n"
+    )
     conn = IrcConnection(reader=reader, writer=cast("Any", writer))
     await IrcSession(channel=conn, gateway=gateway, nick="blybot", channels=("#chan",)).run()
     assert [m.text for m in archive.messages] == ["one", "two"]
-    assert b"JOIN #chan\r\n" in writer.written
+    assert b"JOIN #chan\r\n" in writer.written  # joined on 001, not before
 
 
 # --- operator tracking (#21) --------------------------------------------------
@@ -1087,3 +1097,51 @@ async def test_an_unlabelled_bot_falls_back_to_its_nick_not_an_empty_field() -> 
     await session.register()
 
     assert "USER blybot 0 * :blybot" in channel.sent
+
+
+async def test_a_taken_nick_is_retried_with_a_variant() -> None:
+    """Unhandled, this is the worst failure mode available: the socket stays
+    up and PINGs are answered, so the job looks healthy while the bot is
+    never registered and does nothing at all."""
+    channel = _RecordingChannel()
+    gateway, _archive = _gateway()
+    session = IrcSession(
+        channel=cast("Any", channel), gateway=gateway, nick="blybot", channels=("#a",)
+    )
+    await session.register()
+    channel.sent.clear()
+
+    taken = parse_line(":srv 433 * blybot :Nickname is already in use")
+    assert taken is not None
+    await session.handle(taken)
+
+    assert channel.sent == ["NICK blybot_"]
+    assert session.nick == "blybot_"
+
+
+async def test_giving_up_on_a_nick_fails_loudly_rather_than_idling() -> None:
+    """A restart by the job runner beats a healthy-looking silent process."""
+    channel = _RecordingChannel()
+    gateway, _archive = _gateway()
+    session = IrcSession(channel=cast("Any", channel), gateway=gateway, nick="blybot", channels=())
+    taken = parse_line(":srv 433 * blybot :Nickname is already in use")
+    assert taken is not None
+
+    for _ in range(3):
+        await session.handle(taken)
+    with pytest.raises(PermanentTransportError, match="could not register a nick"):
+        await session.handle(taken)
+
+
+async def test_a_channel_less_deployment_joins_nothing_on_welcome() -> None:
+    channel = _RecordingChannel()
+    gateway, _archive = _gateway()
+    session = IrcSession(channel=cast("Any", channel), gateway=gateway, nick="blybot", channels=())
+    await session.register()
+    channel.sent.clear()
+
+    welcome = parse_line(":srv 001 blybot :Welcome")
+    assert welcome is not None
+    await session.handle(welcome)
+
+    assert channel.sent == []  # connected and registered, in no channel
